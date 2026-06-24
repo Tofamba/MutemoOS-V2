@@ -634,12 +634,12 @@ select{cursor:pointer}
           <div class="form-row">
             <div class="form-group">
               <label>Type</label>
-              <select id="cal-type">
+              <select id="cal-type" onchange="toggleCustomEventType(this)">
                 <option value="hearing">Court Hearing</option>
                 <option value="deadline">Deadline</option>
                 <option value="filing">Filing Date</option>
                 <option value="meeting">Client Meeting</option>
-                <option value="other">Other</option>
+                <option value="other">Other (specify below)</option>
               </select>
             </div>
             <div class="form-group">
@@ -649,14 +649,19 @@ select{cursor:pointer}
               </select>
             </div>
           </div>
+          <div class="form-group" id="cal-custom-type-group" style="display:none">
+            <label>Specify event type</label>
+            <input type="text" id="cal-custom-type" placeholder="e.g. Consultation, Taxation of Bill, Pre-trial conference…"/>
+          </div>
           <div class="form-row">
             <div class="form-group">
               <label>Date *</label>
               <input type="date" id="cal-date"/>
             </div>
             <div class="form-group">
-              <label>Time</label>
-              <input type="time" id="cal-time"/>
+              <label>Time (HH:MM)</label>
+              <input type="text" id="cal-time" placeholder="e.g. 09:00 or 14:30" maxlength="5"
+                     oninput="this.value=this.value.replace(/[^0-9:]/g,'')"/>
             </div>
           </div>
           <div class="form-group">
@@ -2337,6 +2342,15 @@ async function addCalendarEvent() {
   const matterId = matterSel.value || null;
   const matterName = matterId ? matterSel.options[matterSel.selectedIndex].text : null;
 
+  // Resolve event type — use custom text if "other" selected
+  const calType = document.getElementById('cal-type').value;
+  const customType = document.getElementById('cal-custom-type').value.trim();
+  const eventType = calType === 'other' && customType ? customType : calType;
+
+  // Validate time format if provided
+  const rawTime = document.getElementById('cal-time').value.trim();
+  const timeVal = /^\d{1,2}:\d{2}$/.test(rawTime) ? rawTime.padStart(5,'0') : null;
+
   try {
     const res = await fetch(`${API}/api/calendar`, {
       method:'POST',
@@ -2345,9 +2359,9 @@ async function addCalendarEvent() {
         title,
         matter_id: matterId,
         matter_name: matterName,
-        event_type: document.getElementById('cal-type').value,
+        event_type: eventType,
         date,
-        time: document.getElementById('cal-time').value || null,
+        time: timeVal,
         court: document.getElementById('cal-court').value.trim() || null,
         notes: document.getElementById('cal-notes').value.trim() || null,
       })
@@ -2358,6 +2372,9 @@ async function addCalendarEvent() {
     document.getElementById('cal-time').value = '';
     document.getElementById('cal-court').value = '';
     document.getElementById('cal-notes').value = '';
+    document.getElementById('cal-custom-type').value = '';
+    document.getElementById('cal-custom-type-group').style.display = 'none';
+    document.getElementById('cal-type').value = 'hearing';
     await renderCalendar();
     showCalStatus('✓ Event added.', 'success');
   } catch(e) { showCalStatus('Could not save event.', 'error'); }
@@ -2366,6 +2383,12 @@ async function addCalendarEvent() {
 async function deleteEvent(id) {
   await fetch(`${API}/api/calendar/${id}`, {method:'DELETE'});
   await renderCalendar();
+}
+
+function toggleCustomEventType(sel) {
+  const group = document.getElementById('cal-custom-type-group');
+  group.style.display = sel.value === 'other' ? 'block' : 'none';
+  if (sel.value !== 'other') document.getElementById('cal-custom-type').value = '';
 }
 
 function showCalStatus(msg, type) {
