@@ -408,6 +408,14 @@ app.add_middleware(
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
 
 @app.middleware("http")
+async def metrics_middleware(request, call_next):
+    start = _time.time()
+    response = await call_next(request)
+    duration = _time.time() - start
+    _request_latencies.append(duration)
+    _request_errors.append(1 if response.status_code >= 500 else 0)
+    return response
+@app.middleware("http")
 async def size_limit_middleware(request, call_next):
     if request.method == "POST":
         content_length = request.headers.get("content-length")
