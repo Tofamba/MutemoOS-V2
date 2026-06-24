@@ -830,6 +830,55 @@ async def reindex_semantic_search(request: Request):
     if zlr_chunks_list:
         await asyncio.to_thread(index_chunks_in_chroma, zlr_chunks_list, "zlr")
     return {"reindexed": len(chunks), "firm": len(firm_chunks), "legal": len(legal_chunks), "zlr": len(zlr_chunks_list)}
+@app.post("/api/admin/reindex-from-db")
+async def reindex_from_db(request: Request):
+    """
+    Rebuild ChromaDB vectors from raw_text stored in PostgreSQL.
+    Use after migration — populates chunks table and ChromaDB from existing DB records.
+    """
+    require_admin_token(request)
+    indexed_zlr = 0
+    all_chunks = []
+
+    async with _db_pool.acquire() as conn:
+        zlr_rows = await conn.fetch(
+            "SELECT id, raw_text, case_name, citation, taxonomy_category FROM zlr_entries WHERE firm_id=$1 AND raw_text IS NOT NULL",
+            FIRM_ID
+        )
+
+    for row in zlr_rows:
+        item_id = str(row["id"])
+        new_chunks = chunk_text(row["raw_text"], 1, item_id, "zlr")
+        for c in new_chunks:
+            c["chunk_source"] = "zlr"
+            c["zlr_item_id"] = item_id
+            c["citation"] = row.get("citation")
+            c["case_name"] = row.get("case_name")
+            c["taxonomy_category"] = row.get("taxonomy_category")
+        all_chunks.extend(new_chunks)
+        indexed_zlr += 1
+
+    if all_chunks:
+        await asyncio.to_thread(index_chunks_in_chroma, all_chunks, "zlr")
+        async with _db_pool.acquire() as conn:
+            for c in all_chunks:
+                await conn.execute("""
+                    INSERT INTO chunks (id, firm_id, document_id, matter_id, chunk_source,
+                                       text, chunk_index, page_number, zlr_item_id, citation,
+                                       case_name, taxonomy_category, created_at)
+                    VALUES ($1,$2,$3,'zlr','zlr',$4,$5,$6,$7,$8,$9,$10,NOW())
+                    ON CONFLICT (id) DO NOTHING
+                """,
+                c["id"], FIRM_ID, _uuid_mod.UUID(c["document_id"]),
+                c["text"], c["chunk_index"], c.get("page_number", 1),
+                c.get("zlr_item_id"), c.get("citation"),
+                c.get("case_name"), c.get("taxonomy_category")
+                )
+
+    return {
+        "zlr_entries_processed": indexed_zlr,
+        "chunks_created": len(all_chunks),
+    }
 
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
