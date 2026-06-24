@@ -3145,17 +3145,31 @@ async def test_reminder(request: Request):
     if not row or not row["recipient_email"]:
         raise HTTPException(status_code=400, detail="No recipient email configured.")
     # Send a test with a dummy upcoming event so the HTML template renders
-    test_events = [{
-        "id": "test", "title": "Test Event — Email Working",
-        "date": datetime.utcnow().date().isoformat(),
-        "time": None, "event_type": "other",
-        "court": None, "matter_name": FIRM_NAME,
-        "notes": None, "days_until": 0,
-    }]
+    today = datetime.utcnow().date()
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM calendar_events
+            WHERE firm_id=$1 AND date >= $2
+            ORDER BY date ASC, time ASC NULLS LAST
+            LIMIT 10
+        """, FIRM_ID, today)
+    test_events = [_row_to_event(r) for r in rows]
+    for e in test_events:
+        try:
+            event_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            e["days_until"] = (event_date - today).days
+        except Exception:
+            e["days_until"] = 99
+    if not test_events:
+        test_events = [{
+            "id": "test", "title": "No events scheduled yet",
+            "date": today.isoformat(), "time": None, "event_type": "other",
+            "court": None, "matter_name": FIRM_NAME, "notes": None, "days_until": 0,
+        }]
     sent = await send_reminder_email(row["recipient_email"], test_events, test=True)
     if not sent:
         raise HTTPException(status_code=500, detail="Failed to send test email.")
-    return {"sent": True, "recipient": row["recipient_email"], "event_count": 1}
+    return {"sent": True, "recipient": row["recipient_email"], "event_count": len(test_events)}
 
 # ── Reminder Scheduler ────────────────────────────────────────────────────────
 
