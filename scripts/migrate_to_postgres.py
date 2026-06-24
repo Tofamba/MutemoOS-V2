@@ -84,13 +84,13 @@ def _parse_date(val):
         return None
 
 def _parse_time(val):
-    """Parse HH:MM string to a time string, or return None."""
+    """Parse HH:MM string to a time object, or return None."""
     if not val:
         return None
     try:
         from datetime import time as dtime
         parts = str(val).strip().split(":")
-        return dtime(int(parts[0]), int(parts[1])).strftime("%H:%M")
+        return dtime(int(parts[0]), int(parts[1]))
     except Exception:
         return None
 
@@ -114,9 +114,15 @@ async def migrate(state_path: str, db_url: str):
 
     matters_db        = state.get("matters_db", {})
     calendar_db       = state.get("calendar_db", [])
-    zlr_db            = state.get("zlr_db", [])
-    legal_updates_db  = state.get("legal_updates_db", [])
+    zlr_db            = state.get("zlr_db", {})
+    legal_updates_db  = state.get("legal_updates_db", {})
     reminder_settings = state.get("reminder_settings", {})
+
+    # Handle both dict and list formats for zlr_db and legal_updates_db
+    if isinstance(zlr_db, dict):
+        zlr_db = list(zlr_db.values())
+    if isinstance(legal_updates_db, dict):
+        legal_updates_db = list(legal_updates_db.values())
 
     print(f"Loaded state:")
     print(f"  Matters:        {len(matters_db)}")
@@ -400,12 +406,11 @@ async def migrate(state_path: str, db_url: str):
         print(f"  Legal updates:  {migrated_lu}")
         print()
         print("  NEXT STEPS:")
-        print("  1. Deploy v2 backend to Railway staging branch")
-        print("  2. Set DATABASE_URL in Railway environment variables")
-        print("  3. Run: POST /api/admin/reindex to rebuild ChromaDB vectors")
+        print("  1. Deploy v2 backend to Railway")
+        print("  2. Run: POST /api/admin/reindex to rebuild ChromaDB vectors")
         print("     (Header: X-Admin-Token: <your token>)")
-        print("  4. Log in via OTP with the partner phone number above")
-        print("  5. Verify matters, calendar, and ZLR entries are visible")
+        print("  3. Log in via OTP with the partner phone number above")
+        print("  4. Verify matters, calendar, and ZLR entries are visible")
         print()
 
     finally:
@@ -420,6 +425,34 @@ if __name__ == "__main__":
         print("ERROR: DATABASE_URL environment variable not set.")
         print("Usage: DATABASE_URL=postgresql://... python3 migrate_to_postgres.py [state_file]")
         sys.exit(1)
+
+    if "--dry-run" in sys.argv:
+        # For dry run, just load and report — don't connect to DB
+        state_path = next((a for a in sys.argv[1:] if not a.startswith("--")), None)
+        if not state_path or not Path(state_path).exists():
+            print(f"ERROR: State file not found: {state_path}")
+            sys.exit(1)
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        matters_db       = state.get("matters_db", {})
+        calendar_db      = state.get("calendar_db", [])
+        zlr_db           = state.get("zlr_db", {})
+        legal_updates_db = state.get("legal_updates_db", {})
+        if isinstance(zlr_db, dict):
+            zlr_db = list(zlr_db.values())
+        if isinstance(legal_updates_db, dict):
+            legal_updates_db = list(legal_updates_db.values())
+        total_notes = sum(len(m.get("progress_notes", [])) for m in matters_db.values())
+        print(f"\n{'='*60}")
+        print("  DRY RUN — no data will be written")
+        print(f"{'='*60}")
+        print(f"  Matters:        {len(matters_db)}")
+        print(f"  Progress notes: {total_notes}")
+        print(f"  Calendar events:{len(calendar_db)}")
+        print(f"  ZLR entries:    {len(zlr_db)}")
+        print(f"  Legal updates:  {len(legal_updates_db)}")
+        print(f"\n  Ready to migrate. Run without --dry-run to proceed.")
+        sys.exit(0)
 
     if not Path(state_file).exists():
         print(f"ERROR: State file not found: {state_file}")
