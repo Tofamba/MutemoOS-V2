@@ -357,6 +357,45 @@ try:
 except Exception as e:
     print(f"[startup] AlertEngine instrumentation unavailable: {e}")
 
+# ── AlertEngine health metrics ─────────────────────────────────────────────────
+import time as _time
+from collections import deque
+
+_request_latencies: deque = deque(maxlen=200)
+_request_errors: deque = deque(maxlen=200)
+
+def _p95_latency() -> float:
+    if not _request_latencies:
+        return 0.0
+    sorted_latencies = sorted(_request_latencies)
+    idx = int(len(sorted_latencies) * 0.95)
+    return round(sorted_latencies[min(idx, len(sorted_latencies) - 1)], 3)
+
+def _error_rate() -> float:
+    if not _request_errors:
+        return 0.0
+    return round(sum(_request_errors) / len(_request_errors), 3)
+
+def _health_score() -> float:
+    latency = _p95_latency()
+    err = _error_rate()
+    score = 100.0
+    if latency > 2.0:
+        score -= min(40, (latency - 2.0) * 10)
+    if err > 0.01:
+        score -= min(60, err * 200)
+    return round(max(0.0, score), 1)
+
+@app.get("/health/alerts")
+async def health_alerts():
+    """AlertEngine health endpoint — real-time API health metrics."""
+    return {
+        "status": "ok",
+        "score": _health_score(),
+        "p95_latency": _p95_latency(),
+        "error_rate": _error_rate(),
+        "timestamp": _time.time(),
+    }
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
