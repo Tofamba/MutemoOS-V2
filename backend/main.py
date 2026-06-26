@@ -671,6 +671,7 @@ def _get_cf_vars():
 
 async def _add_email_to_cloudflare_access(email: str) -> Optional[str]:
     """Add an email to the Cloudflare Access policy. Returns the rule ID or None."""
+    CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID = _get_cf_vars()
     if not all([CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID]):
         print("[invite] Cloudflare vars not set — skipping CF Access update")
         return None
