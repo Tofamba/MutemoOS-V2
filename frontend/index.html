@@ -284,6 +284,7 @@ select{cursor:pointer}
   <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge" id="cal-badge" style="display:none">0</span></button>
   <button class="nav-btn" id="nav-legalupdates" onclick="showTab('legalupdates')">⚖ Legal Updates</button>
   <button class="nav-btn" id="nav-zlr" onclick="showTab('zlr')">📚 Case Law Index</button>
+  <button class="nav-btn" id="nav-users" onclick="showTab('users')" data-role-hide="secretary,associate">👥 Users</button>
 </nav>
 
 <main class="main">
@@ -1259,6 +1260,52 @@ select{cursor:pointer}
 </main>
 </div>
 
+<!-- ── Users Tab ── -->
+<div id="tab-users" style="display:none">
+  <div class="section-head">
+    <h2>👥 Users &amp; Access</h2>
+    <p>Invite lawyers, associates, and interns to Mutemo Desk. Invites are sent by email and access is granted automatically.</p>
+  </div>
+
+  <div class="grid-2">
+    <div>
+      <div class="card">
+        <div class="card-title">✉ Invite New User</div>
+        <div class="form-group">
+          <label>Full Name *</label>
+          <input type="text" id="invite-name" placeholder="e.g. Tendai Moyo"/>
+        </div>
+        <div class="form-group">
+          <label>Email Address *</label>
+          <input type="email" id="invite-email" placeholder="e.g. tmoyo@sawyerandmkushi.co.zw"/>
+        </div>
+        <div class="form-group">
+          <label>Role</label>
+          <select id="invite-role">
+            <option value="associate">Associate (can draft documents)</option>
+            <option value="secretary">Secretary (research &amp; monitoring only)</option>
+            <option value="partner">Partner</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="sendInvite()" style="margin-top:0.5rem">✉ Send Invite</button>
+        <div id="invite-status" style="margin-top:0.75rem;font-size:0.85rem"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="card-title">👥 Current Users</div>
+        <div id="users-list" style="font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+
+      <div class="card" style="margin-top:1rem">
+        <div class="card-title">📬 Pending Invites</div>
+        <div id="invites-list" style="font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const API = '';  // relative — works on localhost and when hosted (frontend served by same app)
 
@@ -1481,6 +1528,7 @@ function showTab(tab) {
   });
   if (tab === 'matters') renderMattersList();
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); }
+  if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'draft') populateDraftPrecedentSelect();
   if (tab === 'zlr') renderZlrTab();
@@ -3258,6 +3306,113 @@ async function submitNoteModal() {
   const author = getCurrentUser() || 'NGM';
   await addNote(_noteMatterId, text, author);
   closeNoteModal();
+}
+
+// ── Users & Invites ───────────────────────────────────────────────────────────
+
+const ROLE_LABELS = {
+  partner: '⚖ Partner',
+  associate: '📝 Associate',
+  secretary: '📋 Secretary',
+  admin: '🔑 Admin',
+};
+
+async function loadUsers() {
+  const el = document.getElementById('users-list');
+  try {
+    const res = await fetch(`${API}/api/users`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load users.</em>'; return; }
+    const users = await res.json();
+    if (!users.length) { el.innerHTML = '<em>No users yet.</em>'; return; }
+    el.innerHTML = users.map(u => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--gold2)">
+        <div>
+          <strong>${u.display_name}</strong>
+          <span style="font-size:0.75rem;color:var(--ink3);margin-left:6px">${u.phone || u.email || ''}</span><br/>
+          <span style="font-size:0.75rem;color:var(--green)">${ROLE_LABELS[u.role] || u.role}</span>
+          ${!u.is_active ? '<span style="font-size:0.7rem;color:var(--red);margin-left:6px">Inactive</span>' : ''}
+        </div>
+        <select style="font-size:0.75rem;padding:2px 6px" onchange="updateUserRole('${u.id}', this.value)">
+          <option value="partner" ${u.role==='partner'?'selected':''}>Partner</option>
+          <option value="associate" ${u.role==='associate'?'selected':''}>Associate</option>
+          <option value="secretary" ${u.role==='secretary'?'selected':''}>Secretary</option>
+          <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+        </select>
+      </div>
+    `).join('');
+  } catch(e) { el.innerHTML = '<em>Error loading users.</em>'; }
+}
+
+async function updateUserRole(userId, newRole) {
+  try {
+    const res = await fetch(`${API}/api/users/${userId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({role: newRole})
+    });
+    if (!res.ok) throw new Error('Failed');
+    showInviteStatus(`✓ Role updated to ${newRole}.`, 'success');
+    loadUsers();
+  } catch(e) { showInviteStatus('Could not update role.', 'error'); }
+}
+
+async function loadInvites() {
+  const el = document.getElementById('invites-list');
+  try {
+    const res = await fetch(`${API}/api/admin/invites`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load invites.</em>'; return; }
+    const invites = await res.json();
+    if (!invites.length) { el.innerHTML = '<em>No pending invites.</em>'; return; }
+    el.innerHTML = invites.map(inv => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--gold2)">
+        <div>
+          <strong>${inv.display_name}</strong><br/>
+          <span style="font-size:0.75rem;color:var(--ink3)">${inv.email}</span>
+          <span style="font-size:0.75rem;color:var(--green);margin-left:6px">${ROLE_LABELS[inv.role] || inv.role}</span><br/>
+          <span style="font-size:0.7rem;color:var(--ink3)">Invited ${inv.sent_at ? inv.sent_at.slice(0,10) : ''}</span>
+          ${inv.accepted_at ? '<span style="font-size:0.7rem;color:var(--green);margin-left:6px">✓ Accepted</span>' : ''}
+        </div>
+        <button class="btn btn-outline" style="font-size:0.75rem;padding:4px 10px" onclick="cancelInvite('${inv.id}')">✕ Cancel</button>
+      </div>
+    `).join('');
+  } catch(e) { el.innerHTML = '<em>Error loading invites.</em>'; }
+}
+
+async function sendInvite() {
+  const name = document.getElementById('invite-name').value.trim();
+  const email = document.getElementById('invite-email').value.trim();
+  const role = document.getElementById('invite-role').value;
+  if (!name || !email) { showInviteStatus('Name and email are required.', 'error'); return; }
+  showInviteStatus('Sending invite…', '');
+  try {
+    const res = await fetch(`${API}/api/admin/invite`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({email, display_name: name, role})
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed');
+    document.getElementById('invite-name').value = '';
+    document.getElementById('invite-email').value = '';
+    const cfMsg = data.cloudflare_updated ? ' Access granted.' : ' (Cloudflare update pending)';
+    const emailMsg = data.email_sent ? ' Welcome email sent.' : ' Email delivery failed.';
+    showInviteStatus(`✓ ${name} invited.${cfMsg}${emailMsg}`, 'success');
+    loadInvites();
+  } catch(e) { showInviteStatus(`Error: ${e.message}`, 'error'); }
+}
+
+async function cancelInvite(inviteId) {
+  if (!confirm('Cancel this invite?')) return;
+  try {
+    await fetch(`${API}/api/admin/invites/${inviteId}`, {method: 'DELETE'});
+    loadInvites();
+  } catch(e) { showInviteStatus('Could not cancel invite.', 'error'); }
+}
+
+function showInviteStatus(msg, type) {
+  const el = document.getElementById('invite-status');
+  el.textContent = msg;
+  el.style.color = type === 'success' ? 'var(--green)' : type === 'error' ? 'var(--red)' : 'var(--ink3)';
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
