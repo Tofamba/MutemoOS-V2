@@ -662,9 +662,12 @@ async def update_user(user_id: str, body: dict, request: Request):
 
 # ── Invites ───────────────────────────────────────────────────────────────────
 
-CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
-CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
-CLOUDFLARE_ACCESS_APP_ID = os.environ.get("CLOUDFLARE_ACCESS_APP_ID")
+def _get_cf_vars():
+    return (
+        os.environ.get("CLOUDFLARE_API_TOKEN"),
+        os.environ.get("CLOUDFLARE_ACCOUNT_ID"),
+        os.environ.get("CLOUDFLARE_ACCESS_APP_ID"),
+    )
 
 async def _add_email_to_cloudflare_access(email: str) -> Optional[str]:
     """Add an email to the Cloudflare Access policy. Returns the rule ID or None."""
