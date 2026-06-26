@@ -258,6 +258,19 @@ async def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_chunks_firm ON chunks(firm_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(firm_id, chunk_source);
+        CREATE TABLE IF NOT EXISTS invites (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            email       TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            role        TEXT NOT NULL DEFAULT 'associate',
+            invited_by  UUID REFERENCES users(id),
+            cf_rule_id  TEXT,
+            sent_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            accepted_at TIMESTAMPTZ,
+            UNIQUE (firm_id, email)
+        );
+        CREATE INDEX IF NOT EXISTS idx_invites_firm ON invites(firm_id);
         """)
 
         # Seed Nyari's firm if not present
@@ -646,6 +659,183 @@ async def update_user(user_id: str, body: dict, request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="User not found")
     return dict(row)
+
+# ── Invites ───────────────────────────────────────────────────────────────────
+
+CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+CLOUDFLARE_ACCESS_APP_ID = os.environ.get("CLOUDFLARE_ACCESS_APP_ID")
+
+async def _add_email_to_cloudflare_access(email: str) -> Optional[str]:
+    """Add an email to the Cloudflare Access policy. Returns the rule ID or None."""
+    if not all([CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID]):
+        print("[invite] Cloudflare vars not set — skipping CF Access update")
+        return None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.get(
+                f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/access/apps/{CLOUDFLARE_ACCESS_APP_ID}/policies",
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+            )
+            resp.raise_for_status()
+            policies = resp.json().get("result", [])
+
+            allow_policy = next((p for p in policies if p.get("decision") == "allow"), None)
+            if not allow_policy:
+                print("[invite] No Allow policy found in Cloudflare Access app")
+                return None
+
+            policy_id = allow_policy["id"]
+            existing_include = allow_policy.get("include", [])
+
+            already_there = any(
+                r.get("email", {}).get("email") == email
+                for r in existing_include
+            )
+            if already_there:
+                print(f"[invite] {email} already in Cloudflare Access policy")
+                return policy_id
+
+            new_include = existing_include + [{"email": {"email": email}}]
+
+            update_resp = await http.put(
+                f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/access/apps/{CLOUDFLARE_ACCESS_APP_ID}/policies/{policy_id}",
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"},
+                json={
+                    "name": allow_policy["name"],
+                    "decision": "allow",
+                    "include": new_include,
+                    "exclude": allow_policy.get("exclude", []),
+                    "require": allow_policy.get("require", []),
+                },
+            )
+            update_resp.raise_for_status()
+            print(f"[invite] Added {email} to Cloudflare Access policy")
+            return policy_id
+
+    except Exception as e:
+        print(f"[invite] Cloudflare Access update failed: {e}")
+        return None
+
+async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
+    """Send welcome invite email via Resend."""
+    try:
+        html = f"""
+        <div style="font-family:Georgia,serif;max-width:560px;margin:0 auto">
+            <div style="background:#1b4d2e;color:white;padding:16px 20px;border-radius:6px 6px 0 0">
+                <strong style="font-size:18px">&#9878; Mutemo Desk</strong><br/>
+                <span style="font-size:13px;opacity:0.8">You have been invited</span>
+            </div>
+            <div style="padding:24px 20px;border:1px solid #d8d3c8;border-top:none;border-radius:0 0 6px 6px">
+                <p>Hi {display_name},</p>
+                <p>{invited_by_name} has invited you to access <strong>Mutemo Desk</strong> — the legal practice management system for {FIRM_NAME}.</p>
+                <p style="margin:24px 0">
+                    <a href="https://mutemo.tofamba.com"
+                       style="background:#1b4d2e;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold">
+                        Access Mutemo Desk
+                    </a>
+                </p>
+                <p style="font-size:13px;color:#666">
+                    When prompted, enter your email address <strong>{email}</strong> to receive a one-time login code.
+                </p>
+                <p style="font-size:13px;color:#666">
+                    If you have any issues accessing the system, contact {invited_by_name}.
+                </p>
+            </div>
+        </div>
+        """
+        text = f"Hi {display_name},\n\n{invited_by_name} has invited you to Mutemo Desk.\n\nAccess it at: https://mutemo.tofamba.com\n\nUse your email {email} to log in.\n\n— Mutemo Desk"
+        await asyncio.to_thread(
+            _send_via_resend_sync,
+            email,
+            f"You've been invited to Mutemo Desk — {FIRM_NAME}",
+            html,
+            text,
+        )
+        return True
+    except Exception as e:
+        print(f"[invite] email send failed: {e}")
+        return False
+
+class InviteRequest(BaseModel):
+    email: str
+    display_name: str
+    role: str = "associate"
+
+@app.post("/api/admin/invite")
+async def invite_user(req: InviteRequest, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "admin:users")
+
+    if req.role not in ("partner", "associate", "secretary", "admin"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    cf_rule_id = await _add_email_to_cloudflare_access(req.email)
+
+    async with _db_pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow("""
+                INSERT INTO invites (firm_id, email, display_name, role, invited_by, cf_rule_id)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (firm_id, email) DO UPDATE SET
+                    display_name=$3, role=$4, sent_at=NOW(), cf_rule_id=$6
+                RETURNING *
+            """,
+            FIRM_ID, req.email, req.display_name, req.role,
+            _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+            str(cf_rule_id) if cf_rule_id else None
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not create invite: {e}")
+
+    invited_by_name = user.get("display_name") or "Your administrator"
+    email_sent = await _send_invite_email(req.email, req.display_name, invited_by_name)
+
+    return {
+        "invited": True,
+        "email": req.email,
+        "display_name": req.display_name,
+        "role": req.role,
+        "cloudflare_updated": cf_rule_id is not None,
+        "email_sent": email_sent,
+    }
+
+@app.get("/api/admin/invites")
+async def list_invites(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "admin:users")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM invites WHERE firm_id=$1 ORDER BY sent_at DESC",
+            FIRM_ID
+        )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["id"] = str(d["id"])
+        d["firm_id"] = str(d["firm_id"])
+        if d.get("invited_by"):
+            d["invited_by"] = str(d["invited_by"])
+        if d.get("sent_at"):
+            d["sent_at"] = d["sent_at"].isoformat()
+        if d.get("accepted_at"):
+            d["accepted_at"] = d["accepted_at"].isoformat()
+        result.append(d)
+    return result
+
+@app.delete("/api/admin/invites/{invite_id}")
+async def cancel_invite(invite_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "admin:users")
+    async with _db_pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM invites WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(invite_id), FIRM_ID
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Invite not found")
+    return {"deleted": True}
 
 # ── Frontend static files ─────────────────────────────────────────────────────
 frontend_path = os.path.join(os.path.dirname(__file__), "../frontend")
