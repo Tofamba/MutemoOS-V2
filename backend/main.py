@@ -775,7 +775,11 @@ async def invite_user(req: InviteRequest, request: Request):
     if req.role not in ("partner", "associate", "secretary", "admin"):
         raise HTTPException(status_code=400, detail="Invalid role")
 
-    cf_rule_id = await _add_email_to_cloudflare_access(req.email)
+    try:
+        cf_rule_id = await _add_email_to_cloudflare_access(req.email)
+    except Exception as e:
+        print(f"[invite] CF access error (non-fatal): {e}")
+        cf_rule_id = None
 
     async with _db_pool.acquire() as conn:
         try:
