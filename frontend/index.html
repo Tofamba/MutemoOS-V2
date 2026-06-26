@@ -1257,53 +1257,53 @@ select{cursor:pointer}
   </div>
 </div>
 
+  <!-- ── Users Tab ── -->
+  <div id="tab-users" style="display:none">
+    <div class="section-head">
+      <h2>👥 Users &amp; Access</h2>
+      <p>Invite lawyers, associates, and interns to Mutemo Desk. Invites are sent by email and access is granted automatically.</p>
+    </div>
+
+    <div class="grid-2">
+      <div>
+        <div class="card">
+          <div class="card-title">✉ Invite New User</div>
+          <div class="form-group">
+            <label>Full Name *</label>
+            <input type="text" id="invite-name" placeholder="e.g. Tendai Moyo"/>
+          </div>
+          <div class="form-group">
+            <label>Email Address *</label>
+            <input type="email" id="invite-email" placeholder="e.g. tmoyo@sawyerandmkushi.co.zw"/>
+          </div>
+          <div class="form-group">
+            <label>Role</label>
+            <select id="invite-role">
+              <option value="associate">Associate (can draft documents)</option>
+              <option value="secretary">Secretary (research &amp; monitoring only)</option>
+              <option value="partner">Partner</option>
+            </select>
+          </div>
+          <button class="btn btn-primary" onclick="sendInvite()" style="margin-top:0.5rem">✉ Send Invite</button>
+          <div id="invite-status" style="margin-top:0.75rem;font-size:0.85rem"></div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="card-title">👥 Current Users</div>
+          <div id="users-list" style="font-size:0.85rem;color:var(--ink3)">Loading…</div>
+        </div>
+
+        <div class="card" style="margin-top:1rem">
+          <div class="card-title">📬 Pending Invites</div>
+          <div id="invites-list" style="font-size:0.85rem;color:var(--ink3)">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 </main>
-</div>
-
-<!-- ── Users Tab ── -->
-<div id="tab-users" style="display:none">
-  <div class="section-head">
-    <h2>👥 Users &amp; Access</h2>
-    <p>Invite lawyers, associates, and interns to Mutemo Desk. Invites are sent by email and access is granted automatically.</p>
-  </div>
-
-  <div class="grid-2">
-    <div>
-      <div class="card">
-        <div class="card-title">✉ Invite New User</div>
-        <div class="form-group">
-          <label>Full Name *</label>
-          <input type="text" id="invite-name" placeholder="e.g. Tendai Moyo"/>
-        </div>
-        <div class="form-group">
-          <label>Email Address *</label>
-          <input type="email" id="invite-email" placeholder="e.g. tmoyo@sawyerandmkushi.co.zw"/>
-        </div>
-        <div class="form-group">
-          <label>Role</label>
-          <select id="invite-role">
-            <option value="associate">Associate (can draft documents)</option>
-            <option value="secretary">Secretary (research &amp; monitoring only)</option>
-            <option value="partner">Partner</option>
-          </select>
-        </div>
-        <button class="btn btn-primary" onclick="sendInvite()" style="margin-top:0.5rem">✉ Send Invite</button>
-        <div id="invite-status" style="margin-top:0.75rem;font-size:0.85rem"></div>
-      </div>
-    </div>
-
-    <div>
-      <div class="card">
-        <div class="card-title">👥 Current Users</div>
-        <div id="users-list" style="font-size:0.85rem;color:var(--ink3)">Loading…</div>
-      </div>
-
-      <div class="card" style="margin-top:1rem">
-        <div class="card-title">📬 Pending Invites</div>
-        <div id="invites-list" style="font-size:0.85rem;color:var(--ink3)">Loading…</div>
-      </div>
-    </div>
-  </div>
 </div>
 
 <script>
