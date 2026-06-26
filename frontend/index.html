@@ -1522,7 +1522,7 @@ function populateMatterSelects() {
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['vault','search','matters','affidavit','calendar','legalupdates','draft','zlr'].forEach(t => {
+  ['vault','search','matters','affidavit','calendar','legalupdates','draft','zlr','users'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
