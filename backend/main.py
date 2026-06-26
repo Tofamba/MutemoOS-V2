@@ -326,7 +326,7 @@ PERMISSIONS = {
     "search":               {"admin", "partner", "associate", "secretary"},
     # Admin
     "admin:settings":       {"admin", "partner"},
-    "admin:users":          {"admin"},
+    "admin:users":          {"admin", "partner"},
     "admin:reindex":        {"admin"},
 }
 
