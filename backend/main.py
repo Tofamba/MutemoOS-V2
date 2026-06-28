@@ -3189,6 +3189,91 @@ JSON:"""}]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Date extraction failed: {e}")
 
+
+@app.post("/api/extract-dates-by-id")
+async def extract_dates_by_document_id(
+    request: Request,
+    document_id: str = Form(...),
+):
+    user = await get_current_user(request)
+    _check_permission(user, "calendar:create")
+
+    # Get document record
+    async with _db_pool.acquire() as conn:
+        doc = await conn.fetchrow(
+            "SELECT * FROM documents WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(document_id), FIRM_ID
+        )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Get chunks for this document
+    async with _db_pool.acquire() as conn:
+        chunk_rows = await conn.fetch(
+            "SELECT text FROM chunks WHERE document_id=$1 ORDER BY chunk_index ASC",
+            _uuid_mod.UUID(document_id)
+        )
+
+    if not chunk_rows:
+        raise HTTPException(status_code=422, detail="No text content found for this document. It may still be processing.")
+
+    text = " ".join(r["text"] for r in chunk_rows)
+    filename = doc["filename"]
+    matter_id = str(doc["matter_id"]) if doc["matter_id"] else None
+
+    # Get matter name
+    matter_name = None
+    if matter_id:
+        async with _db_pool.acquire() as conn:
+            matter = await conn.fetchrow("SELECT name FROM matters WHERE id=$1", doc["matter_id"])
+            if matter:
+                matter_name = matter["name"]
+
+    today = datetime.utcnow().date().isoformat()
+
+    def extract_dates_sync():
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": f"""Extract all legal deadlines, hearing dates, filing dates, and appointments from this document.
+Today is {today}. Focus on specific, actionable dates.
+
+Return ONLY valid JSON:
+{{
+  "dates": [
+    {{
+      "title": "brief description",
+      "date": "YYYY-MM-DD",
+      "time": "HH:MM or null",
+      "event_type": "deadline|hearing|meeting|filing|other",
+      "party": "which party this applies to, or null",
+      "notes": "any additional context"
+    }}
+  ],
+  "document_summary": "one sentence summary of the document"
+}}
+
+Document text:
+{text[:8000]}
+
+JSON:"""}]
+        )
+        raw = msg.content[0].text.strip()
+        raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
+        return json.loads(raw)
+
+    try:
+        parsed = await asyncio.to_thread(extract_dates_sync)
+        dates = parsed.get("dates", [])
+        summary = parsed.get("document_summary", "")
+        for d in dates:
+            d["matter_id"] = matter_id
+            d["matter_name"] = matter_name
+            d["source_document"] = filename
+        return {"dates": dates, "count": len(dates), "document_summary": summary, "filename": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Date extraction failed: {e}")
+
 # ── Email / Reminders ─────────────────────────────────────────────────────────
 
 EVENT_TYPE_LABELS = {
