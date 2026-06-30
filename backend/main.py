@@ -985,6 +985,10 @@ async def accept_invite(invite_id: str, request: Request):
         "organisation_role": invite.get("organisation_role"),
     }
 
+class UpdateInviteRequest(BaseModel):
+    organisation_role: Optional[str] = None
+    role: Optional[str] = None  # firm-level role
+
 @app.patch("/api/admin/invites/{invite_id}")
 async def update_invite(invite_id: str, req: UpdateInviteRequest, request: Request):
     """
@@ -1111,10 +1115,6 @@ class AutoCreateMatterRequest(BaseModel):
 class ReassignRequest(BaseModel):
     to_lawyer_id: str
     reason: Optional[str] = None
-
-class UpdateInviteRequest(BaseModel):
-    organisation_role: Optional[str] = None
-    role: Optional[str] = None  # firm-level role
 
 class FirmApiKeyRequest(BaseModel):
     label: str = "default"
