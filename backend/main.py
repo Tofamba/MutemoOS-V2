@@ -178,9 +178,14 @@ async def run_migrations():
             status          TEXT DEFAULT 'processing',
             ocr_used        BOOLEAN DEFAULT FALSE,
             error_message   TEXT,
-            uploaded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            uploaded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            source_url      TEXT,
+            scraped_at      TIMESTAMPTZ
         );
         CREATE INDEX IF NOT EXISTS idx_legal_updates_firm ON legal_updates(firm_id);
+        -- Migration: add source_url and scraped_at to existing deployments
+        ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS source_url TEXT;
+        ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS scraped_at TIMESTAMPTZ;
 
         CREATE TABLE IF NOT EXISTS zlr_entries (
             id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -271,6 +276,83 @@ async def run_migrations():
             UNIQUE (firm_id, email)
         );
         CREATE INDEX IF NOT EXISTS idx_invites_firm ON invites(firm_id);
+
+        -- ── Legal Corner spec-correct schema additions ─────────────────────────────────
+        -- Branding and feature flags on firms
+        ALTER TABLE firms ADD COLUMN IF NOT EXISTS firm_logo_url TEXT;
+        ALTER TABLE firms ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '[]'::jsonb;
+
+        -- Organisation roles (ops_manager / panel_lawyer) — separate from firm-level role
+        CREATE TABLE IF NOT EXISTS organisation_roles (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role        TEXT NOT NULL CHECK (role IN ('ops_manager', 'panel_lawyer')),
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (firm_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_org_roles_firm ON organisation_roles(firm_id);
+        CREATE INDEX IF NOT EXISTS idx_org_roles_user ON organisation_roles(user_id);
+
+        -- Matter SLA and assignment fields for Legal Corner workflow
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS assigned_lawyer_id UUID REFERENCES users(id);
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS coverage_tier TEXT;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS sla_deadline TIMESTAMPTZ;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS assigned_by_id UUID REFERENCES users(id);
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS service_type TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_matters_external_ref
+            ON matters(firm_id, external_ref) WHERE external_ref IS NOT NULL;
+
+        -- Reassignment audit trail
+        CREATE TABLE IF NOT EXISTS matter_reassignments (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            matter_id           UUID NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+            from_lawyer_id      UUID REFERENCES users(id),
+            to_lawyer_id        UUID NOT NULL REFERENCES users(id),
+            reassigned_by_id    UUID NOT NULL REFERENCES users(id),
+            reason              TEXT,
+            reassigned_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_reassignments_matter ON matter_reassignments(matter_id);
+
+        -- API keys for server-to-server auth (Legal Corner subscriber platform)
+        CREATE TABLE IF NOT EXISTS firm_api_keys (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            key_hash    TEXT NOT NULL,
+            label       TEXT,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            revoked_at  TIMESTAMPTZ,
+            UNIQUE (firm_id, label)
+        );
+
+        -- Read-optimised SLA status view for ops dashboard
+        -- Note: u.full_name falls back to display_name since users table uses display_name
+        CREATE OR REPLACE VIEW v_legal_corner_sla_status AS
+        SELECT
+            m.id AS matter_id,
+            m.firm_id,
+            m.name AS matter_name,
+            m.client_name,
+            m.assigned_lawyer_id,
+            u.display_name AS lawyer_name,
+            m.coverage_tier,
+            m.service_type,
+            m.sla_deadline,
+            m.status,
+            m.external_ref,
+            CASE
+                WHEN m.sla_deadline IS NULL THEN NULL
+                WHEN m.status = 'complete' THEN false
+                WHEN now() > m.sla_deadline THEN true
+                ELSE false
+            END AS is_overdue,
+            (SELECT count(*) FROM matter_reassignments r WHERE r.matter_id = m.id) AS reassignment_count
+        FROM matters m
+        LEFT JOIN users u ON u.id = m.assigned_lawyer_id;
+
+        -- Migrate invites: add organisation_role column (spec-correct name, no FK)
+        ALTER TABLE invites ADD COLUMN IF NOT EXISTS organisation_role TEXT;
         """)
 
         # Seed Nyari's firm if not present
@@ -766,6 +848,7 @@ class InviteRequest(BaseModel):
     email: str
     display_name: str
     role: str = "associate"
+    organisation_role: Optional[str] = None  # ops_manager | panel_lawyer
 
 @app.post("/api/admin/invite")
 async def invite_user(req: InviteRequest, request: Request):
@@ -774,6 +857,9 @@ async def invite_user(req: InviteRequest, request: Request):
 
     if req.role not in ("partner", "associate", "secretary", "admin"):
         raise HTTPException(status_code=400, detail="Invalid role")
+
+    if req.organisation_role and req.organisation_role not in ("ops_manager", "panel_lawyer"):
+        raise HTTPException(status_code=400, detail="Invalid organisation_role")
 
     try:
         cf_rule_id = await _add_email_to_cloudflare_access(req.email)
@@ -784,15 +870,19 @@ async def invite_user(req: InviteRequest, request: Request):
     async with _db_pool.acquire() as conn:
         try:
             row = await conn.fetchrow("""
-                INSERT INTO invites (firm_id, email, display_name, role, invited_by, cf_rule_id)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO invites
+                    (firm_id, email, display_name, role, invited_by, cf_rule_id,
+                     organisation_role)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (firm_id, email) DO UPDATE SET
-                    display_name=$3, role=$4, sent_at=NOW(), cf_rule_id=$6
+                    display_name=$3, role=$4, sent_at=NOW(), cf_rule_id=$6,
+                    organisation_role=$7
                 RETURNING *
             """,
             FIRM_ID, req.email, req.display_name, req.role,
             _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
-            str(cf_rule_id) if cf_rule_id else None
+            str(cf_rule_id) if cf_rule_id else None,
+            req.organisation_role
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Could not create invite: {e}")
@@ -805,6 +895,7 @@ async def invite_user(req: InviteRequest, request: Request):
         "email": req.email,
         "display_name": req.display_name,
         "role": req.role,
+        "organisation_role": req.organisation_role,
         "cloudflare_updated": cf_rule_id is not None,
         "email_sent": email_sent,
     }
@@ -844,6 +935,455 @@ async def cancel_invite(invite_id: str, request: Request):
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Invite not found")
     return {"deleted": True}
+
+@app.patch("/api/invites/{invite_id}/accept")
+async def accept_invite(invite_id: str, request: Request):
+    """
+    Mark an invite as accepted and create the user account.
+    Called by the onboarding flow after OTP verification.
+    The authenticated user's session must already exist (they logged in via OTP).
+    """
+    user = await get_current_user(request)
+
+    try:
+        invite_uuid = _uuid_mod.UUID(invite_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid invite_id")
+
+    async with _db_pool.acquire() as conn:
+        invite = await conn.fetchrow(
+            "SELECT * FROM invites WHERE id=$1 AND firm_id=$2",
+            invite_uuid, FIRM_ID
+        )
+        if not invite:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        if invite["accepted_at"]:
+            return {"already_accepted": True, "accepted_at": invite["accepted_at"].isoformat()}
+
+        # Mark invite as accepted
+        await conn.execute(
+            "UPDATE invites SET accepted_at=NOW() WHERE id=$1",
+            invite_uuid
+        )
+
+        # If invite has an org role, insert into organisation_roles (spec-correct)
+        if invite.get("organisation_role"):
+            user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+            if user_id:
+                await conn.execute("""
+                    INSERT INTO organisation_roles (firm_id, user_id, role)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (firm_id, user_id) DO UPDATE SET role = $3
+                """,
+                FIRM_ID, user_id, invite["organisation_role"]
+                )
+
+    return {
+        "accepted": True,
+        "invite_id": invite_id,
+        "role": invite["role"],
+        "organisation_role": invite.get("organisation_role"),
+    }
+
+@app.patch("/api/admin/invites/{invite_id}")
+async def update_invite(invite_id: str, req: UpdateInviteRequest, request: Request):
+    """
+    Update a pending invite's organisation_role or firm role before it is accepted.
+    Requires admin:users permission.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "admin:users")
+
+    try:
+        invite_uuid = _uuid_mod.UUID(invite_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid invite_id")
+
+    if req.organisation_role and req.organisation_role not in ("ops_manager", "panel_lawyer",
+                                                                "org_admin", "lawyer", "paralegal"):
+        raise HTTPException(status_code=400, detail="Invalid organisation_role")
+    if req.role and req.role not in ("partner", "associate", "secretary", "admin"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+    async with _db_pool.acquire() as conn:
+        invite = await conn.fetchrow(
+            "SELECT * FROM invites WHERE id=$1 AND firm_id=$2",
+            invite_uuid, FIRM_ID
+        )
+        if not invite:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        if invite["accepted_at"]:
+            raise HTTPException(status_code=409, detail="Invite already accepted — cannot modify")
+
+        updates = []
+        params = []
+        param_idx = 1
+        if req.organisation_role is not None:
+            updates.append(f"organisation_role=${param_idx}")
+            params.append(req.organisation_role)
+            param_idx += 1
+        if req.role is not None:
+            updates.append(f"role=${param_idx}")
+            params.append(req.role)
+            param_idx += 1
+
+        if not updates:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        params.append(invite_uuid)
+        await conn.execute(
+            f"UPDATE invites SET {', '.join(updates)} WHERE id=${param_idx}",
+            *params
+        )
+
+        updated = await conn.fetchrow("SELECT * FROM invites WHERE id=$1", invite_uuid)
+
+    d = dict(updated)
+    d["id"] = str(d["id"])
+    d["firm_id"] = str(d["firm_id"])
+    if d.get("invited_by"):
+        d["invited_by"] = str(d["invited_by"])
+    if d.get("sent_at"):
+        d["sent_at"] = d["sent_at"].isoformat()
+    return d
+
+import hashlib
+# ── Legal Corner — spec-correct endpoints ─────────────────────────────────────────────────
+
+from datetime import timezone
+
+# ── API key auth helper (Bearer token, firm_api_keys table) ────────────────────
+async def verify_firm_api_key(request: Request) -> str:
+    """
+    Validate Authorization: Bearer <key> against firm_api_keys table.
+    Returns the firm_id string or raises 401.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed API key")
+    raw_key = auth_header.removeprefix("Bearer ").strip()
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT firm_id FROM firm_api_keys WHERE key_hash=$1 AND revoked_at IS NULL",
+            key_hash
+        )
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    return str(row["firm_id"])
+
+# ── Org role permission helper ───────────────────────────────────────────────
+async def _check_org_role(user: dict, firm_id, required_role: str):
+    """
+    Verify the authenticated user holds the required organisation role.
+    Raises 403 if not.
+    """
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    if not user_id:
+        raise HTTPException(status_code=403, detail="Org role required")
+    if isinstance(firm_id, str):
+        firm_id = _uuid_mod.UUID(firm_id)
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT role FROM organisation_roles WHERE firm_id=$1 AND user_id=$2",
+            firm_id, user_id
+        )
+    if not row or row["role"] != required_role:
+        raise HTTPException(status_code=403, detail=f"{required_role} role required")
+
+# ── SLA deadline calculation ────────────────────────────────────────────────────────
+# PLACEHOLDER: tier-to-hours mapping needs confirming with Legal Corner before go-live
+SLA_HOURS_BY_TIER = {"tier_1": 24, "tier_2": 48, "tier_3": 72, "tier_4": 168}
+
+def calculate_sla_deadline(created_at: datetime, coverage_tier: str) -> datetime:
+    hours = SLA_HOURS_BY_TIER.get(coverage_tier, 48)
+    return created_at + timedelta(hours=hours)
+
+# ── Pydantic models for spec-correct Legal Corner endpoints ─────────────────────
+class AutoCreateMatterRequest(BaseModel):
+    external_ref: str
+    client_name: str
+    assigned_lawyer_id: str
+    coverage_tier: str
+    service_type: str
+    description: Optional[str] = None
+
+class ReassignRequest(BaseModel):
+    to_lawyer_id: str
+    reason: Optional[str] = None
+
+class UpdateInviteRequest(BaseModel):
+    organisation_role: Optional[str] = None
+    role: Optional[str] = None  # firm-level role
+
+class FirmApiKeyRequest(BaseModel):
+    label: str = "default"
+
+# ── POST /api/matters/auto-create — server-to-server, API key auth ──────────────
+@app.post("/api/matters/auto-create", status_code=201)
+async def auto_create_matter(req: AutoCreateMatterRequest, request: Request):
+    """
+    Auto-create a matter from Legal Corner's subscriber platform.
+    Authenticates via Authorization: Bearer <api_key>.
+    Idempotent on external_ref.
+    """
+    firm_id_str = await verify_firm_api_key(request)
+    firm_uuid = _uuid_mod.UUID(firm_id_str)
+
+    async with _db_pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT * FROM matters WHERE firm_id=$1 AND external_ref=$2",
+            firm_uuid, req.external_ref
+        )
+        if existing:
+            return {**_row_to_doc(existing), "created": False,
+                    "message": "Matter already exists for this external_ref"}
+
+        # Verify assigned lawyer is a panel_lawyer in this firm
+        try:
+            lawyer_uuid = _uuid_mod.UUID(req.assigned_lawyer_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid assigned_lawyer_id")
+
+        lawyer_check = await conn.fetchrow(
+            "SELECT role FROM organisation_roles WHERE firm_id=$1 AND user_id=$2",
+            firm_uuid, lawyer_uuid
+        )
+        if not lawyer_check or lawyer_check["role"] != "panel_lawyer":
+            raise HTTPException(status_code=422,
+                detail="assigned_lawyer_id is not a panel_lawyer in this firm")
+
+        created_at = datetime.now(timezone.utc)
+        sla_deadline = calculate_sla_deadline(created_at, req.coverage_tier)
+        matter_id = _uuid_mod.uuid4()
+
+        row = await conn.fetchrow("""
+            INSERT INTO matters (
+                id, firm_id, name, client_name, status,
+                assigned_lawyer_id, coverage_tier, service_type,
+                sla_deadline, external_ref, created_at
+            )
+            VALUES ($1,$2,$3,$4,'Active',$5,$6,$7,$8,$9,$10)
+            RETURNING *
+        """,
+        matter_id, firm_uuid,
+        f"{req.client_name} — {req.service_type}", req.client_name,
+        lawyer_uuid, req.coverage_tier,
+        req.service_type, sla_deadline, req.external_ref, created_at
+        )
+
+    return {**_row_to_doc(row), "created": True}
+
+# ── POST /api/matters/{matter_id}/reassign — ops_manager only ──────────────────
+@app.post("/api/matters/{matter_id}/reassign")
+async def reassign_matter_spec(matter_id: str, req: ReassignRequest, request: Request):
+    """
+    Reassign a matter to a different panel lawyer.
+    Requires ops_manager organisation role.
+    Records full audit trail in matter_reassignments.
+    """
+    user = await get_current_user(request)
+
+    try:
+        matter_uuid = _uuid_mod.UUID(matter_id)
+        to_lawyer_uuid = _uuid_mod.UUID(req.to_lawyer_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID")
+
+    async with _db_pool.acquire() as conn:
+        matter = await conn.fetchrow(
+            "SELECT * FROM matters WHERE id=$1 AND firm_id=$2",
+            matter_uuid, FIRM_ID
+        )
+        if not matter:
+            raise HTTPException(status_code=404, detail="Matter not found")
+
+        await _check_org_role(user, matter["firm_id"], "ops_manager")
+
+        user_id = _uuid_mod.UUID(str(user["id"]))
+
+        # Record audit trail
+        await conn.execute("""
+            INSERT INTO matter_reassignments
+                (matter_id, from_lawyer_id, to_lawyer_id, reassigned_by_id, reason)
+            VALUES ($1, $2, $3, $4, $5)
+        """,
+        matter_uuid, matter.get("assigned_lawyer_id"),
+        to_lawyer_uuid, user_id, req.reason
+        )
+
+        # Update matter
+        await conn.execute(
+            "UPDATE matters SET assigned_lawyer_id=$1, assigned_by_id=$2 WHERE id=$3",
+            to_lawyer_uuid, user_id, matter_uuid
+        )
+
+    return {
+        "status": "reassigned",
+        "matter_id": matter_id,
+        "to_lawyer_id": req.to_lawyer_id,
+    }
+
+# ── GET /api/organisations/{firm_id}/lawyers — list panel lawyers ───────────────
+@app.get("/api/organisations/{firm_id}/lawyers")
+async def list_org_lawyers(firm_id: str, request: Request):
+    """
+    List panel lawyers for a firm.
+    Accepts session auth (ops_manager) or API key auth (matching firm_id).
+    """
+    try:
+        firm_uuid = _uuid_mod.UUID(firm_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid firm_id")
+
+    # Try session auth first, then API key
+    try:
+        user = await get_current_user(request)
+        await _check_org_role(user, firm_uuid, "ops_manager")
+    except HTTPException:
+        api_firm_id = await verify_firm_api_key(request)
+        if api_firm_id != firm_id:
+            raise HTTPException(status_code=403, detail="API key does not match firm_id")
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT u.id, u.display_name, u.phone
+            FROM users u
+            JOIN organisation_roles o ON o.user_id = u.id
+            WHERE o.firm_id = $1 AND o.role = 'panel_lawyer'
+            ORDER BY u.display_name
+        """, firm_uuid)
+
+    return {"lawyers": [{"id": str(r["id"]), "display_name": r["display_name"],
+                         "phone": r["phone"]} for r in rows]}
+
+# ── GET /api/organisations/{firm_id}/matters — ops manager SLA view ────────────
+@app.get("/api/organisations/{firm_id}/matters")
+async def list_org_matters(firm_id: str, request: Request):
+    """List all matters with SLA status. Requires ops_manager role."""
+    try:
+        firm_uuid = _uuid_mod.UUID(firm_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid firm_id")
+
+    user = await get_current_user(request)
+    await _check_org_role(user, firm_uuid, "ops_manager")
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM v_legal_corner_sla_status
+            WHERE firm_id = $1
+            ORDER BY sla_deadline ASC NULLS LAST
+        """, firm_uuid)
+
+    result = []
+    for r in rows:
+        d = dict(r)
+        for k, v in d.items():
+            if hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+            elif isinstance(v, _uuid_mod.UUID):
+                d[k] = str(v)
+        result.append(d)
+    return {"matters": result}
+
+# ── GET /api/organisations/{firm_id}/dashboard — ops dashboard stats ───────────
+@app.get("/api/organisations/{firm_id}/dashboard")
+async def org_dashboard_spec(firm_id: str, request: Request):
+    """Return SLA dashboard stats. Requires ops_manager role."""
+    try:
+        firm_uuid = _uuid_mod.UUID(firm_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid firm_id")
+
+    user = await get_current_user(request)
+    await _check_org_role(user, firm_uuid, "ops_manager")
+
+    async with _db_pool.acquire() as conn:
+        stats = await conn.fetchrow("""
+            SELECT
+                count(*) FILTER (WHERE status != 'complete') AS active_matters,
+                count(*) FILTER (WHERE is_overdue = true) AS overdue_matters,
+                count(DISTINCT assigned_lawyer_id) AS active_lawyers,
+                count(*) FILTER (WHERE reassignment_count > 0) AS reassigned_matters
+            FROM v_legal_corner_sla_status
+            WHERE firm_id = $1
+        """, firm_uuid)
+
+    return {
+        "firm_id": firm_id,
+        "active_matters": stats["active_matters"],
+        "overdue_matters": stats["overdue_matters"],
+        "active_lawyers": stats["active_lawyers"],
+        "reassigned_matters": stats["reassigned_matters"],
+    }
+
+# ── POST /api/admin/firm-api-keys — generate a firm API key ─────────────────────
+@app.post("/api/admin/firm-api-keys", status_code=201)
+async def create_firm_api_key(req: FirmApiKeyRequest, request: Request):
+    """Generate a new API key for server-to-server auth. Requires admin:users permission."""
+    user = await get_current_user(request)
+    _check_permission(user, "admin:users")
+
+    raw_key = f"fk_{secrets.token_urlsafe(32)}"
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    async with _db_pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow("""
+                INSERT INTO firm_api_keys (firm_id, key_hash, label)
+                VALUES ($1, $2, $3) RETURNING id, label, created_at
+            """, FIRM_ID, key_hash, req.label)
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="A key with this label already exists")
+
+    return {
+        "id": str(row["id"]),
+        "label": row["label"],
+        "api_key": raw_key,  # shown once — store securely
+        "created_at": row["created_at"].isoformat(),
+        "note": "Store this key securely. It will not be shown again.",
+    }
+
+# ── GET /api/auth/profile — return user profile including org role ───────────────
+@app.get("/api/auth/profile")
+async def get_user_profile(request: Request):
+    """
+    Return the current user's profile including firm role and organisation role.
+    Used by the frontend on login to determine which UI features to show.
+    """
+    user = await get_current_user(request)
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+
+    org_role = None
+    firm_features = []
+    firm_logo_url = None
+
+    async with _db_pool.acquire() as conn:
+        if user_id:
+            org_row = await conn.fetchrow(
+                "SELECT role FROM organisation_roles WHERE firm_id=$1 AND user_id=$2",
+                FIRM_ID, user_id
+            )
+            org_role = org_row["role"] if org_row else None
+
+        firm_row = await conn.fetchrow(
+            "SELECT features, firm_logo_url FROM firms WHERE id=$1", FIRM_ID
+        )
+        if firm_row:
+            firm_features = firm_row["features"] or []
+            firm_logo_url = firm_row["firm_logo_url"]
+
+    return {
+        "id": str(user["id"]),
+        "display_name": user.get("display_name"),
+        "role": user.get("role"),
+        "org_role": org_role,
+        "firm_id": str(FIRM_ID),
+        "firm_name": FIRM_NAME,
+        "firm_logo_url": firm_logo_url,
+        "features": firm_features,
+    }
 
 # ── Frontend static files ─────────────────────────────────────────────────────
 frontend_path = os.path.join(os.path.dirname(__file__), "../frontend")
@@ -1789,6 +2329,8 @@ async def upload_legal_update(
     source_type: str = Form(...),
     source_name: str = Form(""),
     reference: str = Form(""),
+    source_url: str = Form(""),
+    scraped_at: str = Form(""),
     request: Request = None,
 ):
     if request:
@@ -1800,12 +2342,23 @@ async def upload_legal_update(
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "bin"
     item_id = str(_uuid_mod.uuid4())
 
+    # Parse scraped_at timestamp if provided by the feed service
+    scraped_at_ts = None
+    if scraped_at:
+        try:
+            scraped_at_ts = datetime.fromisoformat(scraped_at.replace("Z", "+00:00"))
+        except ValueError:
+            scraped_at_ts = None
+
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO legal_updates (id, firm_id, filename, source_type, source_name, reference, status, uploaded_at)
-            VALUES ($1,$2,$3,$4,$5,$6,'processing',NOW()) RETURNING *
+            INSERT INTO legal_updates
+                (id, firm_id, filename, source_type, source_name, reference,
+                 source_url, scraped_at, status, uploaded_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'processing',NOW()) RETURNING *
         """,
-        _uuid_mod.UUID(item_id), FIRM_ID, filename, source_type, source_name, reference
+        _uuid_mod.UUID(item_id), FIRM_ID, filename, source_type, source_name, reference,
+        source_url or None, scraped_at_ts
         )
 
     background_tasks.add_task(
