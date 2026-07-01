@@ -3288,7 +3288,12 @@ async def search_documents(req: SearchRequest, request: Request):
     results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
     legal_results = []
     if req.include_legal_updates:
-        legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
+        # Use cleaned query for ChromaDB retrieval — strips verbatim intent words
+        # so "quote section 44 of the Marriages Act" searches for
+        # "section 44 of the Marriages Act" in the vector store
+        search_query = clean_query_for_search(req.query) if is_verbatim_request(req.query) else req.query
+        search_req = req.model_copy(update={"query": search_query})
+        legal_results = await asyncio.to_thread(_semantic_search_legal, search_req, legal_chunks)
 
     zlr_results = []
     if zlr_chunks_list:
@@ -3407,10 +3412,30 @@ VERBATIM_TRIGGERS = [
     "full text of section", "text of section",
 ]
 
+VERBATIM_STRIP = [
+    "quote ", "verbatim ", "exact wording of ", "exact text of ",
+    "exact words of ", "word for word ", "what does section ",
+    "what does the act say about ", "what does the law say about ",
+    "reproduce ", "full text of section ", "text of section ",
+    "copy of section ", "give me section ", "show me section ",
+    "what is section ", "please quote ",
+]
+
 def is_verbatim_request(query: str) -> bool:
     """Return True if the query is asking for exact section text rather than a summary."""
     q = query.lower()
     return any(t in q for t in VERBATIM_TRIGGERS)
+
+
+def clean_query_for_search(query: str) -> str:
+    """Strip verbatim intent words so ChromaDB searches for the content, not the intent.
+    e.g. 'quote section 44 of the Marriages Act' → 'section 44 of the Marriages Act'
+    """
+    q = query.lower().strip()
+    for strip in VERBATIM_STRIP:
+        q = q.replace(strip, "")
+    # Clean up leading/trailing whitespace and punctuation
+    return q.strip().strip("\"'")
 
 
 def synthesise_answer_sync(query: str, results: list, legal_results: list) -> str:
