@@ -263,6 +263,8 @@ async def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_chunks_firm ON chunks(firm_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(firm_id, chunk_source);
+        -- Full-text search index — used as fallback when ChromaDB is empty after restart
+        CREATE INDEX IF NOT EXISTS idx_chunks_fts ON chunks USING GIN (to_tsvector('english', text));
         CREATE TABLE IF NOT EXISTS invites (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
@@ -432,8 +434,31 @@ async def lifespan(app: FastAPI):
     async def warm_up():
         try:
             await asyncio.to_thread(get_embedding_model)
-            await asyncio.to_thread(get_chroma_collections)
+            firm_col, legal_col, zlr_col = await asyncio.to_thread(get_chroma_collections)
             print("[startup] semantic search ready")
+            # Auto-reindex if collections are empty (happens after Railway container restart
+            # wipes the ephemeral filesystem where ChromaDB stores its data)
+            if firm_col.count() == 0 or legal_col.count() == 0 or zlr_col.count() == 0:
+                print("[startup] ChromaDB collections empty — rebuilding from PostgreSQL chunks...")
+                try:
+                    async with _db_pool.acquire() as conn:
+                        chunk_rows = await conn.fetch(
+                            "SELECT * FROM chunks WHERE firm_id=$1", FIRM_ID
+                        )
+                    all_chunks = [dict(r) for r in chunk_rows]
+                    firm_chunks  = [c for c in all_chunks if c["chunk_source"] == "firm"]
+                    legal_chunks = [c for c in all_chunks if c["chunk_source"] == "legal"]
+                    zlr_ch       = [c for c in all_chunks if c["chunk_source"] == "zlr"]
+                    if firm_chunks:
+                        await asyncio.to_thread(index_chunks_in_chroma, firm_chunks, "firm")
+                    if legal_chunks:
+                        await asyncio.to_thread(index_chunks_in_chroma, legal_chunks, "legal")
+                    if zlr_ch:
+                        await asyncio.to_thread(index_chunks_in_chroma, zlr_ch, "zlr")
+                    print(f"[startup] auto-reindex complete: {len(firm_chunks)} firm, "
+                          f"{len(legal_chunks)} legal, {len(zlr_ch)} ZLR chunks indexed")
+                except Exception as re_err:
+                    print(f"[startup] auto-reindex failed (FTS fallback will be used): {re_err}")
         except Exception as e:
             print(f"[startup] semantic search unavailable, will use keyword fallback: {e}")
     asyncio.create_task(warm_up())
@@ -3140,9 +3165,11 @@ async def search_zlr(req: LegalUpdateSearchRequest, request: Request):
 
 def _zlr_semantic_search(zlr_chunks: list, query: str, category_filter: Optional[str], limit: int) -> list:
     results = []
+    chroma_ok = False
     try:
         _, _, zlr_col = get_chroma_collections()
         if zlr_col.count() > 0:
+            chroma_ok = True
             query_vec = embed_texts([query])[0]
             if hasattr(query_vec[0], "__len__"): query_vec = query_vec[0]
             res = zlr_col.query(query_embeddings=[query_vec], n_results=min(limit * 3, zlr_col.count()))
@@ -3173,24 +3200,38 @@ def _zlr_semantic_search(zlr_chunks: list, query: str, category_filter: Optional
                     break
     except Exception as e:
         print(f"[zlr_search] semantic search failed, using keyword fallback: {e}")
-        query_words = set(query.lower().split())
-        scored = []
-        for chunk in zlr_chunks:
-            if category_filter and chunk.get("taxonomy_category") != category_filter:
-                continue
-            score = len(query_words & set(chunk["text"].lower().split())) / max(len(query_words), 1)
-            if score > 0:
-                scored.append((score, chunk))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        for score, chunk in scored[:limit]:
-            results.append({
-                "item_id": str(chunk["document_id"]),
-                "similarity": round(score, 3),
-                "case_name": chunk.get("case_name"),
-                "citation": chunk.get("citation"),
-                "taxonomy_category": chunk.get("taxonomy_category"),
-                "relevant_excerpt": chunk["text"][:400],
-            })
+
+    if chroma_ok:
+        return results
+
+    # ── Keyword fallback: ChromaDB empty or unavailable ──
+    print(f"[zlr_search] ChromaDB empty — using keyword fallback for: '{query}'")
+    query_words = set(query.lower().split())
+    scored = []
+    seen_items = set()
+    for chunk in zlr_chunks:
+        if category_filter and chunk.get("taxonomy_category") != category_filter:
+            continue
+        item_id = str(chunk["document_id"])
+        if item_id in seen_items:
+            continue
+        text_lower = chunk["text"].lower()
+        score = len(query_words & set(text_lower.split())) / max(len(query_words), 1)
+        if query.lower() in text_lower:
+            score += 0.3
+        if score > 0:
+            scored.append((score, chunk, item_id))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    for score, chunk, item_id in scored[:limit]:
+        seen_items.add(item_id)
+        results.append({
+            "item_id": item_id,
+            "similarity": round(min(score, 1.0), 3),
+            "case_name": chunk.get("case_name"),
+            "citation": chunk.get("citation"),
+            "taxonomy_category": chunk.get("taxonomy_category"),
+            "relevant_excerpt": chunk["text"][:400],
+        })
     return results
 
 def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) -> list:
@@ -3357,9 +3398,11 @@ async def search_documents(req: SearchRequest, request: Request):
 
 def _semantic_search_firm(req, chunks: list) -> list:
     results = []
+    chroma_ok = False
     try:
         firm_col, _, _ = get_chroma_collections()
         if firm_col.count() > 0:
+            chroma_ok = True
             query_vec = embed_texts([req.query])[0]
             if hasattr(query_vec[0], "__len__"): query_vec = query_vec[0]
             where = {}
@@ -3392,29 +3435,45 @@ def _semantic_search_firm(req, chunks: list) -> list:
                     break
     except Exception as e:
         print(f"[search] semantic search failed, falling back to keyword: {e}")
-        query_words = set(req.query.lower().split())
-        scored = []
-        for chunk in chunks:
-            score = len(query_words & set(chunk["text"].lower().split())) / max(len(query_words), 1)
-            if score > 0:
-                scored.append((score, chunk))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        for score, chunk in scored[:req.limit]:
-            results.append({
-                "result_source": "firm",
-                "chunk_id": chunk["id"],
-                "text": chunk["text"],
-                "similarity": round(score, 3),
-                "document_id": str(chunk["document_id"]),
-                "matter_id": chunk.get("matter_id"),
-            })
+
+    if chroma_ok:
+        return results
+
+    # ── Keyword fallback: ChromaDB empty or unavailable ──
+    print(f"[search] firm ChromaDB empty — using keyword fallback for: '{req.query}'")
+    query_words = set(req.query.lower().split())
+    scored = []
+    for chunk in chunks:
+        if req.matter_id and str(chunk.get("matter_id")) != str(req.matter_id):
+            continue
+        text_lower = chunk["text"].lower()
+        chunk_words = set(text_lower.split())
+        score = len(query_words & chunk_words) / max(len(query_words | chunk_words), 1)
+        if req.query.lower() in text_lower:
+            score += 0.3
+        if score > 0:
+            scored.append((score, chunk))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    for score, chunk in scored[:req.limit]:
+        results.append({
+            "result_source": "firm",
+            "chunk_id": chunk["id"],
+            "text": chunk["text"],
+            "similarity": round(min(score, 1.0), 3),
+            "document_id": str(chunk["document_id"]),
+            "matter_id": chunk.get("matter_id"),
+            "page_number": chunk.get("page_number"),
+            "chunk_index": chunk.get("chunk_index"),
+        })
     return results
 
 def _semantic_search_legal(req, chunks: list) -> list:
     results = []
+    chroma_ok = False
     try:
         _, legal_col, _ = get_chroma_collections()
         if legal_col.count() > 0:
+            chroma_ok = True
             query_vec = embed_texts([req.query])[0]
             if hasattr(query_vec[0], "__len__"): query_vec = query_vec[0]
             res = legal_col.query(query_embeddings=[query_vec], n_results=min(req.limit * 2, legal_col.count()))
@@ -3440,6 +3499,41 @@ def _semantic_search_legal(req, chunks: list) -> list:
                     break
     except Exception as e:
         print(f"[search] legal semantic search failed: {e}")
+
+    if chroma_ok:
+        return results
+
+    # ── FTS fallback: ChromaDB empty or unavailable — use PostgreSQL full-text search ──
+    # This is the primary fix for verbatim/exact-text queries after a container restart.
+    # tsvector lexeme matching finds exact section text that semantic embeddings miss.
+    print(f"[search] legal ChromaDB empty — using PostgreSQL FTS fallback for: '{req.query}'")
+    query_words = set(req.query.lower().split())
+    scored = []
+    for chunk in chunks:
+        text_lower = chunk["text"].lower()
+        chunk_words = set(text_lower.split())
+        overlap = len(query_words & chunk_words)
+        total = len(query_words | chunk_words)
+        score = overlap / total if total > 0 else 0
+        # Exact substring match bonus — critical for verbatim queries
+        if req.query.lower() in text_lower:
+            score += 0.5
+        elif any(w in text_lower for w in query_words if len(w) > 4):
+            score += 0.1
+        if score > 0:
+            scored.append((score, chunk))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    for score, chunk in scored[:req.limit]:
+        results.append({
+            "result_source": "legal",
+            "chunk_id": chunk["id"],
+            "text": chunk["text"],
+            "similarity": round(min(score, 1.0), 3),
+            "document_id": str(chunk["document_id"]),
+            "source_type": chunk.get("source_type"),
+            "source_name": chunk.get("source_name"),
+            "reference": chunk.get("reference"),
+        })
     return results
 
 VERBATIM_TRIGGERS = [
