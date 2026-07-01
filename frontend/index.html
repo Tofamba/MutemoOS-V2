@@ -398,13 +398,13 @@ select{cursor:pointer}
 <div id="tab-search">
   <div class="section-head">
     <h2>🔍 Search Vault</h2>
-    <p>Ask in plain English. Mutemo Desk searches your entire document history and synthesises an answer.</p>
+    <p>Ask in plain English. Mutemo Desk searches your entire document history and synthesises an answer. For legislation, search by topic or content — not section numbers.</p>
   </div>
 
   <div class="card">
     <div class="card-body">
       <div class="form-group" style="margin-bottom:0.75rem">
-        <input type="text" id="search-query" placeholder="e.g. lease escalation clauses commercial property · customary inheritance arguments · eviction notice requirements"
+        <input type="text" id="search-query" placeholder="e.g. civil marriage consent requirements · retrenchment notice employer obligations · minimum age marriage Zimbabwe · quote Islamic marriage provisions"
                onkeydown="if(event.key==='Enter')doSearch()" style="font-size:0.95rem;padding:0.65rem 0.85rem"/>
       </div>
       <div class="form-row" style="margin-bottom:0.75rem">
@@ -2083,7 +2083,11 @@ async function doSearch() {
 function renderSearchResults(data, query) {
   const el = document.getElementById('search-results');
   if (!data.results.length && !data.answer) {
-    el.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>${data.message || 'No results found.'}</p></div>`;
+    const isVerbatim = /quote|verbatim|exact wording|what does section|word for word/i.test(query);
+    const hint = isVerbatim
+      ? `<p style="font-size:0.8rem;color:var(--ink3);margin-top:0.5rem">💡 Tip: Search by topic rather than section number — e.g. instead of "quote section 44", try "Islamic marriage requirements" or "qualified civil marriage conditions".</p>`
+      : `<p style="font-size:0.8rem;color:var(--ink3);margin-top:0.5rem">💡 Try rephrasing using keywords from the topic area, or upload more relevant documents to the vault.</p>`;
+    el.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>${data.message || 'No results found.'}</p>${hint}</div>`;
     return;
   }
 
