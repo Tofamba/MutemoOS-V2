@@ -2550,8 +2550,8 @@ def extract_docx_text(content: bytes):
         return ""
 
 def chunk_text(text: str, page_count: int, doc_id: str, matter_id: str) -> list:
-    CHUNK_WORDS = 500
-    OVERLAP_WORDS = 50
+    CHUNK_WORDS = 800
+    OVERLAP_WORDS = 100
     words = text.split()
     if not words:
         return []
@@ -3400,6 +3400,19 @@ def _semantic_search_legal(req, chunks: list) -> list:
         print(f"[search] legal semantic search failed: {e}")
     return results
 
+VERBATIM_TRIGGERS = [
+    "quote", "verbatim", "exact wording", "exact text", "exact words",
+    "word for word", "what does section", "what does the act say",
+    "what does the law say", "reproduce", "copy of section",
+    "full text of section", "text of section",
+]
+
+def is_verbatim_request(query: str) -> bool:
+    """Return True if the query is asking for exact section text rather than a summary."""
+    q = query.lower()
+    return any(t in q for t in VERBATIM_TRIGGERS)
+
+
 def synthesise_answer_sync(query: str, results: list, legal_results: list) -> str:
     if not results and not legal_results:
         return None
@@ -3410,10 +3423,30 @@ def synthesise_answer_sync(query: str, results: list, legal_results: list) -> st
         ref = r.get("reference") or r.get("source_name") or "Legal Source"
         context_parts.append(f"[{ref}]\n{r['text']}")
     context = "\n\n---\n\n".join(context_parts)
+
+    if is_verbatim_request(query):
+        instruction = """The user wants the EXACT wording from the source document.
+Do NOT paraphrase, summarise or interpret.
+Reproduce the relevant section(s) verbatim in quotation marks.
+Precede each quotation with the section number and Act/document name.
+Use this format:
+Section X of [Act Name] provides:
+"[exact text reproduced here]"
+Only quote text that is literally present in the sources provided below.
+If the exact section requested is not in the sources, say so clearly."""
+    else:
+        instruction = """Answer directly and practically:
+- If firm precedents are present, identify patterns and note them by document ID
+- If legislation or case law is present, summarise the relevant legal position and cite by reference
+- Flag variations over time
+- For drafting queries, suggest specific language from the firm precedents
+
+Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources."""
+
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=600,
+            max_tokens=800,
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 
 Query: {query}
@@ -3421,13 +3454,7 @@ Query: {query}
 Sources:
 {context}
 
-Answer directly and practically:
-- If firm precedents are present, identify patterns and note them by document ID
-- If legislation or case law is present, summarise the relevant legal position and cite by reference
-- Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents
-
-Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources."""}]
+{instruction}"""}]
         )
         return msg.content[0].text
     except Exception:
