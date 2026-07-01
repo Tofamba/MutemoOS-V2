@@ -3264,12 +3264,40 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
+def expand_query_sync(query: str) -> str:
+    """
+    Use Claude Haiku to expand a legal query with synonyms and related terms.
+    Called only when the initial search returns no results.
+    Adds Zimbabwean legal terminology the embedding model may not know.
+    e.g. "Islamic marriage requirements" → includes "qualified civil marriage Zimbabwe"
+    """
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=120,
+            messages=[{"role": "user", "content": f"""You are a Zimbabwean legal research assistant.
+Expand this search query with legal synonyms and related terms used in Zimbabwean law.
+Return ONLY the expanded query as a single line — no explanation, no bullet points.
+Include the original terms plus 3-5 related legal terms or phrases.
+
+Query: {query}
+
+Expanded query:"""}]
+        )
+        expanded = msg.content[0].text.strip()
+        print(f"[search] query expanded: '{query}' → '{expanded}'")
+        return expanded
+    except Exception as e:
+        print(f"[search] query expansion failed: {e}")
+        return query  # fall back to original
+
+
 @app.post("/api/search")
 async def search_documents(req: SearchRequest, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "search")
 
-    # Load chunks from DB for keyword fallback
+    # Load chunks from DB
     async with _db_pool.acquire() as conn:
         firm_chunk_rows = await conn.fetch(
             "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
@@ -3288,9 +3316,7 @@ async def search_documents(req: SearchRequest, request: Request):
     results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
     legal_results = []
     if req.include_legal_updates:
-        # Use cleaned query for ChromaDB retrieval — strips verbatim intent words
-        # so "quote section 44 of the Marriages Act" searches for
-        # "section 44 of the Marriages Act" in the vector store
+        # Strip verbatim intent words before searching ChromaDB
         search_query = clean_query_for_search(req.query) if is_verbatim_request(req.query) else req.query
         search_req = req.model_copy(update={"query": search_query})
         legal_results = await asyncio.to_thread(_semantic_search_legal, search_req, legal_chunks)
@@ -3312,11 +3338,22 @@ async def search_documents(req: SearchRequest, request: Request):
             })
 
     all_results = results + legal_results + zlr_results
+
+    # If no results, expand the query with Claude Haiku and retry once
+    if not all_results and legal_chunks:
+        expanded_query = await asyncio.to_thread(expand_query_sync, req.query)
+        if expanded_query and expanded_query.lower() != req.query.lower():
+            expanded_req = req.model_copy(update={"query": expanded_query})
+            legal_results = await asyncio.to_thread(_semantic_search_legal, expanded_req, legal_chunks)
+            results_retry = await asyncio.to_thread(_semantic_search_firm, expanded_req, firm_chunks)
+            all_results = results_retry + legal_results + zlr_results
+
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
     answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3])
     return {"answer": answer, "results": all_results}
+
 
 def _semantic_search_firm(req, chunks: list) -> list:
     results = []
