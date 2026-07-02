@@ -3270,11 +3270,22 @@ def expand_query_sync(query: str) -> str:
     try:
         msg = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=120,
-            messages=[{"role": "user", "content": f"""You are a Zimbabwean legal research assistant.
-Expand this search query with legal synonyms and related terms used in Zimbabwean law.
+            max_tokens=150,
+            messages=[{"role": "user", "content": f"""You are a Zimbabwean legal research assistant with deep knowledge of Zimbabwe statutes and legal terminology.
+
+Key Zimbabwe-specific legal term mappings (use these where relevant):
+- "civil partner" / "unmarried couple" / "cohabitation" → "section 41 Marriages Act Chapter 5:15 unregistered union civil partnership"
+- "Islamic marriage" / "Muslim marriage" → "qualified civil marriage section 44 Marriages Act polygamous union"
+- "customary marriage" / "lobola" → "customary law union Chapter 5:07 unregistered marriage"
+- "unfair dismissal" / "wrongful termination" → "Labour Act Chapter 28:01 due inquiry section 12 employment code"
+- "company director" / "director duties" → "Companies and Other Business Entities Act Chapter 24:31 COBE section 195"
+- "contractual penalty" / "breach of contract" → "Contractual Penalties Act Chapter 8:04 section 4 penalty stipulation"
+- "prescription" / "limitation period" → "Prescription Act Chapter 8:11 extinctive prescription"
+- "eviction" / "ejectment" → "Rent Regulations Act Chapter 10:17 Magistrates Court jurisdiction"
+- "estate" / "inheritance" / "deceased" → "Administration of Estates Act Chapter 6:01 Master of High Court"
+
+Expand this search query with Zimbabwe legal synonyms and related statutory terms.
 Return ONLY the expanded query as a single line — no explanation, no bullet points.
-Include the original terms plus 3-5 related legal terms or phrases.
 
 Query: {query}
 
