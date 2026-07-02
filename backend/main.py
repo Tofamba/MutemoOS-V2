@@ -2550,8 +2550,8 @@ def extract_docx_text(content: bytes):
         return ""
 
 def chunk_text(text: str, page_count: int, doc_id: str, matter_id: str) -> list:
-    CHUNK_WORDS = 800
-    OVERLAP_WORDS = 100
+    CHUNK_WORDS = 500
+    OVERLAP_WORDS = 50
     words = text.split()
     if not words:
         return []
@@ -3264,32 +3264,65 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def expand_query_sync(query: str) -> str:
-    """
-    Use Claude Haiku to expand a legal query with synonyms and related terms.
-    Called only when the initial search returns no results.
-    Adds Zimbabwean legal terminology the embedding model may not know.
-    e.g. "Islamic marriage requirements" → includes "qualified civil marriage Zimbabwe"
-    """
-    try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=120,
-            messages=[{"role": "user", "content": f"""You are a Zimbabwean legal research assistant.
-Expand this search query with legal synonyms and related terms used in Zimbabwean law.
-Return ONLY the expanded query as a single line — no explanation, no bullet points.
-Include the original terms plus 3-5 related legal terms or phrases.
+LAWS_AFRICA_TOKEN = os.environ.get("LAWS_AFRICA_TOKEN", "")
+LAWS_AFRICA_API = "https://api.laws.africa/ai/v1/knowledge-bases"
 
-Query: {query}
-
-Expanded query:"""}]
-        )
-        expanded = msg.content[0].text.strip()
-        print(f"[search] query expanded: '{query}' → '{expanded}'")
-        return expanded
-    except Exception as e:
-        print(f"[search] query expansion failed: {e}")
-        return query  # fall back to original
+async def search_laws_africa(query: str, top_k: int = 3) -> list:
+    """
+    Query Laws.Africa Knowledge Base API for Zimbabwe legislation and judgments.
+    Returns results formatted for MutemoOS search results rendering.
+    Falls back to empty list silently if token not set or API unavailable.
+    """
+    if not LAWS_AFRICA_TOKEN:
+        return []
+    import httpx
+    results = []
+    payload = {
+        "text": query,
+        "top_k": top_k,
+        "filters": {"commenced": True, "repealed": False, "principal": True}
+    }
+    headers = {
+        "Authorization": f"Bearer {LAWS_AFRICA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    # Query both legislation and judgments KBs
+    for kb_code, kb_label in [("legislation-zw", "Legislation"), ("judgments-zw", "Judgment")]:
+        try:
+            async with httpx.AsyncClient(timeout=8) as http:
+                resp = await http.post(
+                    f"{LAWS_AFRICA_API}/{kb_code}/retrieve",
+                    json=payload,
+                    headers=headers,
+                )
+            if resp.status_code != 200:
+                print(f"[laws_africa] {kb_code} returned {resp.status_code}")
+                continue
+            data = resp.json()
+            for item in data.get("results", []):
+                meta = item.get("metadata", {})
+                content = item.get("content", {})
+                text = content.get("text", "")
+                if not text:
+                    continue
+                results.append({
+                    "result_source": "laws_africa",
+                    "chunk_id": meta.get("portion_id", ""),
+                    "text": text[:1200],  # cap chunk size for synthesis
+                    "similarity": round(min(item.get("score", 0) / 15.0, 1.0), 3),
+                    "document_id": meta.get("work_frbr_uri", ""),
+                    "filename": meta.get("title", "Zimbabwe Legislation"),
+                    "reference": meta.get("portion_title", ""),
+                    "source_type": kb_label,
+                    "source_name": "Laws.Africa",
+                    "source_url": meta.get("portion_public_url") or meta.get("public_url", ""),
+                    "expression_date": meta.get("expression_date", ""),
+                })
+        except Exception as e:
+            print(f"[laws_africa] {kb_code} search failed: {e}")
+    # Sort by score descending and cap total
+    results.sort(key=lambda r: r["similarity"], reverse=True)
+    return results[:top_k]
 
 
 @app.post("/api/search")
@@ -3297,7 +3330,7 @@ async def search_documents(req: SearchRequest, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "search")
 
-    # Load chunks from DB
+    # Load chunks from DB for keyword fallback
     async with _db_pool.acquire() as conn:
         firm_chunk_rows = await conn.fetch(
             "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
@@ -3316,10 +3349,7 @@ async def search_documents(req: SearchRequest, request: Request):
     results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
     legal_results = []
     if req.include_legal_updates:
-        # Strip verbatim intent words before searching ChromaDB
-        search_query = clean_query_for_search(req.query) if is_verbatim_request(req.query) else req.query
-        search_req = req.model_copy(update={"query": search_query})
-        legal_results = await asyncio.to_thread(_semantic_search_legal, search_req, legal_chunks)
+        legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
 
     zlr_results = []
     if zlr_chunks_list:
@@ -3337,21 +3367,20 @@ async def search_documents(req: SearchRequest, request: Request):
                 "summary": r.get("summary"),
             })
 
-    all_results = results + legal_results + zlr_results
+    # Laws.Africa live KB query — runs in parallel with local search
+    laws_africa_results = await search_laws_africa(req.query, top_k=3)
 
-    # If no results, expand the query with Claude Haiku and retry once
-    if not all_results and legal_chunks:
-        expanded_query = await asyncio.to_thread(expand_query_sync, req.query)
-        if expanded_query and expanded_query.lower() != req.query.lower():
-            expanded_req = req.model_copy(update={"query": expanded_query})
-            legal_results = await asyncio.to_thread(_semantic_search_legal, expanded_req, legal_chunks)
-            results_retry = await asyncio.to_thread(_semantic_search_firm, expanded_req, firm_chunks)
-            all_results = results_retry + legal_results + zlr_results
-
+    all_results = results + legal_results + zlr_results + laws_africa_results
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
-    answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3])
+    # Include Laws.Africa results in synthesis context
+    answer = await asyncio.to_thread(
+        synthesise_answer_sync,
+        req.query,
+        results[:5],
+        legal_results[:3] + laws_africa_results[:2]
+    )
     return {"answer": answer, "results": all_results}
 
 
@@ -3442,75 +3471,29 @@ def _semantic_search_legal(req, chunks: list) -> list:
         print(f"[search] legal semantic search failed: {e}")
     return results
 
-VERBATIM_TRIGGERS = [
-    "quote", "verbatim", "exact wording", "exact text", "exact words",
-    "word for word", "what does section", "what does the act say",
-    "what does the law say", "reproduce", "copy of section",
-    "full text of section", "text of section",
-]
-
-VERBATIM_STRIP = [
-    "quote ", "verbatim ", "exact wording of ", "exact text of ",
-    "exact words of ", "word for word ", "what does section ",
-    "what does the act say about ", "what does the law say about ",
-    "reproduce ", "full text of section ", "text of section ",
-    "copy of section ", "give me section ", "show me section ",
-    "what is section ", "please quote ",
-]
-
-def is_verbatim_request(query: str) -> bool:
-    """Return True if the query is asking for exact section text rather than a summary."""
-    q = query.lower()
-    return any(t in q for t in VERBATIM_TRIGGERS)
-
-
-def clean_query_for_search(query: str) -> str:
-    """Strip verbatim intent words so ChromaDB searches for the content, not the intent.
-    e.g. 'quote section 44 of the Marriages Act' → 'section 44 of the Marriages Act'
-    """
-    q = query.lower().strip()
-    for strip in VERBATIM_STRIP:
-        q = q.replace(strip, "")
-    # Clean up leading/trailing whitespace and punctuation
-    return q.strip().strip("\"'")
-
-
 def synthesise_answer_sync(query: str, results: list, legal_results: list) -> str:
     if not results and not legal_results:
         return None
     context_parts = []
     for r in results[:5]:
         context_parts.append(f"[FIRM PRECEDENT — {r.get('document_id','')}]\n{r['text']}")
-    for r in (legal_results or [])[:3]:
-        ref = r.get("reference") or r.get("source_name") or "Legal Source"
-        context_parts.append(f"[{ref}]\n{r['text']}")
+    for r in (legal_results or [])[:5]:
+        # Distinguish Laws.Africa results with Act title and section reference
+        if r.get("result_source") == "laws_africa":
+            label = f"{r.get('filename', 'Zimbabwe Legislation')} — {r.get('reference', '')}"
+            url = r.get("source_url", "")
+            ref_line = f"[LAWS.AFRICA — {label}]"
+            if url:
+                ref_line += f"\nSource: {url}"
+        else:
+            label = r.get("reference") or r.get("source_name") or "Legal Source"
+            ref_line = f"[{label}]"
+        context_parts.append(f"{ref_line}\n{r['text']}")
     context = "\n\n---\n\n".join(context_parts)
-
-    if is_verbatim_request(query):
-        instruction = """The user wants the EXACT wording from the source document.
-Do NOT paraphrase, summarise or interpret.
-Reproduce the relevant section(s) verbatim in quotation marks where the text is clearly present in the sources.
-Precede each quotation with the section number and Act/document name.
-Use this format:
-Section X of [Act Name] provides:
-"[exact text reproduced here]"
-If the exact section text is not clearly present in the sources, summarise what the section says and direct the user to the specific section number and Act for the full text.
-Always end with: "For the full text, see [section X] of [Act Name / case citation]." """
-    else:
-        instruction = """Answer directly and practically:
-- If firm precedents are present, identify patterns and note them by document ID
-- If legislation or case law is present, summarise the relevant legal position and cite by reference
-- Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents
-
-Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources.
-
-Always end with a "See also:" line citing the specific section numbers and Act names or case citations the answer draws from, so the lawyer can locate the primary source directly."""
-
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=800,
+            max_tokens=600,
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 
 Query: {query}
@@ -3518,7 +3501,13 @@ Query: {query}
 Sources:
 {context}
 
-{instruction}"""}]
+Answer directly and practically:
+- If firm precedents are present, identify patterns and note them by document ID
+- If legislation or case law is present, summarise the relevant legal position and cite by reference
+- Flag variations over time
+- For drafting queries, suggest specific language from the firm precedents
+
+Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources."""}]
         )
         return msg.content[0].text
     except Exception:
