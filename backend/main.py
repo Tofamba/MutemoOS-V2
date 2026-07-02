@@ -3720,6 +3720,83 @@ Draft the complete affidavit in proper Zimbabwe High Court form. Number all para
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Affidavit generation failed: {e}")
 
+
+# ── Generate Document (letters, notices, agreements, court docs) ──────────────
+
+class GenerateDocumentRequest(BaseModel):
+    doc_type: str
+    plaintiff: Optional[str] = None
+    defendant: Optional[str] = None
+    court: Optional[str] = None
+    case_number: Optional[str] = None
+    facts: str
+    instructions: Optional[str] = None
+    precedent_context: Optional[dict] = None
+
+DOC_TYPE_PROMPTS = {
+    "letter": "a formal legal letter",
+    "demand_letter": "a formal demand letter",
+    "notice": "a legal notice",
+    "court_application": "a court application with notice of motion and draft order",
+    "heads_of_argument": "heads of argument for a Zimbabwe High Court matter",
+    "settlement": "a deed of settlement",
+    "contract": "a commercial contract or agreement",
+    "opinion": "a legal opinion",
+    "other": "a legal document",
+}
+
+@app.post("/api/generate-document")
+async def generate_document(req: GenerateDocumentRequest, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+
+    doc_label = DOC_TYPE_PROMPTS.get(req.doc_type, "a legal document")
+
+    precedent_block = ""
+    if req.precedent_context:
+        fname = req.precedent_context.get("filename", "precedent")
+        mname = req.precedent_context.get("matter_name", "")
+        text = str(req.precedent_context.get("text", ""))[:2000]
+        precedent_block = f"\n\nFIRM PRECEDENT ({fname} — {mname}):\n---\n{text}\n---"
+
+    parties_block = ""
+    if req.plaintiff:
+        parties_block += f"\nClient / First Party: {req.plaintiff}"
+    if req.defendant:
+        parties_block += f"\nOpposing Party / Second Party: {req.defendant}"
+    if req.court:
+        parties_block += f"\nCourt / Forum: {req.court}"
+    if req.case_number:
+        parties_block += f"\nCase / Reference Number: {req.case_number}"
+
+    prompt = f"""You are a senior legal drafter at {FIRM_NAME}, Harare, Zimbabwe.
+
+Draft {doc_label} based on the following:{parties_block}
+
+Facts and context:
+{req.facts}
+
+{"Additional instructions: " + req.instructions if req.instructions else ""}
+{precedent_block}
+
+Drafting requirements:
+- Use proper Zimbabwe legal drafting conventions
+- For letters: use formal letterhead-style layout with date, addressee, reference line, body paragraphs, and sign-off
+- For court documents: use proper Zimbabwe High Court format
+- Be precise, professional, and complete
+- Use [_____] for any details not provided
+- Do not add commentary or explanations — produce the document only"""
+
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return {"document": msg.content[0].text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Document generation failed: {e}")
+
 # ── DOCX Export ───────────────────────────────────────────────────────────────
 
 @app.post("/api/export-docx")
