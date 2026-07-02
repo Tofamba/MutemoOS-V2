@@ -3495,6 +3495,7 @@ def _semantic_search_firm(req, chunks: list) -> list:
 
 def _semantic_search_legal(req, chunks: list) -> list:
     results = []
+    SIMILARITY_THRESHOLD = 0.35  # below this, results are noise
     try:
         _, legal_col, _ = get_chroma_collections()
         if legal_col.count() > 0:
@@ -3505,10 +3506,12 @@ def _semantic_search_legal(req, chunks: list) -> list:
             distances = res["distances"][0] if res["distances"] else []
             chunk_by_id = {c["id"]: c for c in chunks}
             for cid, dist in zip(ids, distances):
+                similarity = max(0.0, 1.0 - dist)
+                if similarity < SIMILARITY_THRESHOLD:
+                    continue  # filter out noise
                 chunk = chunk_by_id.get(cid)
                 if not chunk:
                     continue
-                similarity = max(0.0, 1.0 - dist)
                 results.append({
                     "result_source": "legal",
                     "chunk_id": chunk["id"],
@@ -3523,6 +3526,33 @@ def _semantic_search_legal(req, chunks: list) -> list:
                     break
     except Exception as e:
         print(f"[search] legal semantic search failed: {e}")
+
+    # FTS fallback — if semantic returned nothing, use word overlap + exact phrase bonus
+    if not results and chunks:
+        print(f"[search] legal FTS fallback for: {req.query}")
+        query_lower = req.query.lower()
+        query_words = set(query_lower.split()) - {"and", "the", "of", "in", "a", "an", "to", "for", "is", "are"}
+        scored = []
+        for chunk in chunks:
+            text_lower = chunk["text"].lower()
+            word_score = len(query_words & set(text_lower.split())) / max(len(query_words), 1)
+            # Bonus for exact phrase match
+            phrase_bonus = 0.5 if any(w in text_lower for w in query_words if len(w) > 4) else 0
+            score = word_score + phrase_bonus
+            if score > 0.1:
+                scored.append((score, chunk))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for score, chunk in scored[:req.limit]:
+            results.append({
+                "result_source": "legal",
+                "chunk_id": chunk["id"],
+                "text": chunk["text"],
+                "similarity": round(min(score, 0.99), 3),
+                "document_id": str(chunk["document_id"]),
+                "source_type": chunk.get("source_type"),
+                "source_name": chunk.get("source_name"),
+                "reference": chunk.get("reference"),
+            })
     return results
 
 VERBATIM_TRIGGERS = [
