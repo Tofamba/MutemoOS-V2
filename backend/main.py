@@ -3264,6 +3264,30 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
+def expand_query_sync(query: str) -> str:
+    """Use Claude Haiku to expand a legal query with Zimbabwean legal synonyms.
+    Called when initial search returns no results."""
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=120,
+            messages=[{"role": "user", "content": f"""You are a Zimbabwean legal research assistant.
+Expand this search query with legal synonyms and related terms used in Zimbabwean law.
+Return ONLY the expanded query as a single line — no explanation, no bullet points.
+Include the original terms plus 3-5 related legal terms or phrases.
+
+Query: {query}
+
+Expanded query:"""}]
+        )
+        expanded = msg.content[0].text.strip()
+        print(f"[search] query expanded: '{query}' → '{expanded}'")
+        return expanded
+    except Exception as e:
+        print(f"[search] query expansion failed: {e}")
+        return query
+
+
 LAWS_AFRICA_TOKEN = os.environ.get("LAWS_AFRICA_TOKEN", "")
 LAWS_AFRICA_API = "https://api.laws.africa/ai/v1/knowledge-bases"
 
@@ -3373,6 +3397,17 @@ async def search_documents(req: SearchRequest, request: Request):
     laws_africa_results = await search_laws_africa(req.query, top_k=3)
 
     all_results = results + legal_results + zlr_results + laws_africa_results
+
+    # If no results, expand query with Claude Haiku and retry once
+    if not all_results:
+        expanded_query = await asyncio.to_thread(expand_query_sync, req.query)
+        if expanded_query and expanded_query.lower() != req.query.lower():
+            expanded_req = req.model_copy(update={"query": expanded_query})
+            legal_results = await asyncio.to_thread(_semantic_search_legal, expanded_req, legal_chunks)
+            results_retry = await asyncio.to_thread(_semantic_search_firm, expanded_req, firm_chunks)
+            laws_africa_retry = await search_laws_africa(expanded_query, top_k=3)
+            all_results = results_retry + legal_results + zlr_results + laws_africa_retry
+
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
