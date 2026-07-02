@@ -3799,6 +3799,102 @@ Drafting requirements:
 
 # ── DOCX Export ───────────────────────────────────────────────────────────────
 
+class ExportDocumentRequest(BaseModel):
+    content_html: str
+    filename: Optional[str] = "document"
+
+@app.post("/api/export-document-docx")
+async def export_document_docx(req: ExportDocumentRequest, request: Request):
+    """
+    Export Draft Document tab content (HTML from rich text editor) as .docx.
+    Strips HTML tags and converts to properly formatted Word document.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+
+    import shutil
+    node_path = None
+    for candidate in ["/usr/local/bin/node", "/usr/bin/node", "node"]:
+        if shutil.which(candidate):
+            node_path = candidate
+            break
+    if not node_path:
+        raise HTTPException(status_code=503, detail="Node.js is not available. Copy the document text manually.")
+
+    # Strip HTML to plain text preserving line breaks
+    import re as _re
+    html = req.content_html
+    # Convert block-level tags to newlines
+    html = _re.sub(r'<br\s*/?>', '\n', html, flags=_re.IGNORECASE)
+    html = _re.sub(r'</p>', '\n', html, flags=_re.IGNORECASE)
+    html = _re.sub(r'</div>', '\n', html, flags=_re.IGNORECASE)
+    html = _re.sub(r'</h[1-6]>', '\n', html, flags=_re.IGNORECASE)
+    # Remove remaining tags
+    plain = _re.sub(r'<[^>]+>', '', html)
+    # Decode HTML entities
+    plain = plain.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
+    # Clean up excessive blank lines
+    plain = _re.sub(r'\n{3,}', '\n\n', plain).strip()
+
+    safe_filename = _re.sub(r'[^\w\-_]', '_', req.filename or 'document')[:60]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script_path = os.path.join(tmpdir, "make_docx.js")
+        output_path = os.path.join(tmpdir, f"{safe_filename}.docx")
+        escaped = plain.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
+
+        node_script = f"""
+const {{ Document, Packer, Paragraph, TextRun, AlignmentType }} = require('docx');
+const fs = require('fs');
+const text = `{escaped}`;
+const lines = text.split('\\n');
+const paragraphs = lines.map(line => {{
+  const t = line.trim();
+  const isCentre = t === t.toUpperCase() && t.length > 3 && t.length < 80 && /[A-Z]/.test(t);
+  const isBold = isCentre || /^(RE:|DEAR|YOURS|RE\\s|DEMAND|BREACH|NOTICE|REQUEST|RESERVATION)/.test(t.toUpperCase());
+  return new Paragraph({{
+    alignment: isCentre ? AlignmentType.CENTER : AlignmentType.JUSTIFIED,
+    spacing: {{ after: t === '' ? 0 : 160 }},
+    children: [new TextRun({{ text: line, font: 'Times New Roman', size: 24, bold: isBold }})]
+  }});
+}});
+const doc = new Document({{
+  sections: [{{
+    properties: {{ page: {{ margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }} }} }},
+    children: paragraphs
+  }}]
+}});
+Packer.toBuffer(doc).then(buf => {{
+  fs.writeFileSync('{output_path}', buf);
+  console.log('done');
+}});
+"""
+        with open(script_path, "w") as f:
+            f.write(node_script)
+        with open(os.path.join(tmpdir, "package.json"), "w") as f:
+            json.dump({"dependencies": {"docx": "^8.5.0"}}, f)
+
+        install = subprocess.run(["npm", "install", "--prefix", tmpdir, "docx"],
+                                 capture_output=True, text=True, timeout=60, cwd=tmpdir)
+        if install.returncode != 0:
+            raise HTTPException(status_code=500, detail="Failed to install docx package")
+
+        result = subprocess.run([node_path, script_path],
+                                capture_output=True, text=True, timeout=30, cwd=tmpdir)
+        if result.returncode != 0 or not os.path.exists(output_path):
+            raise HTTPException(status_code=500, detail=f"DOCX generation failed: {result.stderr[:200]}")
+
+        with open(output_path, "rb") as f:
+            docx_bytes = f.read()
+
+    from fastapi.responses import Response as FastAPIResponse
+    return FastAPIResponse(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}.docx"'}
+    )
+
+
 @app.post("/api/export-docx")
 async def export_docx(req: ExportRequest, request: Request):
     user = await get_current_user(request)
