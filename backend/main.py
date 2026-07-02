@@ -3375,13 +3375,19 @@ async def search_documents(req: SearchRequest, request: Request):
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
     # Include Laws.Africa results in synthesis context
-    answer = await asyncio.to_thread(
+    synthesis = await asyncio.to_thread(
         synthesise_answer_sync,
         req.query,
         results[:5],
         legal_results[:3] + laws_africa_results[:2]
     )
-    return {"answer": answer, "results": all_results}
+    return {
+        "answer": synthesis.get("answer"),
+        "grounding_note": synthesis.get("grounding_note", ""),
+        "sources_sufficient": synthesis.get("sources_sufficient", True),
+        "source_gap": synthesis.get("source_gap", ""),
+        "results": all_results,
+    }
 
 
 def _semantic_search_firm(req, chunks: list) -> list:
@@ -3471,14 +3477,61 @@ def _semantic_search_legal(req, chunks: list) -> list:
         print(f"[search] legal semantic search failed: {e}")
     return results
 
-def synthesise_answer_sync(query: str, results: list, legal_results: list) -> str:
+def ground_check_sync(query: str, context: str) -> dict:
+    """
+    Stage 1 — Ground check using Claude Haiku.
+    Reads the retrieved sources and returns:
+    - verified_claims: list of claims directly supported by the sources
+    - unverified_claims: list of claims that would require sources not present
+    - source_gap: description of what's missing if sources are insufficient
+    - sources_sufficient: bool
+    """
+    try:
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=400,
+            messages=[{"role": "user", "content": f"""You are a legal grounding checker for a Zimbabwe law firm AI system.
+
+Query: {query}
+
+Retrieved sources:
+{context[:3000]}
+
+Assess these sources and return ONLY valid JSON:
+{{
+  "sources_sufficient": true or false,
+  "verified_topics": ["list of legal topics directly addressed in the sources"],
+  "source_gap": "what specific Acts, sections or cases are missing that would be needed for a complete answer, or empty string if sufficient",
+  "grounding_note": "one sentence for the lawyer about source coverage"
+}}
+
+JSON only:"""}]
+        )
+        raw = msg.content[0].text.strip()
+        raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
+        return json.loads(raw)
+    except Exception as e:
+        print(f"[grounding] check failed: {e}")
+        return {
+            "sources_sufficient": True,
+            "verified_topics": [],
+            "source_gap": "",
+            "grounding_note": ""
+        }
+
+
+def synthesise_answer_sync(query: str, results: list, legal_results: list) -> dict:
+    """
+    Two-stage grounded synthesis.
+    Returns dict with 'answer', 'grounding_note', 'sources_sufficient'.
+    """
     if not results and not legal_results:
-        return None
+        return {"answer": None, "grounding_note": "", "sources_sufficient": False}
+
     context_parts = []
     for r in results[:5]:
         context_parts.append(f"[FIRM PRECEDENT — {r.get('document_id','')}]\n{r['text']}")
     for r in (legal_results or [])[:5]:
-        # Distinguish Laws.Africa results with Act title and section reference
         if r.get("result_source") == "laws_africa":
             label = f"{r.get('filename', 'Zimbabwe Legislation')} — {r.get('reference', '')}"
             url = r.get("source_url", "")
@@ -3490,10 +3543,46 @@ def synthesise_answer_sync(query: str, results: list, legal_results: list) -> st
             ref_line = f"[{label}]"
         context_parts.append(f"{ref_line}\n{r['text']}")
     context = "\n\n---\n\n".join(context_parts)
+
+    # Stage 1 — Ground check (Haiku, fast)
+    grounding = ground_check_sync(query, context)
+    sources_sufficient = grounding.get("sources_sufficient", True)
+    source_gap = grounding.get("source_gap", "")
+    grounding_note = grounding.get("grounding_note", "")
+
+    # Stage 2 — Constrained synthesis (Sonnet)
+    gap_instruction = ""
+    if not sources_sufficient and source_gap:
+        gap_instruction = f"""
+IMPORTANT: The retrieved sources do not fully cover this query.
+Missing: {source_gap}
+For any claims NOT directly supported by the sources above, you MUST prefix them with:
+"[General principle — verify in source]"
+Do NOT state unsupported claims as settled law."""
+
+    if is_verbatim_request(query):
+        instruction = f"""The user wants the EXACT wording from the source document.
+Do NOT paraphrase, summarise or interpret.
+Reproduce the relevant section(s) verbatim in quotation marks where the text is clearly present in the sources.
+Precede each quotation with the section number and Act/document name.
+If the exact section text is not clearly present in the sources, summarise what the section says and direct the user to the specific section number and Act for the full text.
+Always end with: "For the full text, see [section X] of [Act Name / case citation]."{gap_instruction}"""
+    else:
+        instruction = f"""Answer directly and practically:
+- Only state what is directly supported by the sources provided
+- Clearly label any general legal principles not found in the sources as "[General principle — verify in source]"
+- If firm precedents are present, identify patterns and note them by document ID
+- If legislation or case law is present, summarise the relevant legal position and cite by reference
+- Flag variations over time
+- For drafting queries, suggest specific language from the firm precedents
+
+Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources.
+Always end with a "See also:" line citing the specific section numbers and Act names or case citations the answer draws from.{gap_instruction}"""
+
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=600,
+            max_tokens=800,
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 
 Query: {query}
@@ -3501,18 +3590,24 @@ Query: {query}
 Sources:
 {context}
 
-Answer directly and practically:
-- If firm precedents are present, identify patterns and note them by document ID
-- If legislation or case law is present, summarise the relevant legal position and cite by reference
-- Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents
-
-Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources."""}]
+{instruction}"""}]
         )
-        return msg.content[0].text
+        answer_text = msg.content[0].text
+        return {
+            "answer": answer_text,
+            "grounding_note": grounding_note,
+            "sources_sufficient": sources_sufficient,
+            "source_gap": source_gap,
+        }
     except Exception:
         total = len(results) + len(legal_results or [])
-        return f"Found {total} relevant excerpt(s). Review the sources below."
+        return {
+            "answer": f"Found {total} relevant excerpt(s). Review the sources below.",
+            "grounding_note": "",
+            "sources_sufficient": True,
+            "source_gap": "",
+        }
+
 
 # ── Affidavit Generator ───────────────────────────────────────────────────────
 

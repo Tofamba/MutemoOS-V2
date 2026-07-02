@@ -2094,9 +2094,19 @@ function renderSearchResults(data, query) {
   let html = '';
 
   if (data.answer) {
+    const sufficient = data.sources_sufficient !== false;
+    const groundingBadge = !sufficient
+      ? `<div style="margin-top:0.5rem;padding:0.4rem 0.6rem;background:#fff8e6;border:1px solid #e8c050;border-radius:4px;font-size:0.75rem;color:#7a6000">
+          ⚠ <strong>Partial sources</strong> — ${escHtml(data.grounding_note || 'Some claims are general principles not verified from retrieved sources.')}
+          ${data.source_gap ? `<br><em>Missing: ${escHtml(data.source_gap)}</em>` : ''}
+         </div>`
+      : (data.grounding_note
+          ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
+          : '');
     html += `<div class="ai-answer">
       <div class="ai-answer-label">⚡ AI Analysis</div>
       <div class="ai-answer-text">${escHtml(data.answer)}</div>
+      ${groundingBadge}
     </div>`;
   }
 
