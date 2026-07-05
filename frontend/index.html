@@ -49,10 +49,36 @@
 .doc-type-btn .dt-name { font-size: 0.78rem; font-weight: 700; color: var(--ink); display: block; }
 .doc-type-btn .dt-desc { font-size: 0.68rem; color: var(--ink3); margin-top: 1px; display: block; }
 @media print {
-  .header, .nav, .btn, .toolbar, .card, .section-head, #tab-draft > *:not(#print-area) { display: none !important; }
+  /* Hide everything except the search results when printing from search tab */
+  .header, .nav, .btn, .toolbar, .card-header, .section-head,
+  #tab-draft > *:not(#print-area),
+  #search-print-btn,
+  .result-actions,
+  .use-precedent-btn { display: none !important; }
+
+  /* Show search results cleanly */
+  #search-results { display: block !important; }
+  #tab-search .card { box-shadow: none !important; border: none !important; }
+
+  /* Draft print area */
   #print-area { display: block !important; padding: 0; margin: 0; }
   .tiptap-editor { border: none; padding: 0; max-height: none; font-size: 12pt; }
-  body { background: white; }
+
+  /* Search result print styling */
+  .ai-answer {
+    background: white !important;
+    border: 1px solid #ccc !important;
+    border-radius: 0 !important;
+    page-break-inside: avoid;
+  }
+  .ai-answer-text { font-size: 11pt; line-height: 1.6; white-space: pre-wrap; }
+  .result-card { border: 1px solid #ddd !important; page-break-inside: avoid; margin-bottom: 8pt; }
+
+  /* Print header */
+  #search-print-header { display: block !important; }
+
+  body { background: white; font-size: 11pt; }
+  * { color: black !important; }
 }
 </style>
 <style>
@@ -446,6 +472,20 @@ select{cursor:pointer}
 
   <div id="search-loading" style="display:none;text-align:center;padding:2rem;color:var(--ink3)">
     <div class="spinner"></div> Searching vault and synthesising answer…
+  </div>
+
+  <!-- Hidden print header — only visible when printing -->
+  <div id="search-print-header" style="display:none;margin-bottom:1.5rem">
+    <div style="font-size:16pt;font-weight:bold">Sawyer & Mkushi Legal Practitioners</div>
+    <div style="font-size:10pt;color:#555;margin-top:4pt">Mutemo Desk — Legal Research Output</div>
+    <div id="search-print-query" style="font-size:10pt;margin-top:4pt"></div>
+    <div style="font-size:9pt;color:#888;margin-top:2pt" id="search-print-date"></div>
+    <hr style="margin-top:8pt">
+  </div>
+
+  <!-- Print button — hidden until results appear -->
+  <div id="search-print-btn" style="display:none;text-align:right;margin-bottom:0.75rem">
+    <button class="btn btn-outline btn-sm" onclick="printSearchResults()">🖨 Print / Save as PDF</button>
   </div>
 
   <div id="search-results"></div>
@@ -2080,9 +2120,24 @@ async function doSearch() {
   }
 }
 
+function printSearchResults() {
+  // Set print header details
+  const query = document.getElementById('search-query').value.trim();
+  document.getElementById('search-print-query').textContent = `Query: "${query}"`;
+  document.getElementById('search-print-date').textContent =
+    `Generated: ${new Date().toLocaleDateString('en-ZW', {day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit'})}`;
+  document.getElementById('search-print-header').style.display = 'block';
+  window.print();
+  // Hide header again after print dialog closes
+  setTimeout(() => {
+    document.getElementById('search-print-header').style.display = 'none';
+  }, 1000);
+}
+
 function renderSearchResults(data, query) {
   const el = document.getElementById('search-results');
   if (!data.results.length && !data.answer) {
+    document.getElementById('search-print-btn').style.display = 'none';
     const isVerbatim = /quote|verbatim|exact wording|what does section|word for word/i.test(query);
     const hint = isVerbatim
       ? `<p style="font-size:0.8rem;color:var(--ink3);margin-top:0.5rem">💡 Tip: Search by topic rather than section number — e.g. instead of "quote section 44", try "Islamic marriage requirements" or "qualified civil marriage conditions".</p>`
@@ -2214,6 +2269,7 @@ function renderSearchResults(data, query) {
   });
 
   el.innerHTML = html;
+  document.getElementById('search-print-btn').style.display = 'block';
 }
 
 function usePrecedent(jsonStr) {
