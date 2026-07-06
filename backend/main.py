@@ -28,7 +28,7 @@ import asyncio
 import secrets
 import time
 import hmac
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 # ── Load .env file if present ─────────────────────────────────────────────────
 def _load_dotenv():
