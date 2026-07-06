@@ -177,19 +177,32 @@ select{cursor:pointer}
 .matter-item{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);overflow:visible;margin-bottom:0.6rem;transition:box-shadow 0.15s}
 .matter-item:hover{box-shadow:0 2px 8px rgba(0,0,0,0.08)}
 .matter-row{padding:0.85rem 1rem;display:flex;align-items:center;gap:10px;cursor:pointer}
-.matter-icon{width:32px;height:32px;background:var(--paper2);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;border:1px solid var(--border)}
-.matter-name{font-weight:700;font-size:0.88rem;color:var(--ink)}
-.matter-meta{font-size:0.72rem;color:var(--ink3);margin-top:2px}
+.matter-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--green),#2d7a4f);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:white;box-shadow:0 2px 4px rgba(0,0,0,0.12)}
+.matter-name{font-weight:700;font-size:0.9rem;color:var(--ink)}
+.matter-meta{font-size:0.72rem;color:var(--ink3);margin-top:3px}
 .matter-expand{flex:1}
-.matter-actions{display:flex;gap:6px}
-.matter-docs{border-top:1px solid var(--border);padding:0.75rem 1rem;display:none}
+.matter-actions{display:flex;gap:6px;align-items:center}
+.matter-docs{border-top:2px solid var(--paper2);padding:0;display:none;background:var(--paper)}
 .matter-docs.open{display:block}
+.matter-section{padding:0.85rem 1.1rem;border-bottom:1px solid var(--border)}
+.matter-section:last-child{border-bottom:none}
+.matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
 
 /* ── Doc item ── */
-.doc-item{display:flex;align-items:center;gap:8px;padding:0.5rem 0;border-bottom:1px solid var(--paper3)}
-.doc-item:last-child{border-bottom:none}
-.doc-name{font-size:0.82rem;color:var(--ink2);flex:1}
-.doc-meta{font-size:0.7rem;color:var(--ink3)}
+.doc-item{display:flex;align-items:center;gap:10px;padding:0.6rem 0.75rem;border-radius:8px;background:var(--white);border:1px solid var(--border);margin-bottom:6px;transition:border-color .15s}
+.doc-item:hover{border-color:var(--green)}
+.doc-item:last-child{margin-bottom:0}
+.doc-name{font-size:0.8rem;color:var(--ink2);flex:1;font-weight:500}
+.doc-meta{font-size:0.68rem;color:var(--ink3)}
+.doc-icon{width:28px;height:28px;background:var(--paper2);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+
+/* ── Note item ── */
+.note-item{background:var(--white);border:1px solid var(--border);border-radius:8px;padding:0.65rem 0.85rem;margin-bottom:6px;position:relative}
+.note-item:last-child{margin-bottom:0}
+.note-text{font-size:0.82rem;color:var(--ink2);line-height:1.55}
+.note-footer{font-size:0.68rem;color:var(--ink3);margin-top:0.35rem;display:flex;justify-content:space-between;align-items:center}
+.note-delete{background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.75rem;padding:0;opacity:0.5;transition:opacity .15s}
+.note-delete:hover{opacity:1;color:var(--red)}
 
 /* ── Tags / Chips ── */
 .chip{display:inline-block;font-size:0.65rem;padding:2px 8px;border-radius:12px;font-weight:700;letter-spacing:0.3px;margin-right:4px}
@@ -1662,7 +1675,14 @@ function renderMattersList(filtered = null) {
     return `
     <div class="matter-item">
       <div class="matter-row" onclick="toggleMatter('${m.id}')">
-        <div class="matter-icon">📁</div>
+        <div class="matter-icon">${
+          m.matter_type?.includes('labour') ? '👷' :
+          m.matter_type?.includes('family') || m.matter_type?.includes('divorce') ? '👨‍👩‍👧' :
+          m.matter_type?.includes('criminal') ? '⚖' :
+          m.matter_type?.includes('property') || m.matter_type?.includes('convey') ? '🏠' :
+          m.matter_type?.includes('commercial') || m.matter_type?.includes('contract') ? '💼' :
+          '📁'
+        }</div>
         <div class="matter-expand">
           <div class="matter-name">
             ${ref ? `<span style="color:var(--ink3);font-size:0.75rem;font-weight:600;margin-right:6px">${escHtml(ref)}</span>` : ''}
@@ -1729,66 +1749,65 @@ async function renderMatterPanel(id) {
     const notes = matter.progress_notes || [];
     const html = `
       <!-- Matter metadata controls -->
-      <div style="padding:0.75rem 0;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-        <div style="display:flex;align-items:center;gap:6px">
-          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600">INT REF</label>
-          <input type="text" value="${escHtml(matter.internal_ref || matter.number || '')}"
-            style="width:80px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:0.75rem"
-            onchange="updateMatterField('${id}','internal_ref',this.value)" placeholder="NGM 1"/>
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">📋 Matter Details</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">INT REF</label>
+            <input type="text" value="${escHtml(matter.internal_ref || matter.number || '')}"
+              style="width:90px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="updateMatterField('${id}','internal_ref',this.value)" placeholder="NGM 1"/>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">EXT REF</label>
+            <input type="text" value="${escHtml(matter.external_ref || '')}"
+              style="width:130px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="updateMatterField('${id}','external_ref',this.value)" placeholder="HC 1234/26"/>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">STATUS</label>
+            <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+                    onchange="updateMatterField('${id}','status',this.value)">
+              ${['Active','Awaiting Client','Awaiting Court','On Hold','Closed'].map(s =>
+                `<option value="${s}" ${s===status?'selected':''}>${s}</option>`
+              ).join('')}
+              <option value="__custom__">+ Custom…</option>
+            </select>
+          </div>
+          ${matter.custom_status ? `<span class="chip chip-gray">${escHtml(matter.custom_status)}</span>` : ''}
         </div>
-        <div style="display:flex;align-items:center;gap:6px">
-          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600">EXT REF</label>
-          <input type="text" value="${escHtml(matter.external_ref || '')}"
-            style="width:120px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:0.75rem"
-            onchange="updateMatterField('${id}','external_ref',this.value)" placeholder="HC 1234/26"/>
-        </div>
-        <div style="display:flex;align-items:center;gap:6px">
-          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600">STATUS</label>
-          <select style="padding:3px 6px;border:1px solid var(--border);border-radius:4px;font-size:0.75rem"
-                  onchange="updateMatterField('${id}','status',this.value)">
-            ${['Active','Awaiting Client','Awaiting Court','On Hold','Closed'].map(s =>
-              `<option value="${s}" ${s===status?'selected':''}>${s}</option>`
-            ).join('')}
-            <option value="__custom__">+ Custom…</option>
-          </select>
-        </div>
-        ${matter.custom_status ? `<span class="chip chip-gray">${escHtml(matter.custom_status)}</span>` : ''}
       </div>
 
-
       <!-- Progress Notes -->
-      <div style="padding:0.75rem 0;border-bottom:1px solid var(--border)">
-        <div style="font-weight:600;font-size:0.78rem;color:var(--ink2);margin-bottom:0.5rem">📝 Progress Notes</div>
-        <button class="btn btn-primary btn-sm" 
-                onclick="openNoteModal('${id}')" 
-                style="margin-bottom:0.6rem;width:100%">+ Add Progress Note</button>
+      <div class="matter-section">
+        <div class="matter-section-title">📝 Progress Notes
+          <button class="btn btn-primary btn-sm" onclick="openNoteModal('${id}')" style="margin-left:auto;font-size:0.7rem;padding:3px 10px">+ Add Note</button>
+        </div>
         <div id="note-date-prompt-${id}" style="display:none"></div>
         <div id="notes-list-${id}">
           ${notes.length ? notes.map(n => `
-            <div style="padding:0.4rem 0;border-bottom:1px solid var(--paper3);display:flex;gap:8px;align-items:flex-start">
-              <div style="flex:1">
-                <div style="font-size:0.8rem">${escHtml(n.text)}</div>
-                <div style="font-size:0.68rem;color:var(--ink3);margin-top:2px">${n.author} · ${n.created_at?.slice(0,10)}</div>
+            <div class="note-item">
+              <div class="note-text">${escHtml(n.text)}</div>
+              <div class="note-footer">
+                <span>🖊 ${n.author} · ${n.created_at?.slice(0,10)}</span>
+                ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}" class="note-delete note-delete-btn">✕ Remove</button>` : ''}
               </div>
-              ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}" style="background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.75rem;padding:2px 4px" class="note-delete-btn">✕</button>` : ''}
-            </div>`).join('') : '<p style="color:var(--ink3);font-size:0.78rem">No notes yet.</p>'}
+            </div>`).join('') : '<p style="color:var(--ink3);font-size:0.78rem;padding:0.25rem 0">No notes yet.</p>'}
         </div>
       </div>
 
-
       <!-- Documents -->
-      <div style="padding:0.75rem 0">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem">
-          <div style="font-weight:600;font-size:0.78rem;color:var(--ink2)">📄 Documents</div>
-          <button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')">⬆ Add Document</button>
+      <div class="matter-section">
+        <div class="matter-section-title">📄 Documents
+          <button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')" style="margin-left:auto;font-size:0.7rem;padding:3px 10px">⬆ Upload</button>
         </div>
         ${!docs.length ? '<p style="color:var(--ink3);font-size:0.78rem">No documents uploaded yet.</p>' :
           docs.map(d => `
           <div class="doc-item">
-            <span>📄</span>
-            <div style="flex:1">
-              <div class="doc-name">${escHtml(d.filename)}</div>
-              <div class="doc-meta">
+            <div class="doc-icon">${d.document_type?.includes('judgment') || d.document_type?.includes('court') ? '⚖' : '📄'}</div>
+            <div style="flex:1;min-width:0">
+              <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
+              <div class="doc-meta" style="margin-top:2px">
                 ${d.document_type ? `<span class="chip chip-gray">${d.document_type.replace(/_/g,' ')}</span>` : ''}
                 ${d.doc_date ? `<span class="chip chip-blue">${d.doc_date}</span>` : ''}
                 ${d.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
@@ -1797,13 +1816,13 @@ async function renderMatterPanel(id) {
             </div>
             ${d.status === 'complete' ? `
             <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
-                    title="Extract court dates and deadlines">📅 Extract Dates</button>` : ''}
+                    title="Extract court dates and deadlines" style="white-space:nowrap">📅 Extract Dates</button>` : ''}
           </div>`).join('')}
       </div>
 
       <!-- Rules of Court Calculator -->
-      <div style="padding:0.75rem 0;border-top:1px solid var(--border);margin-top:0.5rem">
-        <div style="font-weight:600;font-size:0.78rem;color:var(--ink2);margin-bottom:0.5rem">⚖ Rules of Court Calculator</div>
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">⚖ Rules of Court Calculator</div>
         <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:0.5rem">
           <div>
             <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Procedure</label>
