@@ -1800,6 +1800,42 @@ async function renderMatterPanel(id) {
                     title="Extract court dates and deadlines">📅 Extract Dates</button>` : ''}
           </div>`).join('')}
       </div>
+
+      <!-- Rules of Court Calculator -->
+      <div style="padding:0.75rem 0;border-top:1px solid var(--border);margin-top:0.5rem">
+        <div style="font-weight:600;font-size:0.78rem;color:var(--ink2);margin-bottom:0.5rem">⚖ Rules of Court Calculator</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:0.5rem">
+          <div>
+            <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Procedure</label>
+            <select id="proc-type-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid var(--border);border-radius:4px" onchange="document.getElementById('proc-province-${id}').style.display=this.value==='magistrates_civil'?'block':'none'">
+              <option value="high_court_action">High Court — Action (Summons)</option>
+              <option value="high_court_application">High Court — Application</option>
+              <option value="labour_court">Labour Court</option>
+              <option value="magistrates_civil">Magistrates Court (Civil)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Date of service</label>
+            <input type="date" id="proc-date-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+          </div>
+          <div id="proc-province-${id}" style="display:none">
+            <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Defendant location</label>
+            <select id="proc-same-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+              <option value="true">Same province</option>
+              <option value="false">Different province / 100km+</option>
+            </select>
+          </div>
+        </div>
+        <div style="margin-bottom:0.5rem">
+          <details style="font-size:0.75rem">
+            <summary style="cursor:pointer;color:var(--ink3)">⚠ Add recess periods (Heads of Argument only)</summary>
+            <div id="recess-list-${id}" style="margin-top:0.4rem"></div>
+            <button onclick="addRecessPeriod('${id}')" style="font-size:0.72rem;margin-top:4px;background:none;border:1px solid var(--ink3);border-radius:4px;padding:2px 8px;cursor:pointer;color:var(--ink3)">+ Add period</button>
+          </details>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="calculateProcedure('${id}','${escHtml(matter.name || '')}')">⚖ Calculate Deadlines</button>
+        <div id="proc-result-${id}" style="margin-top:0.6rem"></div>
+      </div>
     `;
     content.innerHTML = html;
 
@@ -3202,6 +3238,105 @@ async function deleteZlrEntry(id) {
 
 // ── Date Extraction ───────────────────────────────────────────────────────────
 let extractedDates = [];
+
+let recessCounters = {};
+
+function addRecessPeriod(matterId) {
+  if (!recessCounters[matterId]) recessCounters[matterId] = 0;
+  const id = ++recessCounters[matterId];
+  const list = document.getElementById(`recess-list-${matterId}`);
+  if (!list) return;
+  const div = document.createElement('div');
+  div.id = `recess-${matterId}-${id}`;
+  div.style = 'display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap';
+  div.innerHTML = `
+    <label style="font-size:0.72rem;color:var(--ink3)">From</label>
+    <input type="date" id="rs-${matterId}-${id}" style="font-size:0.72rem;padding:2px 5px;border:1px solid var(--border);border-radius:4px">
+    <label style="font-size:0.72rem;color:var(--ink3)">to</label>
+    <input type="date" id="re-${matterId}-${id}" style="font-size:0.72rem;padding:2px 5px;border:1px solid var(--border);border-radius:4px">
+    <button onclick="document.getElementById('recess-${matterId}-${id}').remove()" style="background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.78rem">✕</button>
+  `;
+  list.appendChild(div);
+}
+
+async function calculateProcedure(matterId, matterName) {
+  const procType = document.getElementById(`proc-type-${matterId}`)?.value;
+  const triggerDate = document.getElementById(`proc-date-${matterId}`)?.value;
+  const sameProvince = document.getElementById(`proc-same-${matterId}`)?.value === 'true';
+  const resultEl = document.getElementById(`proc-result-${matterId}`);
+
+  if (!triggerDate) {
+    resultEl.innerHTML = '<p style="color:var(--ink3);font-size:0.78rem">Please enter a date of service.</p>';
+    return;
+  }
+
+  // Collect recess periods
+  const recessPeriods = [];
+  const list = document.getElementById(`recess-list-${matterId}`);
+  if (list) {
+    list.querySelectorAll('[id^="recess-"]').forEach(row => {
+      const rowId = row.id.replace(`recess-${matterId}-`,'');
+      const start = document.getElementById(`rs-${matterId}-${rowId}`)?.value;
+      const end = document.getElementById(`re-${matterId}-${rowId}`)?.value;
+      if (start && end) recessPeriods.push({start, end});
+    });
+  }
+
+  resultEl.innerHTML = '<p style="color:var(--ink3);font-size:0.78rem">Calculating…</p>';
+
+  try {
+    const res = await fetch(`${API}/api/court-procedure/calculate`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        court: procType,
+        trigger_date: triggerDate,
+        matter_id: matterId,
+        matter_name: matterName,
+        same_province: sameProvince,
+        recess_periods: recessPeriods,
+        auto_create_events: true
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Calculation failed');
+
+    const barAlert = data.has_bar_risk
+      ? `<div style="background:#FEE;border:1px solid #F88;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:0.78rem;color:#c00;font-weight:500">⚠ BAR RISK — Labour Court Rule 19: failure to file Heads by deadline = barred from oral submissions.</div>`
+      : '';
+    const critAlert = data.has_critical && !data.has_bar_risk
+      ? `<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:0.78rem;color:#E65100;font-weight:500">⚠ CRITICAL deadlines calculated. Default judgment risk if missed.</div>`
+      : '';
+
+    const rows = data.deadlines.map(dl => {
+      const isCrit = dl.priority === 'critical' || dl.bar_risk;
+      const isHigh = dl.priority === 'high' && !isCrit;
+      const color = isCrit ? '#c00' : isHigh ? '#b85c00' : 'var(--ink2)';
+      const bg = isCrit ? '#FEF2F2' : isHigh ? '#FFFBEB' : 'transparent';
+      return `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:5px 6px;background:${bg};border-radius:4px;margin-bottom:3px">
+          <div style="flex:1">
+            <div style="font-size:0.78rem;font-weight:500;color:${color}">${escHtml(dl.title)}</div>
+            <div style="font-size:0.68rem;color:var(--ink3)">${escHtml(dl.rule)}${dl.recess_days_hit ? ` · +${dl.recess_days_hit} recess day(s)` : ''}</div>
+          </div>
+          <div style="font-size:0.78rem;font-weight:600;color:${color};white-space:nowrap;margin-left:8px">${dl.date}</div>
+        </div>`;
+    }).join('');
+
+    const eventsNote = data.calendar_events_created > 0
+      ? `<div style="font-size:0.7rem;color:var(--ink3);margin-top:6px">✓ ${data.calendar_events_created} deadline(s) added to calendar.</div>`
+      : '';
+
+    resultEl.innerHTML = `
+      <div style="background:var(--paper2);border:1px solid var(--border);border-radius:8px;padding:0.6rem 0.75rem">
+        <div style="font-size:0.72rem;font-weight:600;color:var(--ink3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">${escHtml(data.court_label)} — ${escHtml(procType.replace(/_/g,' '))} · Service date: ${triggerDate}</div>
+        ${barAlert}${critAlert}${rows}${eventsNote}
+      </div>`;
+
+  } catch(e) {
+    resultEl.innerHTML = `<p style="color:var(--ink3);font-size:0.78rem">Error: ${escHtml(e.message)}</p>`;
+  }
+}
 
 async function extractDates(docId, filename) {
   // Show modal
