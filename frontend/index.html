@@ -512,13 +512,74 @@ select{cursor:pointer}
 
 <!-- ═══════════════ MATTERS TAB ═══════════════ -->
 <div id="tab-matters" style="display:none">
-  <div class="section-head">
-    <h2>📂 Matter Dashboard</h2>
-    <p>All matters with indexed documents, progress notes, and status tracking.</p>
+  <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
+    <div>
+      <h2>📂 Matter Dashboard</h2>
+      <p>All matters with indexed documents, progress notes, and status tracking.</p>
+    </div>
+    <button class="btn btn-primary" onclick="openNewMatterModal()" style="white-space:nowrap;margin-top:0.25rem">+ New Matter</button>
+  </div>
+
+  <!-- New Matter Modal -->
+  <div id="new-matter-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <div style="font-weight:700;font-size:1rem">+ New Matter</div>
+        <button onclick="closeNewMatterModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+      </div>
+      <div class="form-group">
+        <label>Matter Name / Description *</label>
+        <input type="text" id="nm-name" placeholder="e.g. Moyo v Dube — Stand 245 Borrowdale"/>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Internal Ref</label>
+          <input type="text" id="nm-internal-ref" placeholder="NGM 1"/>
+        </div>
+        <div class="form-group">
+          <label>External Ref</label>
+          <input type="text" id="nm-external-ref" placeholder="HC 1234/26"/>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Client Name</label>
+        <input type="text" id="nm-client" placeholder="e.g. John Moyo"/>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Matter Type</label>
+          <select id="nm-type">
+            <option value="">— Select type —</option>
+            <option value="commercial_property">Commercial Property</option>
+            <option value="residential_property">Residential Property</option>
+            <option value="employment">Employment / Labour</option>
+            <option value="family">Family / Matrimonial</option>
+            <option value="criminal">Criminal</option>
+            <option value="commercial_contract">Commercial Contract</option>
+            <option value="debt_collection">Debt Collection</option>
+            <option value="estate">Estate / Probate</option>
+            <option value="insurance">Insurance Claim</option>
+            <option value="constitutional">Constitutional</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="nm-status">
+            <option value="Active">Active</option>
+            <option value="Awaiting Client">Awaiting Client</option>
+            <option value="Awaiting Court">Awaiting Court</option>
+            <option value="On Hold">On Hold</option>
+          </select>
+        </div>
+      </div>
+      <div id="nm-status-msg" class="status" style="margin-bottom:0.5rem"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitNewMatter()">Create Matter</button>
+    </div>
   </div>
 
   <!-- Bulk Import -->
-  <div class="card" style="margin-bottom:1rem">
+  <div class="card" style="margin-bottom:1rem;margin-top:1rem">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div>
         <div class="card-title">⬆ Bulk Import Matters</div>
@@ -1545,6 +1606,59 @@ async function logout() {
 
 
 
+function openNewMatterModal() {
+  const modal = document.getElementById('new-matter-modal');
+  modal.style.display = 'flex';
+  document.getElementById('nm-name').focus();
+}
+
+function closeNewMatterModal() {
+  document.getElementById('new-matter-modal').style.display = 'none';
+  ['nm-name','nm-internal-ref','nm-external-ref','nm-client'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('nm-type').value = '';
+  document.getElementById('nm-status').value = 'Active';
+  document.getElementById('nm-status-msg').className = 'status';
+  document.getElementById('nm-status-msg').textContent = '';
+}
+
+async function submitNewMatter() {
+  const name = document.getElementById('nm-name').value.trim();
+  if (!name) {
+    const msg = document.getElementById('nm-status-msg');
+    msg.className = 'status show error';
+    msg.textContent = 'Matter name is required.';
+    return;
+  }
+  const msg = document.getElementById('nm-status-msg');
+  msg.className = 'status show';
+  msg.textContent = 'Creating…';
+  try {
+    const res = await fetch(`${API}/api/matters`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        name,
+        internal_ref: document.getElementById('nm-internal-ref').value.trim() || null,
+        external_ref: document.getElementById('nm-external-ref').value.trim() || null,
+        client_name: document.getElementById('nm-client').value.trim() || null,
+        status: document.getElementById('nm-status').value || 'Active',
+        matter_type: document.getElementById('nm-type').value || null,
+      })
+    });
+    const m = await res.json();
+    if (!res.ok) throw new Error(m.detail || 'Failed to create matter');
+    msg.className = 'status show success';
+    msg.textContent = `✓ Matter "${m.name}" created.`;
+    await loadMatters();
+    setTimeout(() => closeNewMatterModal(), 800);
+  } catch(e) {
+    msg.className = 'status show error';
+    msg.textContent = `Error: ${e.message}`;
+  }
+}
+
 async function loadMatters() {
   try {
     const res = await fetch(`${API}/api/matters`);
@@ -1675,14 +1789,17 @@ function renderMattersList(filtered = null) {
     return `
     <div class="matter-item">
       <div class="matter-row" onclick="toggleMatter('${m.id}')">
-        <div class="matter-icon">${
-          m.matter_type?.includes('labour') ? '👷' :
-          m.matter_type?.includes('family') || m.matter_type?.includes('divorce') ? '👨‍👩‍👧' :
-          m.matter_type?.includes('criminal') ? '⚖' :
-          m.matter_type?.includes('property') || m.matter_type?.includes('convey') ? '🏠' :
-          m.matter_type?.includes('commercial') || m.matter_type?.includes('contract') ? '💼' :
-          '📁'
-        }</div>
+        <div class="matter-icon">${(() => {
+          const t = (m.matter_type || '').toLowerCase().replace(/_/g,' ');
+          return t.includes('labour') || t.includes('employment') ? '👷' :
+                 t.includes('family') || t.includes('divorce') || t.includes('matrimonial') ? '👨‍👩‍👧' :
+                 t.includes('criminal') ? '⚖' :
+                 t.includes('property') || t.includes('convey') || t.includes('deeds') ? '🏠' :
+                 t.includes('commercial') || t.includes('contract') || t.includes('company') ? '💼' :
+                 t.includes('debt') || t.includes('insurance') || t.includes('claim') ? '💰' :
+                 t.includes('estate') || t.includes('probate') || t.includes('deceased') ? '📜' :
+                 '📁';
+        })()}</div>
         <div class="matter-expand">
           <div class="matter-name">
             ${ref ? `<span style="color:var(--ink3);font-size:0.75rem;font-weight:600;margin-right:6px">${escHtml(ref)}</span>` : ''}
@@ -1815,8 +1932,22 @@ async function renderMatterPanel(id) {
               </div>
             </div>
             ${d.status === 'complete' ? `
-            <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
-                    title="Extract court dates and deadlines" style="white-space:nowrap">📅 Extract Dates</button>` : ''}
+            <div style="display:flex;gap:4px;flex-shrink:0">
+              ${d.r2_key ? `
+              <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}','${escHtml(d.filename)}')"
+                      title="View document">👁 View</button>
+              <a href="${API}/api/documents/${d.id}/download" target="_blank"
+                 class="btn btn-sm btn-outline" style="text-decoration:none" title="Download document">⬇</a>
+              ` : ''}
+              <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
+                      title="Extract court dates and deadlines">📅</button>
+              <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
+                      title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
+            </div>` : `
+            <div style="display:flex;gap:4px;flex-shrink:0">
+              <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
+                      title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
+            </div>`}
           </div>`).join('')}
       </div>
 
@@ -3354,6 +3485,22 @@ async function calculateProcedure(matterId, matterName) {
 
   } catch(e) {
     resultEl.innerHTML = `<p style="color:var(--ink3);font-size:0.78rem">Error: ${escHtml(e.message)}</p>`;
+  }
+}
+
+function viewDocument(docId, filename) {
+  window.open(`${API}/api/documents/${docId}/view`, '_blank');
+}
+
+async function deleteDocument(docId, filename, matterId) {
+  if (!confirm(`Delete "${filename}"?\n\nThis will remove the document and all its indexed content. This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`${API}/api/documents/${docId}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error((await res.json()).detail || 'Delete failed');
+    // Refresh the matter panel
+    await renderMatterPanel(matterId);
+  } catch(e) {
+    alert(`Could not delete document: ${e.message}`);
   }
 }
 

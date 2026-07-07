@@ -5096,6 +5096,60 @@ async def download_document(doc_id: str, request: Request):
         raise HTTPException(status_code=500, detail=f"Could not retrieve file: {e}")
 
 
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str, request: Request):
+    """Delete a document — removes from DB, chunks, ChromaDB, and R2."""
+    user = await get_current_user(request)
+    _check_permission(user, "matter:write")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT filename, matter_id, r2_key FROM documents WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        matter_id = row["matter_id"]
+        r2_key = row["r2_key"]
+
+        # Delete chunks from PostgreSQL
+        await conn.execute(
+            "DELETE FROM chunks WHERE document_id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+        # Delete document record
+        await conn.execute(
+            "DELETE FROM documents WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+        # Update matter document count
+        if matter_id:
+            await conn.execute(
+                "UPDATE matters SET document_count = GREATEST(0, document_count - 1), last_activity=NOW() WHERE id=$1 AND firm_id=$2",
+                matter_id, FIRM_ID
+            )
+
+    # Delete from R2 if exists
+    if r2_key and R2_ENABLED and _r2_client:
+        try:
+            await asyncio.to_thread(
+                _r2_client.delete_object, Bucket=R2_BUCKET, Key=r2_key
+            )
+            print(f"[r2] deleted {r2_key}")
+        except Exception as e:
+            print(f"[r2] delete failed for {r2_key}: {e}")
+
+    # Remove from ChromaDB
+    try:
+        firm_col, _, _ = get_chroma_collections()
+        firm_col.delete(where={"document_id": doc_id})
+    except Exception as e:
+        print(f"[chroma] delete failed for doc {doc_id}: {e}")
+
+    return {"deleted": True, "doc_id": doc_id}
+
+
 # ── Firm settings ─────────────────────────────────────────────────────────────
 
 @app.get("/api/settings")
