@@ -5100,7 +5100,7 @@ async def download_document(doc_id: str, request: Request):
 async def delete_document(doc_id: str, request: Request):
     """Delete a document — removes from DB, chunks, ChromaDB, and R2."""
     user = await get_current_user(request)
-    _check_permission(user, "matter:write")
+    _check_permission(user, "document:delete")
 
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow(
