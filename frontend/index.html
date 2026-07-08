@@ -1753,14 +1753,14 @@ function renderMattersList(filtered = null) {
 
   // Sort by last_activity descending (most recent first)
   const sorted = [...matters].sort((a, b) => {
-    const aDate = a.last_activity || a.created_at || '';
-    const bDate = b.last_activity || b.created_at || '';
-    return bDate.localeCompare(aDate);
+    const aName = (a.name || '').toLowerCase();
+    const bName = (b.name || '').toLowerCase();
+    return aName.localeCompare(bName);
   });
 
-  // Use filtered list if searching, otherwise show top 10
+  // Show all matters alphabetically — filter as you type
   const isSearching = filtered !== null;
-  const displayList = isSearching ? filtered : sorted.slice(0, 10);
+  const displayList = isSearching ? filtered : sorted;
   const total = matters.length;
   const showing = displayList.length;
 
@@ -1769,7 +1769,7 @@ function renderMattersList(filtered = null) {
     if (isSearching) {
       countEl.textContent = `${showing} of ${total} matters`;
     } else {
-      countEl.textContent = total > 10 ? `Showing 10 of ${total} — search to find others` : `${total} matter${total !== 1 ? 's' : ''}`;
+      countEl.textContent = total > 10 ? `Showing all ${total} ` : `${total} matter${total !== 1 ? 's' : ''}`;
     }
   }
 
@@ -1935,7 +1935,9 @@ async function renderMatterPanel(id) {
             <div style="display:flex;gap:4px;flex-shrink:0">
               ${d.r2_key ? `
               <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}','${escHtml(d.filename)}')"
-                      title="View / Download — opens in new tab, save with Ctrl+S">👁 View</button>
+                      title="View document">👁 View</button>
+              <button class="btn btn-sm btn-outline" onclick="downloadDocument('${d.id}','${escHtml(d.filename)}')"
+                      title="Download document">⬇</button>
               ` : ''}
               <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
                       title="Extract court dates and deadlines">📅</button>
@@ -3502,7 +3504,10 @@ async function downloadDocument(docId, filename) {
     const res = await fetch(`${API}/api/documents/${docId}/view-url`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Could not get file URL');
-    window.open(data.url, '_blank');
+    const a = document.createElement('a');
+    a.href = data.url;
+    a.download = filename;
+    a.click();
   } catch(e) {
     alert(`Could not download document: ${e.message}`);
   }
