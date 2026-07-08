@@ -13,7 +13,7 @@ Changes from v1.1:
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Response, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -28,30 +28,7 @@ import asyncio
 import secrets
 import time
 import hmac
-from datetime import datetime, timedelta, date
-
-# ── R2 / S3-compatible object storage ─────────────────────────────────────────
-try:
-    import boto3
-    from botocore.exceptions import ClientError
-    _r2_client = boto3.client(
-        "s3",
-        endpoint_url=os.environ.get("R2_ENDPOINT", ""),
-        aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
-        aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
-        region_name="auto",
-    )
-    R2_BUCKET = os.environ.get("R2_BUCKET", "mutemoos-documents")
-    R2_ENABLED = bool(os.environ.get("R2_ENDPOINT") and os.environ.get("R2_ACCESS_KEY_ID"))
-    if R2_ENABLED:
-        print(f"[r2] R2 storage enabled — bucket: {R2_BUCKET}")
-    else:
-        print("[r2] R2 not configured — file storage disabled")
-except ImportError:
-    _r2_client = None
-    R2_BUCKET = ""
-    R2_ENABLED = False
-    print("[r2] boto3 not installed — R2 storage disabled")
+from datetime import datetime, timedelta
 
 # ── Load .env file if present ─────────────────────────────────────────────────
 def _load_dotenv():
@@ -304,9 +281,6 @@ async def run_migrations():
         -- Branding and feature flags on firms
         ALTER TABLE firms ADD COLUMN IF NOT EXISTS firm_logo_url TEXT;
         ALTER TABLE firms ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '[]'::jsonb;
-
-        -- R2 object storage key for original uploaded file
-        ALTER TABLE documents ADD COLUMN IF NOT EXISTS r2_key TEXT;
 
         -- Organisation roles (ops_manager / panel_lawyer) — separate from firm-level role
         CREATE TABLE IF NOT EXISTS organisation_roles (
@@ -2191,42 +2165,19 @@ async def _process_document_background(doc_id: str, matter_id: str, content: byt
         except Exception:
             doc_date = None
 
-    # Upload original file to R2 for view/download
-    r2_key = None
-    if R2_ENABLED and _r2_client and content:
-        try:
-            r2_key = f"{FIRM_ID}/{matter_id}/{doc_id}/{filename}"
-            content_type = (
-                "application/pdf" if ext == "pdf" else
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if ext in ("docx","doc") else
-                "application/octet-stream"
-            )
-            await asyncio.to_thread(
-                _r2_client.put_object,
-                Bucket=R2_BUCKET,
-                Key=r2_key,
-                Body=content,
-                ContentType=content_type,
-                ContentDisposition=f'inline; filename="{filename}"',
-            )
-            print(f"[r2] uploaded {filename} → {r2_key}")
-        except Exception as e:
-            print(f"[r2] upload failed for {filename}: {e}")
-            r2_key = None
-
     async with _db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE documents SET
                 document_type=$1, matter_type=$2, parties=$3,
                 doc_date=$4, court=$5, word_count=$6, page_count=$7,
-                chunk_count=$8, ocr_used=$9, status='complete', r2_key=$12
+                chunk_count=$8, ocr_used=$9, status='complete'
             WHERE id=$10 AND firm_id=$11
         """,
         metadata.get("document_type"), metadata.get("matter_type"),
         str(metadata.get("parties", "")) if metadata.get("parties") else None,
         doc_date, metadata.get("court"),
         word_count, page_count, chunk_count, ocr_used,
-        _uuid_mod.UUID(doc_id), FIRM_ID, r2_key
+        _uuid_mod.UUID(doc_id), FIRM_ID
         )
         await conn.execute(
             "UPDATE matters SET document_count = document_count + 1, last_activity=NOW() WHERE id=$1 AND firm_id=$2",
@@ -3313,102 +3264,6 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def expand_query_sync(query: str) -> str:
-    """Use Claude Haiku to expand a legal query with Zimbabwean legal synonyms.
-    Called when initial search returns no results."""
-    try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=150,
-            messages=[{"role": "user", "content": f"""You are a Zimbabwean legal research assistant with deep knowledge of Zimbabwe statutes and legal terminology.
-
-Key Zimbabwe-specific legal term mappings (use these where relevant):
-- "civil partner" / "unmarried couple" / "cohabitation" → "section 41 Marriages Act Chapter 5:15 unregistered union civil partnership"
-- "Islamic marriage" / "Muslim marriage" → "qualified civil marriage section 44 Marriages Act polygamous union"
-- "customary marriage" / "lobola" → "customary law union Chapter 5:07 unregistered marriage"
-- "unfair dismissal" / "wrongful termination" → "Labour Act Chapter 28:01 due inquiry section 12 employment code"
-- "company director" / "director duties" → "Companies and Other Business Entities Act Chapter 24:31 COBE section 195"
-- "contractual penalty" / "breach of contract" → "Contractual Penalties Act Chapter 8:04 section 4 penalty stipulation"
-- "prescription" / "limitation period" → "Prescription Act Chapter 8:11 extinctive prescription"
-- "eviction" / "ejectment" → "Rent Regulations Act Chapter 10:17 Magistrates Court jurisdiction"
-- "estate" / "inheritance" / "deceased" → "Administration of Estates Act Chapter 6:01 Master of High Court"
-
-Expand this search query with Zimbabwe legal synonyms and related statutory terms.
-Return ONLY the expanded query as a single line — no explanation, no bullet points.
-
-Query: {query}
-
-Expanded query:"""}]
-        )
-        expanded = msg.content[0].text.strip()
-        print(f"[search] query expanded: '{query}' → '{expanded}'")
-        return expanded
-    except Exception as e:
-        print(f"[search] query expansion failed: {e}")
-        return query
-
-
-LAWS_AFRICA_TOKEN = os.environ.get("LAWS_AFRICA_TOKEN", "")
-LAWS_AFRICA_API = "https://api.laws.africa/ai/v1/knowledge-bases"
-
-async def search_laws_africa(query: str, top_k: int = 3) -> list:
-    """
-    Query Laws.Africa Knowledge Base API for Zimbabwe legislation and judgments.
-    Returns results formatted for MutemoOS search results rendering.
-    Falls back to empty list silently if token not set or API unavailable.
-    """
-    if not LAWS_AFRICA_TOKEN:
-        return []
-    import httpx
-    results = []
-    payload = {
-        "text": query,
-        "top_k": top_k,
-        "filters": {"commenced": True, "repealed": False, "principal": True}
-    }
-    headers = {
-        "Authorization": f"Bearer {LAWS_AFRICA_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    # Query both legislation and judgments KBs
-    for kb_code, kb_label in [("legislation-zw", "Legislation"), ("judgments-zw", "Judgment")]:
-        try:
-            async with httpx.AsyncClient(timeout=8) as http:
-                resp = await http.post(
-                    f"{LAWS_AFRICA_API}/{kb_code}/retrieve",
-                    json=payload,
-                    headers=headers,
-                )
-            if resp.status_code != 200:
-                print(f"[laws_africa] {kb_code} returned {resp.status_code}")
-                continue
-            data = resp.json()
-            for item in data.get("results", []):
-                meta = item.get("metadata", {})
-                content = item.get("content", {})
-                text = content.get("text", "")
-                if not text:
-                    continue
-                results.append({
-                    "result_source": "laws_africa",
-                    "chunk_id": meta.get("portion_id", ""),
-                    "text": text[:1200],  # cap chunk size for synthesis
-                    "similarity": round(min(item.get("score", 0) / 15.0, 1.0), 3),
-                    "document_id": meta.get("work_frbr_uri", ""),
-                    "filename": meta.get("title", "Zimbabwe Legislation"),
-                    "reference": meta.get("portion_title", ""),
-                    "source_type": kb_label,
-                    "source_name": "Laws.Africa",
-                    "source_url": meta.get("portion_public_url") or meta.get("public_url", ""),
-                    "expression_date": meta.get("expression_date", ""),
-                })
-        except Exception as e:
-            print(f"[laws_africa] {kb_code} search failed: {e}")
-    # Sort by score descending and cap total
-    results.sort(key=lambda r: r["similarity"], reverse=True)
-    return results[:top_k]
-
-
 @app.post("/api/search")
 async def search_documents(req: SearchRequest, request: Request):
     user = await get_current_user(request)
@@ -3433,9 +3288,7 @@ async def search_documents(req: SearchRequest, request: Request):
     results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
     legal_results = []
     if req.include_legal_updates:
-        search_query = clean_query_for_search(req.query) if is_verbatim_request(req.query) else req.query
-        search_req = req.model_copy(update={"query": search_query})
-        legal_results = await asyncio.to_thread(_semantic_search_legal, search_req, legal_chunks)
+        legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
 
     zlr_results = []
     if zlr_chunks_list:
@@ -3453,39 +3306,12 @@ async def search_documents(req: SearchRequest, request: Request):
                 "summary": r.get("summary"),
             })
 
-    # Laws.Africa live KB query — runs in parallel with local search
-    laws_africa_results = await search_laws_africa(req.query, top_k=3)
-
-    all_results = results + legal_results + zlr_results + laws_africa_results
-
-    # If no results, expand query with Claude Haiku and retry once
-    if not all_results:
-        expanded_query = await asyncio.to_thread(expand_query_sync, req.query)
-        if expanded_query and expanded_query.lower() != req.query.lower():
-            expanded_req = req.model_copy(update={"query": expanded_query})
-            legal_results = await asyncio.to_thread(_semantic_search_legal, expanded_req, legal_chunks)
-            results_retry = await asyncio.to_thread(_semantic_search_firm, expanded_req, firm_chunks)
-            laws_africa_retry = await search_laws_africa(expanded_query, top_k=3)
-            all_results = results_retry + legal_results + zlr_results + laws_africa_retry
-
+    all_results = results + legal_results + zlr_results
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
-    # Include Laws.Africa results in synthesis context
-    synthesis = await asyncio.to_thread(
-        synthesise_answer_sync,
-        req.query,
-        results[:5],
-        legal_results[:3] + laws_africa_results[:2]
-    )
-    return {
-        "answer": synthesis.get("answer"),
-        "grounding_note": synthesis.get("grounding_note", ""),
-        "sources_sufficient": synthesis.get("sources_sufficient", True),
-        "source_gap": synthesis.get("source_gap", ""),
-        "results": all_results,
-    }
-
+    answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3])
+    return {"answer": answer, "results": all_results}
 
 def _semantic_search_firm(req, chunks: list) -> list:
     results = []
@@ -3544,7 +3370,6 @@ def _semantic_search_firm(req, chunks: list) -> list:
 
 def _semantic_search_legal(req, chunks: list) -> list:
     results = []
-    SIMILARITY_THRESHOLD = 0.35  # below this, results are noise
     try:
         _, legal_col, _ = get_chroma_collections()
         if legal_col.count() > 0:
@@ -3555,12 +3380,10 @@ def _semantic_search_legal(req, chunks: list) -> list:
             distances = res["distances"][0] if res["distances"] else []
             chunk_by_id = {c["id"]: c for c in chunks}
             for cid, dist in zip(ids, distances):
-                similarity = max(0.0, 1.0 - dist)
-                if similarity < SIMILARITY_THRESHOLD:
-                    continue  # filter out noise
                 chunk = chunk_by_id.get(cid)
                 if not chunk:
                     continue
+                similarity = max(0.0, 1.0 - dist)
                 results.append({
                     "result_source": "legal",
                     "chunk_id": chunk["id"],
@@ -3575,168 +3398,22 @@ def _semantic_search_legal(req, chunks: list) -> list:
                     break
     except Exception as e:
         print(f"[search] legal semantic search failed: {e}")
-
-    # FTS fallback — if semantic returned nothing, use word overlap + exact phrase bonus
-    if not results and chunks:
-        print(f"[search] legal FTS fallback for: {req.query}")
-        query_lower = req.query.lower()
-        query_words = set(query_lower.split()) - {"and", "the", "of", "in", "a", "an", "to", "for", "is", "are"}
-        scored = []
-        for chunk in chunks:
-            text_lower = chunk["text"].lower()
-            word_score = len(query_words & set(text_lower.split())) / max(len(query_words), 1)
-            # Bonus for exact phrase match
-            phrase_bonus = 0.5 if any(w in text_lower for w in query_words if len(w) > 4) else 0
-            score = word_score + phrase_bonus
-            if score > 0.1:
-                scored.append((score, chunk))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        for score, chunk in scored[:req.limit]:
-            results.append({
-                "result_source": "legal",
-                "chunk_id": chunk["id"],
-                "text": chunk["text"],
-                "similarity": round(min(score, 0.99), 3),
-                "document_id": str(chunk["document_id"]),
-                "source_type": chunk.get("source_type"),
-                "source_name": chunk.get("source_name"),
-                "reference": chunk.get("reference"),
-            })
     return results
 
-VERBATIM_TRIGGERS = [
-    "quote", "verbatim", "exact wording", "exact text", "exact words",
-    "word for word", "what does section", "what does the act say",
-    "what does the law say", "reproduce", "copy of section",
-    "full text of section", "text of section",
-]
-
-VERBATIM_STRIP = [
-    "quote ", "verbatim ", "exact wording of ", "exact text of ",
-    "exact words of ", "word for word ", "what does section ",
-    "what does the act say about ", "what does the law say about ",
-    "reproduce ", "full text of section ", "text of section ",
-    "copy of section ", "give me section ", "show me section ",
-    "what is section ", "please quote ",
-]
-
-def is_verbatim_request(query: str) -> bool:
-    q = query.lower()
-    return any(t in q for t in VERBATIM_TRIGGERS)
-
-def clean_query_for_search(query: str) -> str:
-    q = query.lower().strip()
-    for strip in VERBATIM_STRIP:
-        q = q.replace(strip, "")
-    return q.strip().strip("\"'")
-
-
-def ground_check_sync(query: str, context: str) -> dict:
-    """
-    Stage 1 — Ground check using Claude Haiku.
-    Reads the retrieved sources and returns:
-    - verified_claims: list of claims directly supported by the sources
-    - unverified_claims: list of claims that would require sources not present
-    - source_gap: description of what's missing if sources are insufficient
-    - sources_sufficient: bool
-    """
-    try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=400,
-            messages=[{"role": "user", "content": f"""You are a legal grounding checker for a Zimbabwe law firm AI system.
-
-Query: {query}
-
-Retrieved sources:
-{context[:3000]}
-
-Assess these sources and return ONLY valid JSON:
-{{
-  "sources_sufficient": true or false,
-  "verified_topics": ["list of legal topics directly addressed in the sources"],
-  "source_gap": "what specific Acts, sections or cases are missing that would be needed for a complete answer, or empty string if sufficient",
-  "grounding_note": "one sentence for the lawyer about source coverage"
-}}
-
-JSON only:"""}]
-        )
-        raw = msg.content[0].text.strip()
-        raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
-        return json.loads(raw)
-    except Exception as e:
-        print(f"[grounding] check failed: {e}")
-        return {
-            "sources_sufficient": True,
-            "verified_topics": [],
-            "source_gap": "",
-            "grounding_note": ""
-        }
-
-
-def synthesise_answer_sync(query: str, results: list, legal_results: list) -> dict:
-    """
-    Two-stage grounded synthesis.
-    Returns dict with 'answer', 'grounding_note', 'sources_sufficient'.
-    """
+def synthesise_answer_sync(query: str, results: list, legal_results: list) -> str:
     if not results and not legal_results:
-        return {"answer": None, "grounding_note": "", "sources_sufficient": False}
-
+        return None
     context_parts = []
     for r in results[:5]:
         context_parts.append(f"[FIRM PRECEDENT — {r.get('document_id','')}]\n{r['text']}")
-    for r in (legal_results or [])[:5]:
-        if r.get("result_source") == "laws_africa":
-            label = f"{r.get('filename', 'Zimbabwe Legislation')} — {r.get('reference', '')}"
-            url = r.get("source_url", "")
-            ref_line = f"[LAWS.AFRICA — {label}]"
-            if url:
-                ref_line += f"\nSource: {url}"
-        else:
-            label = r.get("reference") or r.get("source_name") or "Legal Source"
-            ref_line = f"[{label}]"
-        context_parts.append(f"{ref_line}\n{r['text']}")
+    for r in (legal_results or [])[:3]:
+        ref = r.get("reference") or r.get("source_name") or "Legal Source"
+        context_parts.append(f"[{ref}]\n{r['text']}")
     context = "\n\n---\n\n".join(context_parts)
-
-    # Stage 1 — Ground check (Haiku, fast)
-    grounding = ground_check_sync(query, context)
-    sources_sufficient = grounding.get("sources_sufficient", True)
-    source_gap = grounding.get("source_gap", "")
-    grounding_note = grounding.get("grounding_note", "")
-
-    # Stage 2 — Constrained synthesis (Sonnet)
-    gap_instruction = ""
-    if not sources_sufficient and source_gap:
-        gap_instruction = f"""
-IMPORTANT: The retrieved sources do not fully cover this query.
-Missing: {source_gap}
-For any claims NOT directly supported by the sources above, you MUST prefix them with:
-"[General principle — verify in source]"
-Do NOT state unsupported claims as settled law."""
-
-    if is_verbatim_request(query):
-        instruction = f"""The user wants the EXACT wording from the source document.
-Do NOT paraphrase, summarise or interpret.
-Reproduce the relevant section(s) verbatim in quotation marks where the text is clearly present in the sources.
-Precede each quotation with the section number and Act/document name.
-If the exact section text is not clearly present in the sources, summarise what the section says and direct the user to the specific section number and Act for the full text.
-Always end with: "For the full text, see [section X] of [Act Name / case citation]."{gap_instruction}"""
-    else:
-        instruction = f"""Answer directly and practically:
-- Only state what is directly supported by the sources provided
-- Clearly label any general legal principles not found in the sources as "[General principle — verify in source]"
-- If firm precedents are present, identify patterns and note them by document ID
-- If legislation or case law is present, summarise the relevant legal position and cite by reference
-- Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents
-
-Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources.
-Always end with a "See also:" line citing the specific section numbers and Act names or case citations the answer draws from.{gap_instruction}"""
-
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=800,
+            max_tokens=600,
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 
 Query: {query}
@@ -3744,24 +3421,18 @@ Query: {query}
 Sources:
 {context}
 
-{instruction}"""}]
+Answer directly and practically:
+- If firm precedents are present, identify patterns and note them by document ID
+- If legislation or case law is present, summarise the relevant legal position and cite by reference
+- Flag variations over time
+- For drafting queries, suggest specific language from the firm precedents
+
+Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources."""}]
         )
-        answer_text = msg.content[0].text
-        return {
-            "answer": answer_text,
-            "grounding_note": grounding_note,
-            "sources_sufficient": sources_sufficient,
-            "source_gap": source_gap,
-        }
+        return msg.content[0].text
     except Exception:
         total = len(results) + len(legal_results or [])
-        return {
-            "answer": f"Found {total} relevant excerpt(s). Review the sources below.",
-            "grounding_note": "",
-            "sources_sufficient": True,
-            "source_gap": "",
-        }
-
+        return f"Found {total} relevant excerpt(s). Review the sources below."
 
 # ── Affidavit Generator ───────────────────────────────────────────────────────
 
@@ -3810,180 +3481,7 @@ Draft the complete affidavit in proper Zimbabwe High Court form. Number all para
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Affidavit generation failed: {e}")
 
-
-# ── Generate Document (letters, notices, agreements, court docs) ──────────────
-
-class GenerateDocumentRequest(BaseModel):
-    doc_type: str
-    plaintiff: Optional[str] = None
-    defendant: Optional[str] = None
-    court: Optional[str] = None
-    case_number: Optional[str] = None
-    facts: str
-    instructions: Optional[str] = None
-    precedent_context: Optional[dict] = None
-
-DOC_TYPE_PROMPTS = {
-    "letter": "a formal legal letter",
-    "demand_letter": "a formal demand letter",
-    "notice": "a legal notice",
-    "court_application": "a court application with notice of motion and draft order",
-    "heads_of_argument": "heads of argument for a Zimbabwe High Court matter",
-    "settlement": "a deed of settlement",
-    "contract": "a commercial contract or agreement",
-    "opinion": "a legal opinion",
-    "other": "a legal document",
-}
-
-@app.post("/api/generate-document")
-async def generate_document(req: GenerateDocumentRequest, request: Request):
-    user = await get_current_user(request)
-    _check_permission(user, "draft:document")
-
-    doc_label = DOC_TYPE_PROMPTS.get(req.doc_type, "a legal document")
-
-    precedent_block = ""
-    if req.precedent_context:
-        fname = req.precedent_context.get("filename", "precedent")
-        mname = req.precedent_context.get("matter_name", "")
-        text = str(req.precedent_context.get("text", ""))[:2000]
-        precedent_block = f"\n\nFIRM PRECEDENT ({fname} — {mname}):\n---\n{text}\n---"
-
-    parties_block = ""
-    if req.plaintiff:
-        parties_block += f"\nClient / First Party: {req.plaintiff}"
-    if req.defendant:
-        parties_block += f"\nOpposing Party / Second Party: {req.defendant}"
-    if req.court:
-        parties_block += f"\nCourt / Forum: {req.court}"
-    if req.case_number:
-        parties_block += f"\nCase / Reference Number: {req.case_number}"
-
-    prompt = f"""You are a senior legal drafter at {FIRM_NAME}, Harare, Zimbabwe.
-
-Draft {doc_label} based on the following:{parties_block}
-
-Facts and context:
-{req.facts}
-
-{"Additional instructions: " + req.instructions if req.instructions else ""}
-{precedent_block}
-
-Drafting requirements:
-- Use proper Zimbabwe legal drafting conventions
-- For letters: use formal letterhead-style layout with date, addressee, reference line, body paragraphs, and sign-off
-- For court documents: use proper Zimbabwe High Court format
-- Be precise, professional, and complete
-- Use [_____] for any details not provided
-- Do not add commentary or explanations — produce the document only"""
-
-    try:
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return {"document": msg.content[0].text}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Document generation failed: {e}")
-
 # ── DOCX Export ───────────────────────────────────────────────────────────────
-
-class ExportDocumentRequest(BaseModel):
-    content_html: str
-    filename: Optional[str] = "document"
-
-@app.post("/api/export-document-docx")
-async def export_document_docx(req: ExportDocumentRequest, request: Request):
-    """
-    Export Draft Document tab content (HTML from rich text editor) as .docx.
-    Strips HTML tags and converts to properly formatted Word document.
-    """
-    user = await get_current_user(request)
-    _check_permission(user, "draft:document")
-
-    import shutil
-    node_path = None
-    for candidate in ["/usr/local/bin/node", "/usr/bin/node", "node"]:
-        if shutil.which(candidate):
-            node_path = candidate
-            break
-    if not node_path:
-        raise HTTPException(status_code=503, detail="Node.js is not available. Copy the document text manually.")
-
-    # Strip HTML to plain text preserving line breaks
-    import re as _re
-    html = req.content_html
-    # Convert block-level tags to newlines
-    html = _re.sub(r'<br\s*/?>', '\n', html, flags=_re.IGNORECASE)
-    html = _re.sub(r'</p>', '\n', html, flags=_re.IGNORECASE)
-    html = _re.sub(r'</div>', '\n', html, flags=_re.IGNORECASE)
-    html = _re.sub(r'</h[1-6]>', '\n', html, flags=_re.IGNORECASE)
-    # Remove remaining tags
-    plain = _re.sub(r'<[^>]+>', '', html)
-    # Decode HTML entities
-    plain = plain.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
-    # Clean up excessive blank lines
-    plain = _re.sub(r'\n{3,}', '\n\n', plain).strip()
-
-    safe_filename = _re.sub(r'[^\w\-_]', '_', req.filename or 'document')[:60]
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        script_path = os.path.join(tmpdir, "make_docx.js")
-        output_path = os.path.join(tmpdir, f"{safe_filename}.docx")
-        escaped = plain.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
-
-        node_script = f"""
-const {{ Document, Packer, Paragraph, TextRun, AlignmentType }} = require('docx');
-const fs = require('fs');
-const text = `{escaped}`;
-const lines = text.split('\\n');
-const paragraphs = lines.map(line => {{
-  const t = line.trim();
-  const isCentre = t === t.toUpperCase() && t.length > 3 && t.length < 80 && /[A-Z]/.test(t);
-  const isBold = isCentre || /^(RE:|DEAR|YOURS|RE\\s|DEMAND|BREACH|NOTICE|REQUEST|RESERVATION)/.test(t.toUpperCase());
-  return new Paragraph({{
-    alignment: isCentre ? AlignmentType.CENTER : AlignmentType.JUSTIFIED,
-    spacing: {{ after: t === '' ? 0 : 160 }},
-    children: [new TextRun({{ text: line, font: 'Times New Roman', size: 24, bold: isBold }})]
-  }});
-}});
-const doc = new Document({{
-  sections: [{{
-    properties: {{ page: {{ margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }} }} }},
-    children: paragraphs
-  }}]
-}});
-Packer.toBuffer(doc).then(buf => {{
-  fs.writeFileSync('{output_path}', buf);
-  console.log('done');
-}});
-"""
-        with open(script_path, "w") as f:
-            f.write(node_script)
-        with open(os.path.join(tmpdir, "package.json"), "w") as f:
-            json.dump({"dependencies": {"docx": "^8.5.0"}}, f)
-
-        install = subprocess.run(["npm", "install", "--prefix", tmpdir, "docx"],
-                                 capture_output=True, text=True, timeout=60, cwd=tmpdir)
-        if install.returncode != 0:
-            raise HTTPException(status_code=500, detail="Failed to install docx package")
-
-        result = subprocess.run([node_path, script_path],
-                                capture_output=True, text=True, timeout=30, cwd=tmpdir)
-        if result.returncode != 0 or not os.path.exists(output_path):
-            raise HTTPException(status_code=500, detail=f"DOCX generation failed: {result.stderr[:200]}")
-
-        with open(output_path, "rb") as f:
-            docx_bytes = f.read()
-
-    from fastapi.responses import Response as FastAPIResponse
-    return FastAPIResponse(
-        content=docx_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{safe_filename}.docx"'}
-    )
-
 
 @app.post("/api/export-docx")
 async def export_docx(req: ExportRequest, request: Request):
@@ -4059,348 +3557,7 @@ Packer.toBuffer(doc).then(buffer => {{
         headers={"Content-Disposition": f'attachment; filename="affidavit_{req.document_id}.docx"'}
     )
 
-# ── Rules of Court Calculator ─────────────────────────────────────────────────
-
-class CourtProcedureEngine:
-    """
-    Zimbabwe Rules of Court — dies induciae calculator.
-    Hardcodes High Court and Magistrates Court Civil procedures.
-    All deadlines in working days (Mon-Fri) excluding Zimbabwe public holidays.
-    Recess periods (user-supplied) suspend dies for Heads of Argument only.
-    """
-
-    FIXED_HOLIDAYS = {
-        (1,1),(2,21),(4,18),(5,1),(5,25),
-        (8,11),(8,12),(12,22),(12,25),(12,26)
-    }
-
-    @staticmethod
-    def _easter(year: int) -> date:
-        a=year%19;b=year//100;c=year%100;d=b//4;e=b%4
-        f=(b+8)//25;g=(b-f+1)//3;h=(19*a+b-d-g+15)%30
-        i=c//4;k=c%4;l=(32+2*e+2*i-h-k)%7
-        m=(a+11*h+22*l)//451
-        month=(h+l-7*m+114)//31
-        day=(h+l-7*m+114)%31+1
-        return date(year,month,day)
-
-    @classmethod
-    def _is_holiday(cls, d: date) -> bool:
-        if (d.month, d.day) in cls.FIXED_HOLIDAYS:
-            return True
-        easter = cls._easter(d.year)
-        for offset in [-2,-1,1]:
-            from datetime import timedelta
-            if d == easter + timedelta(days=offset):
-                return True
-        return False
-
-    @classmethod
-    def _is_working_day(cls, d: date) -> bool:
-        if d.weekday() >= 5:
-            return False
-        if cls._is_holiday(d):
-            return False
-        return True
-
-    @classmethod
-    def _add_working_days(cls, start: date, days: int,
-                          recess_periods: list = None,
-                          suspend_in_recess: bool = False) -> tuple:
-        """
-        Add `days` working days to start date.
-        If suspend_in_recess=True, days that fall within recess_periods are skipped.
-        Returns (result_date, recess_days_hit).
-        """
-        from datetime import timedelta
-        recess_periods = recess_periods or []
-        count = 0
-        recess_hit = 0
-        d = start + timedelta(days=1)
-        while count < days:
-            if cls._is_working_day(d):
-                in_recess = suspend_in_recess and any(
-                    r['start'] <= d <= r['end'] for r in recess_periods
-                )
-                if in_recess:
-                    recess_hit += 1
-                else:
-                    count += 1
-            if count < days:
-                d += timedelta(days=1)
-        # Move to next working day if result is non-working
-        while not cls._is_working_day(d):
-            d += timedelta(days=1)
-        return d, recess_hit
-
-    @classmethod
-    def high_court_action(cls, service_date: date,
-                          recess_periods: list = None) -> list:
-        """High Court — Action (Summons) procedure."""
-        rp = recess_periods or []
-        deadlines = []
-
-        nitds_date, _ = cls._add_working_days(service_date, 10)
-        deadlines.append({
-            "step": 3, "title": "Notice of Intention to Defend (NITDs)",
-            "actor": "Defendant", "date": nitds_date.isoformat(),
-            "days": 10, "rule": "High Court Rules",
-            "priority": "normal", "bar_risk": False,
-            "note": "10 working days from service. Failure allows plaintiff to apply for default judgment."
-        })
-
-        plea_date, _ = cls._add_working_days(nitds_date, 10)
-        deadlines.append({
-            "step": 4, "title": "Plea",
-            "actor": "Defendant", "date": plea_date.isoformat(),
-            "days": 10, "rule": "High Court Rules",
-            "priority": "normal", "bar_risk": False,
-            "note": "10 working days after NITDs."
-        })
-
-        close_date, _ = cls._add_working_days(plea_date, 10)
-        deadlines.append({
-            "step": 5, "title": "Replication & Close of Pleadings",
-            "actor": "Plaintiff", "date": close_date.isoformat(),
-            "days": 10, "rule": "High Court Rules",
-            "priority": "normal", "bar_risk": False,
-            "note": "10 working days after plea. Pleadings close."
-        })
-
-        discovery_date, _ = cls._add_working_days(close_date, 21)
-        deadlines.append({
-            "step": 6, "title": "Discovery Deadline (both parties)",
-            "actor": "Both parties", "date": discovery_date.isoformat(),
-            "days": 21, "rule": "High Court Rules",
-            "priority": "normal", "bar_risk": False,
-            "note": "21 working days after close of pleadings. Notice to Discover, Affidavit and Schedule."
-        })
-
-        return deadlines
-
-    @classmethod
-    def high_court_application(cls, service_date: date,
-                               recess_periods: list = None) -> list:
-        """High Court — Application procedure."""
-        rp = recess_periods or []
-        deadlines = []
-
-        opposition_date, _ = cls._add_working_days(service_date, 10)
-        deadlines.append({
-            "step": 4, "title": "Notice of Opposition & Opposing Affidavit",
-            "actor": "Respondent", "date": opposition_date.isoformat(),
-            "days": 10, "rule": "High Court Rules",
-            "priority": "normal", "bar_risk": False,
-            "note": "10 working days from service. Failure may result in application granted by default."
-        })
-
-        answering_date, _ = cls._add_working_days(opposition_date, 30)
-        deadlines.append({
-            "step": 5, "title": "Answering Affidavit or Set Down",
-            "actor": "Applicant", "date": answering_date.isoformat(),
-            "days": 30, "rule": "High Court Rules",
-            "priority": "normal", "bar_risk": False,
-            "note": "30 working days after receiving respondent's papers."
-        })
-
-        applicant_heads_date, rh1 = cls._add_working_days(
-            opposition_date, 30, rp, suspend_in_recess=True
-        )
-        recess_note = f" Extended by {rh1} recess day(s)." if rh1 > 0 else ""
-        deadlines.append({
-            "step": 6, "title": "Heads of Argument — Applicant",
-            "actor": "Applicant", "date": applicant_heads_date.isoformat(),
-            "days": 30, "rule": "High Court Rules — Heads (recess suspended)",
-            "priority": "high", "bar_risk": False,
-            "recess_days_hit": rh1,
-            "note": f"30 working days. Dies suspended during recess.{recess_note}"
-        })
-
-        respondent_heads_date, rh2 = cls._add_working_days(
-            applicant_heads_date, 30, rp, suspend_in_recess=True
-        )
-        recess_note2 = f" Extended by {rh2} recess day(s)." if rh2 > 0 else ""
-        deadlines.append({
-            "step": 7, "title": "Heads of Argument — Respondent",
-            "actor": "Respondent", "date": respondent_heads_date.isoformat(),
-            "days": 30, "rule": "High Court Rules — Heads (recess suspended)",
-            "priority": "high", "bar_risk": False,
-            "recess_days_hit": rh2,
-            "note": f"30 working days after applicant's heads. Dies suspended during recess.{recess_note2}"
-        })
-
-        return deadlines
-
-    @classmethod
-    def labour_court(cls, service_date: date,
-                     recess_periods: list = None) -> list:
-        """Labour Court Rules, 2017 (S.I. 150/2017) — Rules 15 & 19."""
-        deadlines = []
-
-        response_date, _ = cls._add_working_days(service_date, 10)
-        deadlines.append({
-            "step": 2, "title": "Notice of Response (Form LC 2)",
-            "actor": "Respondent", "date": response_date.isoformat(),
-            "days": 10, "rule": "Labour Court Rules — Rule 15",
-            "priority": "high", "bar_risk": False,
-            "note": "Exactly 10 days from service. Strict deadline under Rule 15."
-        })
-
-        applicant_heads_date, _ = cls._add_working_days(response_date, 15)
-        deadlines.append({
-            "step": 3, "title": "Heads of Argument — Applicant/Appellant",
-            "actor": "Applicant / Appellant", "date": applicant_heads_date.isoformat(),
-            "days": 15, "rule": "Labour Court Rules — Rule 19",
-            "priority": "critical", "bar_risk": True,
-            "note": "15 days after response filed. CRITICAL: Failure = BARRED from oral submissions (Rule 19)."
-        })
-
-        respondent_heads_date, _ = cls._add_working_days(applicant_heads_date, 10)
-        deadlines.append({
-            "step": 4, "title": "Heads of Argument — Respondent",
-            "actor": "Respondent", "date": respondent_heads_date.isoformat(),
-            "days": 10, "rule": "Labour Court Rules — Rule 19",
-            "priority": "critical", "bar_risk": True,
-            "note": "10 days after applicant's heads. CRITICAL: Failure = BARRED from oral submissions (Rule 19)."
-        })
-
-        return deadlines
-
-    @classmethod
-    def magistrates_civil(cls, service_date: date,
-                          same_province: bool = True,
-                          recess_periods: list = None) -> list:
-        """Magistrates Court Civil Rules, 2019 (S.I. 11/2019) — Orders 8 & 16."""
-        from datetime import timedelta
-        deadlines = []
-
-        appearance_days = 7 if same_province else 14
-        province_note = "same province" if same_province else "different province / 100km+"
-        appearance_date, _ = cls._add_working_days(service_date, appearance_days)
-        deadlines.append({
-            "step": 2, "title": "Appearance to Defend",
-            "actor": "Defendant", "date": appearance_date.isoformat(),
-            "days": appearance_days, "rule": f"Magistrates Court Civil Rules — Order 8, Rule 1 ({province_note})",
-            "priority": "high", "bar_risk": False,
-            "note": f"{appearance_days} working days from service ({province_note}). Failure allows plaintiff to apply for default judgment immediately."
-        })
-
-        plea_date, _ = cls._add_working_days(appearance_date, 7)
-        deadlines.append({
-            "step": 3, "title": "Plea — DEFAULT JUDGMENT RISK",
-            "actor": "Defendant", "date": plea_date.isoformat(),
-            "days": 7, "rule": "Magistrates Court Civil Rules — Order 16, Rule 1",
-            "priority": "critical", "bar_risk": False,
-            "note": "CRITICAL: 7 working days after Appearance to Defend. Missing this deadline allows plaintiff to apply IMMEDIATELY for Default Judgment."
-        })
-
-        return deadlines
-
-
-class ProcedureRequest(BaseModel):
-    court: str  # "high_court_action" | "high_court_application" | "labour_court" | "magistrates_civil"
-    trigger_date: str  # YYYY-MM-DD — date of service
-    matter_id: Optional[str] = None
-    matter_name: Optional[str] = None
-    same_province: Optional[bool] = True  # Magistrates only
-    recess_periods: Optional[list] = None  # [{"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}]
-    auto_create_events: bool = True  # auto-populate calendar
-
-
-@app.post("/api/court-procedure/calculate")
-async def calculate_court_procedure(req: ProcedureRequest, request: Request):
-    """
-    Calculate all procedural deadlines for a Zimbabwe court matter.
-    Optionally auto-creates calendar events for each deadline.
-    """
-    user = await get_current_user(request)
-    _check_permission(user, "calendar:create")
-
-    try:
-        trigger = date.fromisoformat(req.trigger_date)
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Invalid trigger_date. Use YYYY-MM-DD.")
-
-    # Parse recess periods
-    recess_periods = []
-    for rp in (req.recess_periods or []):
-        try:
-            recess_periods.append({
-                "start": date.fromisoformat(rp["start"]),
-                "end": date.fromisoformat(rp["end"]),
-            })
-        except Exception:
-            pass
-
-    # Calculate deadlines
-    engine = CourtProcedureEngine()
-    if req.court == "high_court_action":
-        deadlines = engine.high_court_action(trigger, recess_periods)
-        court_label = "High Court of Zimbabwe"
-    elif req.court == "high_court_application":
-        deadlines = engine.high_court_application(trigger, recess_periods)
-        court_label = "High Court of Zimbabwe"
-    elif req.court == "labour_court":
-        deadlines = engine.labour_court(trigger, recess_periods)
-        court_label = "Labour Court of Zimbabwe"
-    elif req.court == "magistrates_civil":
-        deadlines = engine.magistrates_civil(trigger, req.same_province, recess_periods)
-        court_label = "Magistrates Court"
-    else:
-        raise HTTPException(status_code=422, detail=f"Unknown court procedure: {req.court}")
-
-    # Auto-create calendar events
-    created_events = []
-    if req.auto_create_events and deadlines:
-        async with _db_pool.acquire() as conn:
-            for dl in deadlines:
-                priority_note = ""
-                if dl["bar_risk"]:
-                    priority_note = " ⚠ BAR RISK — failure = barred from oral submissions."
-                elif dl["priority"] == "critical":
-                    priority_note = " ⚠ CRITICAL DEADLINE."
-                elif dl["priority"] == "high":
-                    priority_note = " ⚠ HIGH PRIORITY."
-
-                matter_id_uuid = None
-                if req.matter_id:
-                    try:
-                        matter_id_uuid = _uuid_mod.UUID(req.matter_id)
-                    except Exception:
-                        pass
-
-                row = await conn.fetchrow("""
-                    INSERT INTO calendar_events
-                        (firm_id, matter_id, title, date, event_type, court, matter_name, notes, created_by)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                    RETURNING *
-                """,
-                FIRM_ID,
-                matter_id_uuid,
-                dl["title"],
-                date.fromisoformat(dl["date"]),
-                "deadline",
-                court_label,
-                req.matter_name,
-                dl["note"] + priority_note,
-                _uuid_mod.UUID(str(user["id"])) if user and user.get("id") else None
-                )
-                created_events.append(_row_to_event(row))
-
-    return {
-        "court": req.court,
-        "court_label": court_label,
-        "trigger_date": req.trigger_date,
-        "deadlines": deadlines,
-        "calendar_events_created": len(created_events),
-        "events": created_events,
-        "has_bar_risk": any(d["bar_risk"] for d in deadlines),
-        "has_critical": any(d["priority"] == "critical" for d in deadlines),
-    }
-
-
 # ── Calendar ──────────────────────────────────────────────────────────────────
-
 
 @app.get("/api/calendar")
 async def list_calendar(request: Request):
@@ -4677,6 +3834,7 @@ EVENT_TYPE_LABELS = {
     "deadline": "Deadline",
     "filing": "Filing",
     "meeting": "Client Meeting",
+    "manual": "Appointment",
     "other": "Event",
 }
 
@@ -4690,9 +3848,10 @@ def build_reminder_email_body(events: list) -> tuple:
         html = "<p>Good morning. You have no court dates, deadlines, or filings scheduled in the next 30 days.</p><p style='color:#6b6b64'>\u2014 Mutemo Desk</p>"
         return text, html
 
-    today_items    = [e for e in events if e.get("days_until") == 0]
-    tomorrow_items = [e for e in events if e.get("days_until") == 1]
-    week_items     = [e for e in events if (e.get("days_until") or 0) > 1]
+    today_items    = [e for e in events if e.get("days_until", 99) == 0]
+    tomorrow_items = [e for e in events if e.get("days_until", 99) == 1]
+    week_items     = [e for e in events if 1 < (e.get("days_until") or 0) <= 7]
+    later_items    = [e for e in events if (e.get("days_until") or 0) > 7]
 
     def fmt_text(e):
         bits = [EVENT_TYPE_LABELS.get(e.get("event_type"), "Event") + ":", e.get("title", "")]
@@ -4713,6 +3872,10 @@ def build_reminder_email_body(events: list) -> tuple:
     if week_items:
         text_lines.append("LATER THIS WEEK:")
         for e in week_items: text_lines.append(f"  {e['date']}  \u2014  {fmt_text(e)}")
+        text_lines.append("")
+    if later_items:
+        text_lines.append("COMING UP:")
+        for e in later_items: text_lines.append(f"  {e['date']}  \u2014  {fmt_text(e)}")
         text_lines.append("")
     text_lines.append("A calendar file (.ics) is attached \u2014 open it to add these to your phone or computer calendar.")
     text_lines.append("\n\u2014 Mutemo Desk")
@@ -4745,6 +3908,15 @@ def build_reminder_email_body(events: list) -> tuple:
                 f'<div style="padding:8px 0;border-bottom:1px solid #e8e4da">'
                 f'<span style="font-size:12px;color:#6b6b64">{e["date"]}</span><br/>{fmt_html(e)}</div>'
                 for e in week_items
+            )
+        )
+    if later_items:
+        html_sections.append(
+            '<h3 style="color:#1b4d2e;margin:16px 0 8px">Coming Up</h3>' +
+            "".join(
+                f'<div style="padding:8px 0;border-bottom:1px solid #e8e4da">'
+                f'<span style="font-size:12px;color:#6b6b64">{e["date"]}</span><br/>{fmt_html(e)}</div>'
+                for e in later_items
             )
         )
 
@@ -4921,16 +4093,19 @@ async def _maybe_send_reminder():
     if now_utc.hour != settings["send_hour_utc"]:
         return
     today = now_utc.date()
+    # Skip weekends — reminders only on Mon–Fri
+    if today.weekday() >= 5:
+        return
     if settings.get("last_run_date") == today:
         return
 
-    # Collect upcoming events (next 7 days)
+    # Collect upcoming events (next 30 days, including today)
     async with _db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT * FROM calendar_events
             WHERE firm_id=$1 AND date >= $2 AND date <= $3
             ORDER BY date ASC, time ASC NULLS LAST
-        """, FIRM_ID, today, today + timedelta(days=7))
+        """, FIRM_ID, today, today + timedelta(days=30))
 
     events = [_row_to_event(r) for r in rows]
     if not events:
@@ -4944,10 +4119,10 @@ async def _maybe_send_reminder():
     # Enrich events with days_until for the HTML email builder
     for e in events:
         try:
-            event_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            event_date = datetime.strptime(str(e["date"])[:10], "%Y-%m-%d").date()
             e["days_until"] = (event_date - today).days
         except Exception:
-            e["days_until"] = 99
+            e["days_until"] = 0  # treat as today if date parse fails
 
     sent = await send_reminder_email(settings["recipient_email"], events)
     if sent:
@@ -5020,135 +4195,6 @@ async def get_document_status(doc_id: str, request: Request):
     d = dict(row)
     d["id"] = str(d["id"])
     return d
-
-
-@app.get("/api/documents/{doc_id}/view")
-async def view_document(doc_id: str, request: Request):
-    """Stream document from R2 for inline viewing in browser."""
-    user = await get_current_user(request)
-    _check_permission(user, "matter:read")
-
-    async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT filename, r2_key FROM documents WHERE id=$1 AND firm_id=$2",
-            _uuid_mod.UUID(doc_id), FIRM_ID
-        )
-    if not row:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if not row["r2_key"]:
-        raise HTTPException(status_code=404, detail="File not available — document was uploaded before R2 storage was enabled. Please re-upload.")
-
-    if not R2_ENABLED or not _r2_client:
-        raise HTTPException(status_code=503, detail="File storage not configured.")
-
-    try:
-        obj = await asyncio.to_thread(
-            _r2_client.get_object, Bucket=R2_BUCKET, Key=row["r2_key"]
-        )
-        filename = row["filename"]
-        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "bin"
-        content_type = (
-            "application/pdf" if ext == "pdf" else
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if ext in ("docx","doc") else
-            "application/octet-stream"
-        )
-        body = obj["Body"].read()
-        return Response(
-            content=body,
-            media_type=content_type,
-            headers={"Content-Disposition": f'inline; filename="{filename}"'}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not retrieve file: {e}")
-
-
-@app.get("/api/documents/{doc_id}/download")
-async def download_document(doc_id: str, request: Request):
-    """Download document from R2 as attachment."""
-    user = await get_current_user(request)
-    _check_permission(user, "matter:read")
-
-    async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT filename, r2_key FROM documents WHERE id=$1 AND firm_id=$2",
-            _uuid_mod.UUID(doc_id), FIRM_ID
-        )
-    if not row:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if not row["r2_key"]:
-        raise HTTPException(status_code=404, detail="File not available — document was uploaded before R2 storage was enabled. Please re-upload.")
-
-    if not R2_ENABLED or not _r2_client:
-        raise HTTPException(status_code=503, detail="File storage not configured.")
-
-    try:
-        obj = await asyncio.to_thread(
-            _r2_client.get_object, Bucket=R2_BUCKET, Key=row["r2_key"]
-        )
-        filename = row["filename"]
-        body = obj["Body"].read()
-        return Response(
-            content=body,
-            media_type="application/octet-stream",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not retrieve file: {e}")
-
-
-@app.delete("/api/documents/{doc_id}")
-async def delete_document(doc_id: str, request: Request):
-    """Delete a document — removes from DB, chunks, ChromaDB, and R2."""
-    user = await get_current_user(request)
-    _check_permission(user, "document:delete")
-
-    async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT filename, matter_id, r2_key FROM documents WHERE id=$1 AND firm_id=$2",
-            _uuid_mod.UUID(doc_id), FIRM_ID
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        matter_id = row["matter_id"]
-        r2_key = row["r2_key"]
-
-        # Delete chunks from PostgreSQL
-        await conn.execute(
-            "DELETE FROM chunks WHERE document_id=$1 AND firm_id=$2",
-            _uuid_mod.UUID(doc_id), FIRM_ID
-        )
-        # Delete document record
-        await conn.execute(
-            "DELETE FROM documents WHERE id=$1 AND firm_id=$2",
-            _uuid_mod.UUID(doc_id), FIRM_ID
-        )
-        # Update matter document count
-        if matter_id:
-            await conn.execute(
-                "UPDATE matters SET document_count = GREATEST(0, document_count - 1), last_activity=NOW() WHERE id=$1 AND firm_id=$2",
-                matter_id, FIRM_ID
-            )
-
-    # Delete from R2 if exists
-    if r2_key and R2_ENABLED and _r2_client:
-        try:
-            await asyncio.to_thread(
-                _r2_client.delete_object, Bucket=R2_BUCKET, Key=r2_key
-            )
-            print(f"[r2] deleted {r2_key}")
-        except Exception as e:
-            print(f"[r2] delete failed for {r2_key}: {e}")
-
-    # Remove from ChromaDB
-    try:
-        firm_col, _, _ = get_chroma_collections()
-        firm_col.delete(where={"document_id": doc_id})
-    except Exception as e:
-        print(f"[chroma] delete failed for doc {doc_id}: {e}")
-
-    return {"deleted": True, "doc_id": doc_id}
-
 
 # ── Firm settings ─────────────────────────────────────────────────────────────
 
