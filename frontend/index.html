@@ -3504,13 +3504,7 @@ async function downloadDocument(docId, filename) {
     const res = await fetch(`${API}/api/documents/${docId}/view-url`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Could not get file URL');
-    const a = document.createElement('a');
-    a.href = data.url;
-    a.download = filename;
-    a.target = '_blank';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    window.open(data.url, '_blank');
   } catch(e) {
     alert(`Could not download document: ${e.message}`);
   }
