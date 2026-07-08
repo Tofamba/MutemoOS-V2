@@ -750,10 +750,43 @@ select{cursor:pointer}
             <div class="form-group">
               <label>Type</label>
               <select id="cal-type" onchange="toggleCustomEventType(this)">
-                <option value="hearing">Court Hearing</option>
-                <option value="deadline">Deadline</option>
-                <option value="filing">Filing Date</option>
-                <option value="meeting">Client Meeting</option>
+                <optgroup label="Court">
+                  <option value="hearing">Court Hearing</option>
+                  <option value="deadline">Deadline / Dies</option>
+                  <option value="filing">Filing Date</option>
+                  <option value="round_table">Round Table Conference</option>
+                  <option value="ptc">Pre-Trial Conference</option>
+                  <option value="mediation">Mediation / Arbitration</option>
+                </optgroup>
+                <optgroup label="Client & Office">
+                  <option value="meeting">Client Meeting</option>
+                  <option value="consultation">Consultation</option>
+                  <option value="signing">Document Signing</option>
+                  <option value="call">Phone / Video Call</option>
+                </optgroup>
+                <optgroup label="Professional">
+                  <option value="speaking">Speaking Engagement</option>
+                  <option value="radio_tv">Radio / TV Programme</option>
+                  <option value="cpd">CPD / Training</option>
+                  <option value="lsz">Law Society Event</option>
+                  <option value="board">Board Meeting</option>
+                </optgroup>
+                <optgroup label="Practice & Internal">
+                  <option value="staff_meeting">Staff / Admin Meeting</option>
+                  <option value="leave">Leave / Absence</option>
+                  <option value="billing_review">Billing / Finance Review</option>
+                  <option value="pro_bono">Pro Bono</option>
+                  <option value="networking">Networking / Business Development</option>
+                </optgroup>
+                <optgroup label="Court & Litigation">
+                  <option value="chamber_application">Chamber Application</option>
+                  <option value="judgment_awaiting">Judgment / Order Awaiting</option>
+                </optgroup>
+                <optgroup label="Personal">
+                  <option value="social">Social Event</option>
+                  <option value="church">Church / Ministry</option>
+                  <option value="personal">Personal</option>
+                </optgroup>
                 <option value="other">Other (specify below)</option>
               </select>
             </div>
@@ -1753,14 +1786,14 @@ function renderMattersList(filtered = null) {
 
   // Sort by last_activity descending (most recent first)
   const sorted = [...matters].sort((a, b) => {
-    const aName = (a.name || '').toLowerCase();
-    const bName = (b.name || '').toLowerCase();
-    return aName.localeCompare(bName);
+    const aDate = a.last_activity || a.created_at || '';
+    const bDate = b.last_activity || b.created_at || '';
+    return bDate.localeCompare(aDate);
   });
 
-  // Show all matters alphabetically — filter as you type
+  // Use filtered list if searching, otherwise show top 10
   const isSearching = filtered !== null;
-  const displayList = isSearching ? filtered : sorted;
+  const displayList = isSearching ? filtered : sorted.slice(0, 10);
   const total = matters.length;
   const showing = displayList.length;
 
@@ -1769,7 +1802,7 @@ function renderMattersList(filtered = null) {
     if (isSearching) {
       countEl.textContent = `${showing} of ${total} matters`;
     } else {
-      countEl.textContent = total > 10 ? `Showing all ${total} ` : `${total} matter${total !== 1 ? 's' : ''}`;
+      countEl.textContent = total > 10 ? `Showing 10 of ${total} — search to find others` : `${total} matter${total !== 1 ? 's' : ''}`;
     }
   }
 
@@ -3557,7 +3590,7 @@ async function extractDates(docId, filename) {
 
     extractedDates = data.dates;
 
-    const EVENT_ICONS = { hearing: '⚖', deadline: '⏰', filing: '📋', other: '📅' };
+    const EVENT_ICONS = { hearing: '⚖', deadline: '⏰', filing: '📋', round_table: '🤝', ptc: '👨‍⚖️', mediation: '🕊', meeting: '👤', consultation: '💬', signing: '✍', call: '📞', speaking: '🎤', radio_tv: '📻', cpd: '📚', lsz: '⚖', board: '🏛', staff_meeting: '👥', leave: '🏖', billing_review: '💰', pro_bono: '🤲', networking: '🤝', chamber_application: '⚡', judgment_awaiting: '⏳', social: '🎉', church: '✝', personal: '👤', other: '📅' };
 
     document.getElementById('date-modal-content').innerHTML = `
       <p style="font-size:0.82rem;color:var(--ink2);margin-bottom:1rem">
