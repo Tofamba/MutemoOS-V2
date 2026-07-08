@@ -2847,21 +2847,24 @@ async function renderLegalUpdates() {
       el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No items uploaded yet.</p></div>';
       return;
     }
-    // Group items into three categories
-    const legislation = items.filter(i => i.source_type === 'legislation');
-    const judgments   = items.filter(i => i.source_type === 'case_law' || i.source_type === 'judgment');
-    const news        = items.filter(i => i.source_type === 'news' || i.source_type === 'legal_update' || i.source_type === 'press_statement');
+    // Group items into three categories — sorted most recent first
+    const sortByDate = arr => [...arr].sort((a,b) => (b.doc_date||b.uploaded_at||'').localeCompare(a.doc_date||a.uploaded_at||''));
+    const legislation = sortByDate(items.filter(i => i.source_type === 'legislation'));
+    const judgments   = sortByDate(items.filter(i => i.source_type === 'case_law' || i.source_type === 'judgment'));
+    const news        = sortByDate(items.filter(i => i.source_type === 'news' || i.source_type === 'legal_update' || i.source_type === 'press_statement'));
 
-    function renderGroup(groupItems) {
-      return groupItems.map(item => `
+    // Track active tab
+    if (!window._luActiveTab) window._luActiveTab = 'legislation';
+
+    function renderLuItem(item) {
+      const icon = item.source_type === 'legislation' ? '📜' :
+                   (item.source_type === 'news' || item.source_type === 'legal_update' || item.source_type === 'press_statement') ? '📰' : '⚖';
+      return `
         <div class="doc-item" style="align-items:flex-start">
-          <span style="margin-top:2px">${
-            item.source_type === 'legislation' ? '📜' :
-            (item.source_type === 'news' || item.source_type === 'legal_update' || item.source_type === 'press_statement') ? '📰' : '⚖'
-          }</span>
-          <div style="flex:1">
-            <div class="doc-name">${escHtml(item.reference || item.filename)}</div>
-            <div class="doc-meta" style="margin-top:3px">
+          <span style="margin-top:2px;font-size:1rem">${icon}</span>
+          <div style="flex:1;min-width:0">
+            <div class="doc-name" style="white-space:normal">${escHtml(item.reference || item.filename)}</div>
+            <div class="doc-meta" style="margin-top:3px;flex-wrap:wrap">
               <span class="chip chip-gray">${escHtml(item.source_name)}</span>
               ${item.doc_date ? `<span class="chip chip-blue">${item.doc_date}</span>` : ''}
               ${item.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
@@ -2870,23 +2873,49 @@ async function renderLegalUpdates() {
             </div>
           </div>
           ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteLegalUpdate('${item.id}')">🗑</button>` : ''}
-        </div>
-      `).join('');
-    }
-
-    function renderSection(title, icon, groupItems) {
-      if (!groupItems.length) return '';
-      return `
-        <div style="margin-bottom:1rem">
-          <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.5rem;padding:0.4rem 0;border-bottom:2px solid var(--border)">${icon} ${title} <span style="font-weight:400;color:var(--ink3)">(${groupItems.length})</span></div>
-          ${renderGroup(groupItems)}
         </div>`;
     }
 
-    el.innerHTML =
-      renderSection('Legislation', '📜', legislation) +
-      renderSection('Judgments', '⚖', judgments) +
-      renderSection('Legal News & Updates', '📰', news);
+    function renderLuTab(tab) {
+      window._luActiveTab = tab;
+      const groups = { legislation, judgments, news };
+      const groupItems = groups[tab] || [];
+      const tabContent = document.getElementById('lu-tab-content');
+      if (!tabContent) return;
+      // Update button styles
+      ['legislation','judgments','news'].forEach(t => {
+        const btn = document.getElementById('lu-tab-' + t);
+        if (btn) {
+          btn.style.background = t === tab ? 'var(--green)' : 'var(--paper2)';
+          btn.style.color = t === tab ? 'white' : 'var(--ink2)';
+          btn.style.borderColor = t === tab ? 'var(--green)' : 'var(--border)';
+        }
+      });
+      tabContent.innerHTML = groupItems.length
+        ? groupItems.map(renderLuItem).join('')
+        : '<p style="color:var(--ink3);font-size:0.82rem;padding:0.5rem 0">No items in this category yet.</p>';
+    }
+
+    el.innerHTML = `
+      <div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap">
+        <button id="lu-tab-legislation" onclick="renderLuTab('legislation')"
+          style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+          📜 Legislation <span style="font-weight:400;opacity:0.8">(${legislation.length})</span>
+        </button>
+        <button id="lu-tab-judgments" onclick="renderLuTab('judgments')"
+          style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+          ⚖ Judgments <span style="font-weight:400;opacity:0.8">(${judgments.length})</span>
+        </button>
+        <button id="lu-tab-news" onclick="renderLuTab('news')"
+          style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+          📰 News & Updates <span style="font-weight:400;opacity:0.8">(${news.length})</span>
+        </button>
+      </div>
+      <div id="lu-tab-content"></div>
+    `;
+
+    // Render last active tab (or legislation by default)
+    renderLuTab(window._luActiveTab);
   } catch(e) {
     el.innerHTML = '<p style="font-size:0.8rem;color:var(--ink3)">Could not load items.</p>';
   }
