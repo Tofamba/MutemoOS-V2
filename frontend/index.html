@@ -1936,8 +1936,8 @@ async function renderMatterPanel(id) {
               ${d.r2_key ? `
               <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}','${escHtml(d.filename)}')"
                       title="View document">👁 View</button>
-              <a href="${API}/api/documents/${d.id}/download" target="_blank"
-                 class="btn btn-sm btn-outline" style="text-decoration:none" title="Download document">⬇</a>
+              <button class="btn btn-sm btn-outline" onclick="downloadDocument('${d.id}','${escHtml(d.filename)}')"
+                      title="Download document">⬇</button>
               ` : ''}
               <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
                       title="Extract court dates and deadlines">📅</button>
@@ -3488,8 +3488,29 @@ async function calculateProcedure(matterId, matterName) {
   }
 }
 
-function viewDocument(docId, filename) {
-  window.open(`${API}/api/documents/${docId}/view`, '_blank');
+async function viewDocument(docId, filename) {
+  try {
+    const res = await fetch(`${API}/api/documents/${docId}/view-url`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Could not get file URL');
+    window.open(data.url, '_blank');
+  } catch(e) {
+    alert(`Could not open document: ${e.message}`);
+  }
+}
+
+async function downloadDocument(docId, filename) {
+  try {
+    const res = await fetch(`${API}/api/documents/${docId}/view-url`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Could not get file URL');
+    const a = document.createElement('a');
+    a.href = data.url;
+    a.download = filename;
+    a.click();
+  } catch(e) {
+    alert(`Could not download document: ${e.message}`);
+  }
 }
 
 async function deleteDocument(docId, filename, matterId) {

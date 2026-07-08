@@ -13,7 +13,7 @@ Changes from v1.1:
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Response, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -28,7 +28,30 @@ import asyncio
 import secrets
 import time
 import hmac
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+
+# ── R2 / S3-compatible object storage ─────────────────────────────────────────
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+    _r2_client = boto3.client(
+        "s3",
+        endpoint_url=os.environ.get("R2_ENDPOINT", ""),
+        aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
+        aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+        region_name="auto",
+    )
+    R2_BUCKET = os.environ.get("R2_BUCKET", "mutemoos-documents")
+    R2_ENABLED = bool(os.environ.get("R2_ENDPOINT") and os.environ.get("R2_ACCESS_KEY_ID"))
+    if R2_ENABLED:
+        print(f"[r2] R2 storage enabled — bucket: {R2_BUCKET}")
+    else:
+        print("[r2] R2 not configured — file storage disabled")
+except ImportError:
+    _r2_client = None
+    R2_BUCKET = ""
+    R2_ENABLED = False
+    print("[r2] boto3 not installed — R2 storage disabled")
 
 # ── Load .env file if present ─────────────────────────────────────────────────
 def _load_dotenv():
@@ -280,6 +303,7 @@ async def run_migrations():
         -- ── Legal Corner spec-correct schema additions ─────────────────────────────────
         -- Branding and feature flags on firms
         ALTER TABLE firms ADD COLUMN IF NOT EXISTS firm_logo_url TEXT;
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS r2_key TEXT;
         ALTER TABLE firms ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '[]'::jsonb;
 
         -- Organisation roles (ops_manager / panel_lawyer) — separate from firm-level role
@@ -2165,19 +2189,41 @@ async def _process_document_background(doc_id: str, matter_id: str, content: byt
         except Exception:
             doc_date = None
 
+    # Upload original file to R2 for view/download
+    r2_key = None
+    if R2_ENABLED and _r2_client and content:
+        try:
+            r2_key = f"{FIRM_ID}/{matter_id}/{doc_id}/{filename}"
+            content_type = (
+                "application/pdf" if ext == "pdf" else
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document" if ext in ("docx","doc") else
+                "application/octet-stream"
+            )
+            await asyncio.to_thread(
+                _r2_client.put_object,
+                Bucket=R2_BUCKET,
+                Key=r2_key,
+                Body=content,
+                ContentType=content_type,
+            )
+            print(f"[r2] uploaded {filename} → {r2_key}")
+        except Exception as e:
+            print(f"[r2] upload failed for {filename}: {e}")
+            r2_key = None
+
     async with _db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE documents SET
                 document_type=$1, matter_type=$2, parties=$3,
                 doc_date=$4, court=$5, word_count=$6, page_count=$7,
-                chunk_count=$8, ocr_used=$9, status='complete'
+                chunk_count=$8, ocr_used=$9, status='complete', r2_key=$12
             WHERE id=$10 AND firm_id=$11
         """,
         metadata.get("document_type"), metadata.get("matter_type"),
         str(metadata.get("parties", "")) if metadata.get("parties") else None,
         doc_date, metadata.get("court"),
         word_count, page_count, chunk_count, ocr_used,
-        _uuid_mod.UUID(doc_id), FIRM_ID
+        _uuid_mod.UUID(doc_id), FIRM_ID, r2_key
         )
         await conn.execute(
             "UPDATE matters SET document_count = document_count + 1, last_activity=NOW() WHERE id=$1 AND firm_id=$2",
@@ -4195,6 +4241,84 @@ async def get_document_status(doc_id: str, request: Request):
     d = dict(row)
     d["id"] = str(d["id"])
     return d
+
+
+@app.get("/api/documents/{doc_id}/view-url")
+async def get_document_view_url(doc_id: str, request: Request):
+    """Generate a presigned R2 URL for viewing/downloading a document.
+    Bypasses Cloudflare Access — URL is valid for 1 hour."""
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT filename, r2_key FROM documents WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not row["r2_key"]:
+        raise HTTPException(status_code=404, detail="File not available — document was uploaded before R2 storage was enabled. Please re-upload.")
+    if not R2_ENABLED or not _r2_client:
+        raise HTTPException(status_code=503, detail="File storage not configured.")
+
+    try:
+        presigned_url = await asyncio.to_thread(
+            _r2_client.generate_presigned_url,
+            "get_object",
+            Params={"Bucket": R2_BUCKET, "Key": row["r2_key"]},
+            ExpiresIn=3600  # 1 hour
+        )
+        return {"url": presigned_url, "filename": row["filename"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not generate file URL: {e}")
+
+
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str, request: Request):
+    """Delete a document — removes from DB, chunks, ChromaDB, and R2."""
+    user = await get_current_user(request)
+    _check_permission(user, "document:delete")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT filename, matter_id, r2_key FROM documents WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found")
+
+        matter_id = row["matter_id"]
+        r2_key = row["r2_key"]
+
+        await conn.execute(
+            "DELETE FROM chunks WHERE document_id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+        await conn.execute(
+            "DELETE FROM documents WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+        if matter_id:
+            await conn.execute(
+                "UPDATE matters SET document_count = GREATEST(0, document_count - 1), last_activity=NOW() WHERE id=$1 AND firm_id=$2",
+                matter_id, FIRM_ID
+            )
+
+    if r2_key and R2_ENABLED and _r2_client:
+        try:
+            await asyncio.to_thread(_r2_client.delete_object, Bucket=R2_BUCKET, Key=r2_key)
+        except Exception as e:
+            print(f"[r2] delete failed: {e}")
+
+    try:
+        firm_col, _, _ = get_chroma_collections()
+        firm_col.delete(where={"document_id": doc_id})
+    except Exception as e:
+        print(f"[chroma] delete failed: {e}")
+
+    return {"deleted": True, "doc_id": doc_id}
+
 
 # ── Firm settings ─────────────────────────────────────────────────────────────
 
