@@ -2838,6 +2838,48 @@ function showLuStatus(msg, type) {
   if (type === 'success') setTimeout(() => el.classList.remove('show'), 4000);
 }
 
+// Global tab switcher for Legal Updates — must be global for onclick attributes
+window._luActiveTab = 'legislation';
+window._luGroups = { legislation: [], judgments: [], news: [] };
+
+function renderLuItem(item) {
+  const icon = item.source_type === 'legislation' ? '📜' :
+               (item.source_type === 'news' || item.source_type === 'legal_update' || item.source_type === 'press_statement') ? '📰' : '⚖';
+  return `
+    <div class="doc-item" style="align-items:flex-start">
+      <span style="margin-top:2px;font-size:1rem">${icon}</span>
+      <div style="flex:1;min-width:0">
+        <div class="doc-name" style="white-space:normal">${escHtml(item.reference || item.filename)}</div>
+        <div class="doc-meta" style="margin-top:3px;flex-wrap:wrap">
+          <span class="chip chip-gray">${escHtml(item.source_name)}</span>
+          ${item.doc_date ? `<span class="chip chip-blue">${item.doc_date}</span>` : ''}
+          ${item.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
+          <span class="chip ${item.status==='complete'?'chip-green':item.status==='error'?'chip-red':'chip-gold'}">${item.status}</span>
+          ${item.source_url ? `<a href="${escHtml(item.source_url)}" target="_blank" class="chip chip-blue" style="text-decoration:none">View online ↗</a>` : ''}
+        </div>
+      </div>
+      ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteLegalUpdate('${item.id}')">🗑</button>` : ''}
+    </div>`;
+}
+
+function renderLuTab(tab) {
+  window._luActiveTab = tab;
+  const groupItems = window._luGroups[tab] || [];
+  const tabContent = document.getElementById('lu-tab-content');
+  if (!tabContent) return;
+  ['legislation','judgments','news'].forEach(t => {
+    const btn = document.getElementById('lu-tab-' + t);
+    if (btn) {
+      btn.style.background = t === tab ? 'var(--green)' : 'var(--paper2)';
+      btn.style.color = t === tab ? 'white' : 'var(--ink2)';
+      btn.style.borderColor = t === tab ? 'var(--green)' : 'var(--border)';
+    }
+  });
+  tabContent.innerHTML = groupItems.length
+    ? groupItems.map(renderLuItem).join('')
+    : '<p style="color:var(--ink3);font-size:0.82rem;padding:0.5rem 0">No items in this category yet.</p>';
+}
+
 async function renderLegalUpdates() {
   const el = document.getElementById('lu-list');
   try {
@@ -2849,14 +2891,13 @@ async function renderLegalUpdates() {
     }
     // Group items into three categories — sorted most recent first
     const sortByDate = arr => [...arr].sort((a,b) => (b.doc_date||b.uploaded_at||'').localeCompare(a.doc_date||a.uploaded_at||''));
-    const legislation = sortByDate(items.filter(i => i.source_type === 'legislation'));
-    const judgments   = sortByDate(items.filter(i => i.source_type === 'case_law' || i.source_type === 'judgment'));
-    const news        = sortByDate(items.filter(i => i.source_type === 'news' || i.source_type === 'legal_update' || i.source_type === 'press_statement'));
+    window._luGroups.legislation = sortByDate(items.filter(i => i.source_type === 'legislation'));
+    window._luGroups.judgments   = sortByDate(items.filter(i => i.source_type === 'case_law' || i.source_type === 'judgment'));
+    window._luGroups.news        = sortByDate(items.filter(i => i.source_type === 'news' || i.source_type === 'legal_update' || i.source_type === 'press_statement'));
+    const { legislation, judgments, news } = window._luGroups;
 
-    // Track active tab
-    if (!window._luActiveTab) window._luActiveTab = 'legislation';
-
-    function renderLuItem(item) {
+    // PLACEHOLDER — replaced by global functions above
+    function renderLuItem_local(item) {
       const icon = item.source_type === 'legislation' ? '📜' :
                    (item.source_type === 'news' || item.source_type === 'legal_update' || item.source_type === 'press_statement') ? '📰' : '⚖';
       return `
@@ -2874,26 +2915,6 @@ async function renderLegalUpdates() {
           </div>
           ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteLegalUpdate('${item.id}')">🗑</button>` : ''}
         </div>`;
-    }
-
-    function renderLuTab(tab) {
-      window._luActiveTab = tab;
-      const groups = { legislation, judgments, news };
-      const groupItems = groups[tab] || [];
-      const tabContent = document.getElementById('lu-tab-content');
-      if (!tabContent) return;
-      // Update button styles
-      ['legislation','judgments','news'].forEach(t => {
-        const btn = document.getElementById('lu-tab-' + t);
-        if (btn) {
-          btn.style.background = t === tab ? 'var(--green)' : 'var(--paper2)';
-          btn.style.color = t === tab ? 'white' : 'var(--ink2)';
-          btn.style.borderColor = t === tab ? 'var(--green)' : 'var(--border)';
-        }
-      });
-      tabContent.innerHTML = groupItems.length
-        ? groupItems.map(renderLuItem).join('')
-        : '<p style="color:var(--ink3);font-size:0.82rem;padding:0.5rem 0">No items in this category yet.</p>';
     }
 
     el.innerHTML = `
