@@ -30,19 +30,25 @@
 .tiptap-editor li { margin-bottom: 0.3rem; }
 .tiptap-editor table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
 .tiptap-editor td, .tiptap-editor th { border: 1px solid var(--border); padding: 0.4rem 0.6rem; }
-.tiptap-editor blockquote { border-left: 3px solid var(--gold); padding-left: 1rem; margin: 0.75rem 0; color: var(--ink2); }
+.tiptap-editor blockquote { border-left: 3px solid var(--gold); padding-left: 1rem; margin: 0.75rem 0; color:
+var(--ink2); }
 .tiptap-editor strong { font-weight: 700; }
 .tiptap-editor em { font-style: italic; }
 .tiptap-editor u { text-decoration: underline; }
 .tiptap-editor [style*="text-align: center"] { text-align: center; }
 .tiptap-editor [style*="text-align: right"] { text-align: right; }
-.toolbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 0.5rem; background: var(--paper2); border: 1px solid var(--border); border-bottom: none; border-radius: 4px 4px 0 0; }
-.toolbar .tbar-btn { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 3px 7px; cursor: pointer; font-size: 0.8rem; font-family: 'Georgia', serif; color: var(--ink2); transition: all 0.1s; min-width: 28px; text-align: center; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 0.5rem; background: var(--paper2); border: 1px solid
+var(--border); border-bottom: none; border-radius: 4px 4px 0 0; }
+.toolbar .tbar-btn { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 3px 7px; cursor:
+pointer; font-size: 0.8rem; font-family: 'Georgia', serif; color: var(--ink2); transition: all 0.1s; min-width: 28px;
+text-align: center; }
 .toolbar .tbar-btn:hover { background: var(--paper3); border-color: var(--ink3); }
 .toolbar .tbar-btn.active { background: var(--green); color: white; border-color: var(--green); }
 .toolbar .tbar-sep { width: 1px; background: var(--border); margin: 2px 2px; }
-.doc-type-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
-.doc-type-btn { background: white; border: 1px solid var(--border); border-radius: var(--radius); padding: 0.65rem 0.85rem; cursor: pointer; text-align: left; transition: all 0.15s; }
+.doc-type-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.5rem;
+margin-bottom: 1rem; }
+.doc-type-btn { background: white; border: 1px solid var(--border); border-radius: var(--radius); padding: 0.65rem
+0.85rem; cursor: pointer; text-align: left; transition: all 0.15s; }
 .doc-type-btn:hover { border-color: var(--green); background: var(--paper); }
 .doc-type-btn.selected { border-color: var(--green); background: #fdf0e8; }
 .doc-type-btn .dt-icon { font-size: 1.1rem; margin-bottom: 3px; }
@@ -93,7 +99,8 @@
   --red:#b83232;--blue:#1e4a7a;
   --radius:6px;--shadow:0 1px 3px rgba(0,0,0,0.08);
 }
-body{font-family:'Georgia',serif;background:var(--paper);color:var(--ink);min-height:100vh;font-size:15px;line-height:1.6}
+body{font-family:'Georgia',serif;background:var(--paper);color:var(--ink);min-height:100vh;font-size:15px;line-height:1
+.6}
 h1,h2,h3,h4{font-family:'Georgia',serif;font-weight:700;color:var(--ink)}
 button,input,select,textarea{font-family:'Georgia',serif}
 a{color:var(--green);text-decoration:none}
@@ -102,28 +109,36 @@ a{color:var(--green);text-decoration:none}
 .app{display:flex;flex-direction:column;min-height:100vh}
 
 /* ── Header ── */
-.header{background:var(--green);color:white;padding:0 1.5rem;height:58px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 6px rgba(0,0,0,0.2)}
+.header{background:var(--green);color:white;padding:0
+1.5rem;height:58px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 2px 6px rgba(0,0,0,0.2)}
 .header-brand{display:flex;align-items:center;gap:12px}
-.header-seal{width:36px;height:36px;background:var(--gold2);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;border:2px solid rgba(255,255,255,0.2)}
+.header-seal{width:36px;height:36px;background:var(--gold2);border-radius:50%;display:flex;align-items:center;justify-c
+ontent:center;font-size:18px;flex-shrink:0;border:2px solid rgba(255,255,255,0.2)}
 .header-title{font-size:1.1rem;font-weight:700;letter-spacing:0.3px;color:white}
 .header-subtitle{font-size:0.7rem;color:rgba(255,255,255,0.65);margin-top:1px;letter-spacing:0.5px}
 .header-firm{font-size:0.75rem;color:var(--gold3);font-style:italic}
 
 /* ── Nav ── */
 .nav{background:var(--green2);display:flex;gap:0;border-bottom:2px solid var(--gold)}
-.nav-btn{background:none;border:none;color:rgba(255,255,255,0.7);padding:0.7rem 1.2rem;cursor:pointer;font-size:0.82rem;font-family:'Georgia',serif;letter-spacing:0.3px;transition:all 0.15s;display:flex;align-items:center;gap:6px;position:relative}
+.nav-btn{background:none;border:none;color:rgba(255,255,255,0.7);padding:0.7rem
+1.2rem;cursor:pointer;font-size:0.82rem;font-family:'Georgia',serif;letter-spacing:0.3px;transition:all
+0.15s;display:flex;align-items:center;gap:6px;position:relative}
 .nav-btn:hover{color:white;background:rgba(255,255,255,0.07)}
 .nav-btn.active{color:white;background:rgba(255,255,255,0.12)}
 .nav-btn.active::after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;background:var(--gold3)}
-.nav-badge{background:var(--red);color:white;font-size:0.6rem;padding:1px 5px;border-radius:10px;font-style:normal;min-width:16px;text-align:center}
+.nav-badge{background:var(--red);color:white;font-size:0.6rem;padding:1px
+5px;border-radius:10px;font-style:normal;min-width:16px;text-align:center}
 
 /* ── Main ── */
 .main{flex:1;max-width:1080px;margin:0 auto;width:100%;padding:1.5rem}
 
 /* ── Cards ── */
-.card{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;margin-bottom:1rem}
-.card-header{padding:0.9rem 1.25rem;border-bottom:1px solid var(--border);background:var(--paper);display:flex;align-items:center;gap:10px}
-.card-icon{width:28px;height:28px;background:var(--green);color:white;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.card{background:var(--white);border:1px solid
+var(--border);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;margin-bottom:1rem}
+.card-header{padding:0.9rem 1.25rem;border-bottom:1px solid
+var(--border);background:var(--paper);display:flex;align-items:center;gap:10px}
+.card-icon{width:28px;height:28px;background:var(--green);color:white;border-radius:4px;display:flex;align-items:center
+;justify-content:center;font-size:13px;flex-shrink:0}
 .card-title{font-size:0.9rem;font-weight:700;color:var(--ink)}
 .card-desc{font-size:0.72rem;color:var(--ink3);margin-top:1px}
 .card-body{padding:1.25rem}
@@ -135,18 +150,23 @@ a{color:var(--green);text-decoration:none}
 
 /* ── Forms ── */
 .form-section{margin-bottom:1.1rem}
-.form-section-label{font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:var(--green);margin-bottom:0.6rem;padding-bottom:0.3rem;border-bottom:1px solid var(--gold2)}
+.form-section-label{font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:var(--green);
+margin-bottom:0.6rem;padding-bottom:0.3rem;border-bottom:1px solid var(--gold2)}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem}
 .form-group{margin-bottom:0.65rem}
 .form-group:last-child{margin-bottom:0}
 label{display:block;font-size:0.73rem;font-weight:700;color:var(--ink3);margin-bottom:0.28rem;letter-spacing:0.2px}
-input[type=text],input[type=date],input[type=time],input[type=email],select,textarea{width:100%;padding:0.45rem 0.65rem;border:1px solid var(--border);border-radius:4px;font-size:0.84rem;font-family:'Georgia',serif;color:var(--ink);background:var(--white);transition:border-color 0.15s}
+input[type=text],input[type=date],input[type=time],input[type=email],select,textarea{width:100%;padding:0.45rem
+0.65rem;border:1px solid var(--border);border-radius:4px;font-size:0.84rem;font-family:'Georgia',serif;color:var(--ink)
+;background:var(--white);transition:border-color 0.15s}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 2px rgba(27,77,46,0.1)}
 textarea{resize:vertical;line-height:1.55}
 select{cursor:pointer}
 
 /* ── Buttons ── */
-.btn{display:inline-flex;align-items:center;gap:6px;padding:0.5rem 1rem;border:none;border-radius:4px;font-size:0.82rem;font-family:'Georgia',serif;cursor:pointer;transition:all 0.15s;font-weight:700}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:0.5rem
+1rem;border:none;border-radius:4px;font-size:0.82rem;font-family:'Georgia',serif;cursor:pointer;transition:all
+0.15s;font-weight:700}
 .btn-primary{background:var(--green);color:white;width:100%;justify-content:center;margin-top:0.5rem;padding:0.65rem}
 .btn-primary:hover:not(:disabled){background:var(--green2)}
 .btn-primary:disabled{opacity:0.5;cursor:not-allowed}
@@ -164,20 +184,27 @@ select{cursor:pointer}
 .status.loading{background:#fdeee0;color:#c45a1a;border:1px solid #e0b090}
 .status.error{background:#fdecea;color:#8a1a0a;border:1px solid #f0b0a8}
 .status.success{background:#fdeee0;color:#c45a1a;border:1px solid #e0b898}
-.spinner{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin 0.7s linear infinite;vertical-align:middle;margin-right:4px}
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid
+currentColor;border-top-color:transparent;border-radius:50%;animation:spin 0.7s linear
+infinite;vertical-align:middle;margin-right:4px}
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* ── Result area ── */
-.result-area{min-height:200px;background:var(--paper);border:1px solid var(--border);border-radius:4px;padding:1.1rem;font-family:'Times New Roman',serif;font-size:0.88rem;line-height:1.8;color:var(--ink);white-space:pre-wrap;overflow-y:auto;max-height:550px}
+.result-area{min-height:200px;background:var(--paper);border:1px solid
+var(--border);border-radius:4px;padding:1.1rem;font-family:'Times New
+Roman',serif;font-size:0.88rem;line-height:1.8;color:var(--ink);white-space:pre-wrap;overflow-y:auto;max-height:550px}
 .result-area[contenteditable=true]:focus{outline:2px solid var(--green);outline-offset:-2px}
 .result-placeholder{text-align:center;padding:3rem 1rem;color:var(--ink3)}
 .result-placeholder .icon{font-size:2.5rem;opacity:0.25;margin-bottom:0.75rem}
 
 /* ── Matter list ── */
-.matter-item{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);overflow:visible;margin-bottom:0.6rem;transition:box-shadow 0.15s}
+.matter-item{background:var(--white);border:1px solid
+var(--border);border-radius:var(--radius);overflow:visible;margin-bottom:0.6rem;transition:box-shadow 0.15s}
 .matter-item:hover{box-shadow:0 2px 8px rgba(0,0,0,0.08)}
 .matter-row{padding:0.85rem 1rem;display:flex;align-items:center;gap:10px;cursor:pointer}
-.matter-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--green),#2d7a4f);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:white;box-shadow:0 2px 4px rgba(0,0,0,0.12)}
+.matter-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--green),#2d7a4f);border-radius:8px;display:f
+lex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:white;box-shadow:0 2px 4px
+rgba(0,0,0,0.12)}
 .matter-name{font-weight:700;font-size:0.9rem;color:var(--ink)}
 .matter-meta{font-size:0.72rem;color:var(--ink3);margin-top:3px}
 .matter-expand{flex:1}
@@ -186,26 +213,34 @@ select{cursor:pointer}
 .matter-docs.open{display:block}
 .matter-section{padding:0.85rem 1.1rem;border-bottom:1px solid var(--border)}
 .matter-section:last-child{border-bottom:none}
-.matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
+.matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);
+margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
 
 /* ── Doc item ── */
-.doc-item{display:flex;align-items:center;gap:10px;padding:0.6rem 0.75rem;border-radius:8px;background:var(--white);border:1px solid var(--border);margin-bottom:6px;transition:border-color .15s}
+.doc-item{display:flex;align-items:center;gap:10px;padding:0.6rem
+0.75rem;border-radius:8px;background:var(--white);border:1px solid
+var(--border);margin-bottom:6px;transition:border-color .15s}
 .doc-item:hover{border-color:var(--green)}
 .doc-item:last-child{margin-bottom:0}
 .doc-name{font-size:0.8rem;color:var(--ink2);flex:1;font-weight:500}
 .doc-meta{font-size:0.68rem;color:var(--ink3)}
-.doc-icon{width:28px;height:28px;background:var(--paper2);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.doc-icon{width:28px;height:28px;background:var(--paper2);border-radius:6px;display:flex;align-items:center;justify-con
+tent:center;font-size:13px;flex-shrink:0}
 
 /* ── Note item ── */
-.note-item{background:var(--white);border:1px solid var(--border);border-radius:8px;padding:0.65rem 0.85rem;margin-bottom:6px;position:relative}
+.note-item{background:var(--white);border:1px solid var(--border);border-radius:8px;padding:0.65rem
+0.85rem;margin-bottom:6px;position:relative}
 .note-item:last-child{margin-bottom:0}
 .note-text{font-size:0.82rem;color:var(--ink2);line-height:1.55}
-.note-footer{font-size:0.68rem;color:var(--ink3);margin-top:0.35rem;display:flex;justify-content:space-between;align-items:center}
-.note-delete{background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.75rem;padding:0;opacity:0.5;transition:opacity .15s}
+.note-footer{font-size:0.68rem;color:var(--ink3);margin-top:0.35rem;display:flex;justify-content:space-between;align-it
+ems:center}
+.note-delete{background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.75rem;padding:0;opacity:0.5;trans
+ition:opacity .15s}
 .note-delete:hover{opacity:1;color:var(--red)}
 
 /* ── Tags / Chips ── */
-.chip{display:inline-block;font-size:0.65rem;padding:2px 8px;border-radius:12px;font-weight:700;letter-spacing:0.3px;margin-right:4px}
+.chip{display:inline-block;font-size:0.65rem;padding:2px
+8px;border-radius:12px;font-weight:700;letter-spacing:0.3px;margin-right:4px}
 .chip-green{background:#fde8d8;color:var(--green)}
 .chip-gold{background:#f5ead0;color:var(--gold)}
 .chip-blue{background:#e0eaf5;color:var(--blue)}
@@ -213,18 +248,24 @@ select{cursor:pointer}
 .chip-red{background:#fde8e8;color:var(--red)}
 
 /* ── Search results ── */
-.search-result{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:0.75rem;overflow:hidden}
+.search-result{background:var(--white);border:1px solid
+var(--border);border-radius:var(--radius);margin-bottom:0.75rem;overflow:hidden}
 .sr-header{padding:0.85rem 1rem;display:flex;align-items:start;gap:10px}
 .sr-body{padding:0 1rem 0.85rem}
-.sr-excerpt{background:var(--paper);border-left:3px solid var(--gold2);padding:0.65rem 0.85rem;font-size:0.82rem;line-height:1.65;color:var(--ink2);margin-bottom:0.65rem;font-family:'Times New Roman',serif}
+.sr-excerpt{background:var(--paper);border-left:3px solid var(--gold2);padding:0.65rem
+0.85rem;font-size:0.82rem;line-height:1.65;color:var(--ink2);margin-bottom:0.65rem;font-family:'Times New Roman',serif}
 .sr-score{font-size:0.7rem;padding:2px 7px;border-radius:10px;background:#fdeee0;color:var(--green);font-weight:700}
-.ai-answer{background:linear-gradient(135deg,#fdf0e8,#fef4ec);border:1px solid #e8c0a0;border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem}
-.ai-answer-label{font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--green);margin-bottom:0.5rem}
+.ai-answer{background:linear-gradient(135deg,#fdf0e8,#fef4ec);border:1px solid
+#e8c0a0;border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem}
+.ai-answer-label{font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--green);mar
+gin-bottom:0.5rem}
 .ai-answer-text{font-size:0.84rem;line-height:1.7;color:var(--ink2);white-space:pre-wrap}
 
 /* ── Calendar ── */
-.cal-event{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);padding:0.85rem 1rem;margin-bottom:0.6rem;display:flex;align-items:center;gap:12px}
-.cal-date-block{background:var(--green);color:white;border-radius:4px;padding:0.4rem 0.6rem;text-align:center;flex-shrink:0;min-width:52px}
+.cal-event{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);padding:0.85rem
+1rem;margin-bottom:0.6rem;display:flex;align-items:center;gap:12px}
+.cal-date-block{background:var(--green);color:white;border-radius:4px;padding:0.4rem
+0.6rem;text-align:center;flex-shrink:0;min-width:52px}
 .cal-day{font-size:1.3rem;font-weight:700;line-height:1}
 .cal-month{font-size:0.6rem;letter-spacing:0.5px;text-transform:uppercase;margin-top:2px}
 .cal-details{flex:1}
@@ -237,11 +278,14 @@ select{cursor:pointer}
 .urgent{background:#fff8e8;border-color:#e8c870}
 
 /* ── Upload area ── */
-.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:2rem;text-align:center;cursor:pointer;transition:all 0.15s;background:var(--paper)}
+.upload-zone{border:2px dashed
+var(--border);border-radius:var(--radius);padding:2rem;text-align:center;cursor:pointer;transition:all
+0.15s;background:var(--paper)}
 .upload-zone:hover,.upload-zone.drag{border-color:var(--green);background:#fdf0e8}
 .upload-zone p{font-size:0.82rem;color:var(--ink3);margin-top:0.5rem}
 .upload-list{margin-top:0.75rem}
-.upload-item{display:flex;align-items:center;gap:8px;padding:0.5rem 0.75rem;background:var(--paper2);border-radius:4px;margin-bottom:0.4rem;font-size:0.8rem}
+.upload-item{display:flex;align-items:center;gap:8px;padding:0.5rem
+0.75rem;background:var(--paper2);border-radius:4px;margin-bottom:0.4rem;font-size:0.8rem}
 .upload-item .name{flex:1;color:var(--ink2)}
 
 /* ── Misc ── */
@@ -252,8 +296,10 @@ select{cursor:pointer}
 .actions-row{display:flex;gap:0.5rem;margin-top:0.75rem}
 .actions-row .btn{flex:1}
 .doc-id{font-size:0.65rem;color:var(--ink3);text-align:right;margin-top:0.3rem}
-.tip{background:#fdf0e8;border:1px solid #e8c0a0;border-radius:4px;padding:0.65rem 0.85rem;font-size:0.75rem;color:var(--green);margin-top:0.75rem}
-.upcoming-banner{background:var(--green);color:white;border-radius:var(--radius);padding:0.85rem 1.1rem;margin-bottom:1rem;display:flex;align-items:center;gap:10px}
+.tip{background:#fdf0e8;border:1px solid #e8c0a0;border-radius:4px;padding:0.65rem
+0.85rem;font-size:0.75rem;color:var(--green);margin-top:0.75rem}
+.upcoming-banner{background:var(--green);color:white;border-radius:var(--radius);padding:0.85rem
+1.1rem;margin-bottom:1rem;display:flex;align-items:center;gap:10px}
 .upcoming-banner .icon{font-size:1.3rem}
 .upcoming-banner strong{font-size:0.88rem}
 .upcoming-banner p{font-size:0.75rem;opacity:0.8;margin-top:2px}
@@ -262,30 +308,39 @@ select{cursor:pointer}
 <body>
 
 <!-- ═══════════════ LOGIN OVERLAY ═══════════════ -->
-<div id="login-overlay" style="display:none;position:fixed;inset:0;background:var(--paper);z-index:2000;align-items:center;justify-content:center">
-  <div style="background:white;max-width:380px;width:90%;border-radius:10px;padding:2rem;box-shadow:0 10px 40px rgba(0,0,0,0.15);text-align:center">
+<div id="login-overlay" style="display:none;position:fixed;inset:0;background:var(--paper);z-index:2000;align-items:cen
+ter;justify-content:center">
+  <div style="background:white;max-width:380px;width:90%;border-radius:10px;padding:2rem;box-shadow:0 10px 40px
+rgba(0,0,0,0.15);text-align:center">
     <div style="font-size:2.2rem;margin-bottom:0.5rem">⚖</div>
     <div style="font-weight:700;font-size:1.1rem;color:var(--ink);margin-bottom:0.2rem">Mutemo Desk</div>
-    <div style="font-size:0.72rem;color:var(--ink3);letter-spacing:0.05em;margin-bottom:1.5rem">ZIMBABWE LEGAL PRACTICE SYSTEM</div>
+    <div style="font-size:0.72rem;color:var(--ink3);letter-spacing:0.05em;margin-bottom:1.5rem">ZIMBABWE LEGAL
+PRACTICE SYSTEM</div>
 
     <div id="login-status" class="status" style="text-align:left"></div>
 
     <!-- Step 1: phone entry -->
     <div id="login-step-phone">
-      <p style="font-size:0.8rem;color:var(--ink2);margin-bottom:1rem;text-align:left">Enter your registered phone number to receive a one-time login code via SMS.</p>
+      <p style="font-size:0.8rem;color:var(--ink2);margin-bottom:1rem;text-align:left">Enter your registered phone
+number to receive a one-time login code via SMS.</p>
       <input type="tel" id="login-phone" placeholder="+263771234567"
-             style="width:100%;padding:0.6rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem;text-align:center"
+             style="width:100%;padding:0.6rem 0.75rem;border:1px solid
+var(--border);border-radius:6px;font-size:0.9rem;margin-bottom:0.75rem;text-align:center"
              onkeydown="if(event.key==='Enter')requestLoginOtp()"/>
-      <button class="btn btn-primary" style="width:100%" onclick="requestLoginOtp()" id="login-request-btn">Send Code</button>
+      <button class="btn btn-primary" style="width:100%" onclick="requestLoginOtp()" id="login-request-btn">Send
+Code</button>
     </div>
 
     <!-- Step 2: code entry -->
     <div id="login-step-code" style="display:none">
-      <p style="font-size:0.8rem;color:var(--ink2);margin-bottom:1rem;text-align:left">Enter the 6-digit code sent to <strong id="login-phone-display"></strong></p>
+      <p style="font-size:0.8rem;color:var(--ink2);margin-bottom:1rem;text-align:left">Enter the 6-digit code sent to
+<strong id="login-phone-display"></strong></p>
       <input type="text" id="login-code" placeholder="123456" maxlength="6" inputmode="numeric"
-             style="width:100%;padding:0.6rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:1.3rem;letter-spacing:0.3em;text-align:center;margin-bottom:0.75rem"
+             style="width:100%;padding:0.6rem 0.75rem;border:1px solid
+var(--border);border-radius:6px;font-size:1.3rem;letter-spacing:0.3em;text-align:center;margin-bottom:0.75rem"
              onkeydown="if(event.key==='Enter')verifyLoginOtp()"/>
-      <button class="btn btn-primary" style="width:100%;margin-bottom:0.5rem" onclick="verifyLoginOtp()" id="login-verify-btn">Verify &amp; Log In</button>
+      <button class="btn btn-primary" style="width:100%;margin-bottom:0.5rem" onclick="verifyLoginOtp()"
+id="login-verify-btn">Verify &amp; Log In</button>
       <button class="btn btn-outline" style="width:100%" onclick="backToPhoneEntry()">← Use a different number</button>
     </div>
   </div>
@@ -306,10 +361,13 @@ select{cursor:pointer}
     <span>Sawyer &amp; Mkushi Legal Practitioners</span>
     <span id="current-user-display"
           onclick="openIdentityModal()"
-          style="font-size:0.75rem;opacity:0.8;cursor:pointer;padding:3px 8px;border-radius:4px;background:rgba(255,255,255,0.15)"
+          style="font-size:0.75rem;opacity:0.8;cursor:pointer;padding:3px
+8px;border-radius:4px;background:rgba(255,255,255,0.15)"
           title="Click to change name">👤</span>
-    <span id="role-badge" style="font-size:0.65rem;padding:2px 7px;border-radius:10px;background:rgba(255,255,255,0.2);color:white;letter-spacing:0.4px;display:none"></span>
-    <button onclick="logout()" style="background:rgba(255,255,255,0.15);border:none;color:white;padding:4px 10px;border-radius:4px;font-size:0.7rem;cursor:pointer">Log out</button>
+    <span id="role-badge" style="font-size:0.65rem;padding:2px
+7px;border-radius:10px;background:rgba(255,255,255,0.2);color:white;letter-spacing:0.4px;display:none"></span>
+    <button onclick="logout()" style="background:rgba(255,255,255,0.15);border:none;color:white;padding:4px
+10px;border-radius:4px;font-size:0.7rem;cursor:pointer">Log out</button>
   </div>
 </header>
 
@@ -318,12 +376,16 @@ select{cursor:pointer}
   <button class="nav-btn" id="nav-vault" onclick="showTab('vault')">📁 Vault</button>
   <button class="nav-btn active" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
-  <button class="nav-btn" id="nav-affidavit" onclick="showTab('affidavit')" data-role-hide="secretary">📄 Draft Affidavit</button>
-  <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft Document</button>
-  <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge" id="cal-badge" style="display:none">0</span></button>
+  <button class="nav-btn" id="nav-affidavit" onclick="showTab('affidavit')" data-role-hide="secretary">📄 Draft
+Affidavit</button>
+  <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft
+Document</button>
+  <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge"
+id="cal-badge" style="display:none">0</span></button>
   <button class="nav-btn" id="nav-legalupdates" onclick="showTab('legalupdates')">⚖ Legal Updates</button>
   <button class="nav-btn" id="nav-zlr" onclick="showTab('zlr')">📚 Case Law Index</button>
-  <button class="nav-btn" id="nav-users" onclick="showTab('users')" data-role-hide="secretary,associate">👥 Users</button>
+  <button class="nav-btn" id="nav-users" onclick="showTab('users')" data-role-hide="secretary,associate">👥
+Users</button>
 </nav>
 
 <main class="main">
@@ -340,7 +402,8 @@ select{cursor:pointer}
       <div class="card">
         <div class="card-header">
           <div class="card-icon">📂</div>
-          <div><div class="card-title">Select Matter</div><div class="card-desc">Assign documents to a matter</div></div>
+          <div><div class="card-title">Select Matter</div><div class="card-desc">Assign documents to a
+matter</div></div>
         </div>
         <div class="card-body">
           <div class="form-group">
@@ -402,7 +465,8 @@ select{cursor:pointer}
               <option value="other">Other</option>
             </select>
           </div>
-          <button class="btn btn-outline btn-sm" onclick="createMatterFromVault()" style="width:100%">+ Create Matter</button>
+          <button class="btn btn-outline btn-sm" onclick="createMatterFromVault()" style="width:100%">+ Create
+Matter</button>
         </div>
       </div>
     </div>
@@ -411,7 +475,8 @@ select{cursor:pointer}
       <div class="card">
         <div class="card-header">
           <div class="card-icon">⬆</div>
-          <div><div class="card-title">Upload Documents</div><div class="card-desc">PDF, Word, Excel, TXT, EML supported</div></div>
+          <div><div class="card-title">Upload Documents</div><div class="card-desc">PDF, Word, Excel, TXT, EML
+supported</div></div>
         </div>
         <div class="card-body">
           <div id="vault-status" class="status"></div>
@@ -420,13 +485,15 @@ select{cursor:pointer}
             <div style="font-size:2rem">📎</div>
             <strong style="font-size:0.88rem">Drop files here or click to browse</strong>
             <p>PDF, Word (.docx/.doc), Excel (.xlsx), TXT, EML</p>
-            <input type="file" id="file-input" style="display:none" multiple accept=".pdf,.docx,.doc,.xlsx,.xlsm,.txt,.eml,.msg" onchange="handleFileSelect(event)"/>
+            <input type="file" id="file-input" style="display:none" multiple
+accept=".pdf,.docx,.doc,.xlsx,.xlsm,.txt,.eml,.msg" onchange="handleFileSelect(event)"/>
           </div>
           <div class="upload-list" id="upload-list"></div>
           <button class="btn btn-primary" id="upload-btn" onclick="processUploads()" disabled>
             Index documents into Vault
           </button>
-          <div class="tip">Documents are chunked and indexed for semantic search. The AI will learn your firm's drafting style and precedents.</div>
+          <div class="tip">Documents are chunked and indexed for semantic search. The AI will learn your firm's
+drafting style and precedents.</div>
         </div>
       </div>
     </div>
@@ -437,13 +504,15 @@ select{cursor:pointer}
 <div id="tab-search">
   <div class="section-head">
     <h2>🔍 Search Vault</h2>
-    <p>Ask in plain English. Mutemo Desk searches your entire document history and synthesises an answer. For legislation, search by topic or content — not section numbers.</p>
+    <p>Ask in plain English. Mutemo Desk searches your entire document history and synthesises an answer. For
+legislation, search by topic or content — not section numbers.</p>
   </div>
 
   <div class="card">
     <div class="card-body">
       <div class="form-group" style="margin-bottom:0.75rem">
-        <input type="text" id="search-query" placeholder="e.g. civil marriage consent requirements · retrenchment notice employer obligations · minimum age marriage Zimbabwe · quote Islamic marriage provisions"
+        <input type="text" id="search-query" placeholder="e.g. civil marriage consent requirements · retrenchment
+notice employer obligations · minimum age marriage Zimbabwe · quote Islamic marriage provisions"
                onkeydown="if(event.key==='Enter')doSearch()" style="font-size:0.95rem;padding:0.65rem 0.85rem"/>
       </div>
       <div class="form-row" style="margin-bottom:0.75rem">
@@ -506,84 +575,25 @@ select{cursor:pointer}
   <div id="search-empty" style="text-align:center;padding:3rem;color:var(--ink3)">
     <div style="font-size:2.5rem;opacity:0.2;margin-bottom:0.75rem">🔍</div>
     <p style="font-size:0.85rem">Search your indexed documents using plain English.</p>
-    <p style="font-size:0.75rem;margin-top:0.5rem;color:var(--ink3)">Try: "lease escalation clauses" · "customary inheritance arguments" · "affidavits for eviction"</p>
+    <p style="font-size:0.75rem;margin-top:0.5rem;color:var(--ink3)">Try: "lease escalation clauses" · "customary
+inheritance arguments" · "affidavits for eviction"</p>
   </div>
 </div>
 
 <!-- ═══════════════ MATTERS TAB ═══════════════ -->
 <div id="tab-matters" style="display:none">
-  <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
-    <div>
-      <h2>📂 Matter Dashboard</h2>
-      <p>All matters with indexed documents, progress notes, and status tracking.</p>
-    </div>
-    <button class="btn btn-primary" onclick="openNewMatterModal()" style="white-space:nowrap;margin-top:0.25rem">+ New Matter</button>
-  </div>
-
-  <!-- New Matter Modal -->
-  <div id="new-matter-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
-    <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
-        <div style="font-weight:700;font-size:1rem">+ New Matter</div>
-        <button onclick="closeNewMatterModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
-      </div>
-      <div class="form-group">
-        <label>Matter Name / Description *</label>
-        <input type="text" id="nm-name" placeholder="e.g. Moyo v Dube — Stand 245 Borrowdale"/>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Internal Ref</label>
-          <input type="text" id="nm-internal-ref" placeholder="NGM 1"/>
-        </div>
-        <div class="form-group">
-          <label>External Ref</label>
-          <input type="text" id="nm-external-ref" placeholder="HC 1234/26"/>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Client Name</label>
-        <input type="text" id="nm-client" placeholder="e.g. John Moyo"/>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Matter Type</label>
-          <select id="nm-type">
-            <option value="">— Select type —</option>
-            <option value="commercial_property">Commercial Property</option>
-            <option value="residential_property">Residential Property</option>
-            <option value="employment">Employment / Labour</option>
-            <option value="family">Family / Matrimonial</option>
-            <option value="criminal">Criminal</option>
-            <option value="commercial_contract">Commercial Contract</option>
-            <option value="debt_collection">Debt Collection</option>
-            <option value="estate">Estate / Probate</option>
-            <option value="insurance">Insurance Claim</option>
-            <option value="constitutional">Constitutional</option>
-            <option value="other">Other</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Status</label>
-          <select id="nm-status">
-            <option value="Active">Active</option>
-            <option value="Awaiting Client">Awaiting Client</option>
-            <option value="Awaiting Court">Awaiting Court</option>
-            <option value="On Hold">On Hold</option>
-          </select>
-        </div>
-      </div>
-      <div id="nm-status-msg" class="status" style="margin-bottom:0.5rem"></div>
-      <button class="btn btn-primary" style="width:100%" onclick="submitNewMatter()">Create Matter</button>
-    </div>
+  <div class="section-head">
+    <h2>📂 Matter Dashboard</h2>
+    <p>All matters with indexed documents, progress notes, and status tracking.</p>
   </div>
 
   <!-- Bulk Import -->
-  <div class="card" style="margin-bottom:1rem;margin-top:1rem">
+  <div class="card" style="margin-bottom:1rem">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div>
         <div class="card-title">⬆ Bulk Import Matters</div>
-        <div class="card-desc">Upload a completed Matter Register to create all your matters at once. Supports Word (.docx) and Excel (.xlsx).</div>
+        <div class="card-desc">Upload a completed Matter Register to create all your matters at once. Supports Word
+(.docx) and Excel (.xlsx).</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <a href="/api/matters/template-excel" download="MutemoDesk_Matter_Import_Template.xlsx"
@@ -603,7 +613,8 @@ select{cursor:pointer}
   <!-- Matters Search -->
   <div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center">
     <input type="text" id="matters-search" placeholder="🔍 Search matters by name, client, or reference…"
-      style="flex:1;padding:0.6rem 0.85rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit"
+      style="flex:1;padding:0.6rem 0.85rem;border:1px solid
+var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit"
       oninput="filterMatters(this.value)"/>
     <span id="matters-count" style="font-size:0.75rem;color:var(--ink3);white-space:nowrap"></span>
   </div>
@@ -621,10 +632,13 @@ select{cursor:pointer}
       </div>
 
       <div id="precedent-banner" style="display:none" class="card" style="border:1px solid var(--gold2)">
-        <div class="card-body" style="padding:0.75rem 1rem;background:#fdf6e8;display:flex;align-items:center;gap:10px">
+        <div class="card-body" style="padding:0.75rem
+1rem;background:#fdf6e8;display:flex;align-items:center;gap:10px">
           <span style="font-size:1rem">📎</span>
           <div style="flex:1">
-            <div style="font-size:0.72rem;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:0.5px">Precedent Loaded</div>
+            <div
+style="font-size:0.72rem;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:0.5px">Precedent
+Loaded</div>
             <div id="precedent-filename" style="font-size:0.82rem;color:var(--ink2)"></div>
           </div>
           <button class="btn btn-sm btn-outline" onclick="clearPrecedent()">Clear</button>
@@ -637,10 +651,13 @@ select{cursor:pointer}
           <div class="form-section">
             <div class="form-section-label">Deponent</div>
             <div class="form-row">
-              <div class="form-group"><label>Full Name *</label><input type="text" id="aff-name" placeholder="JOHN TENDAI MOYO"/></div>
-              <div class="form-group"><label>National ID</label><input type="text" id="aff-id" placeholder="63-123456 A 00"/></div>
+              <div class="form-group"><label>Full Name *</label><input type="text" id="aff-name" placeholder="JOHN
+TENDAI MOYO"/></div>
+              <div class="form-group"><label>National ID</label><input type="text" id="aff-id" placeholder="63-123456
+A 00"/></div>
             </div>
-            <div class="form-group"><label>Capacity</label><input type="text" id="aff-capacity" placeholder="the duly authorised representative of the Applicant"/></div>
+            <div class="form-group"><label>Capacity</label><input type="text" id="aff-capacity" placeholder="the duly
+authorised representative of the Applicant"/></div>
           </div>
 
           <div class="form-section">
@@ -675,22 +692,26 @@ select{cursor:pointer}
                 </select>
               </div>
             </div>
-            <div class="form-group"><label>Parties</label><input type="text" id="aff-parties" placeholder="Applicant: John Moyo / Respondent: Peter Dube"/></div>
+            <div class="form-group"><label>Parties</label><input type="text" id="aff-parties" placeholder="Applicant:
+John Moyo / Respondent: Peter Dube"/></div>
           </div>
 
           <div class="form-section">
             <div class="form-section-label">Matter</div>
             <div class="form-group">
               <label>Matter Summary *</label>
-              <textarea id="aff-summary" rows="4" placeholder="Describe the matter — what happened, what is in dispute, what outcome is sought…"></textarea>
+              <textarea id="aff-summary" rows="4" placeholder="Describe the matter — what happened, what is in
+dispute, what outcome is sought…"></textarea>
             </div>
             <div class="form-group">
               <label>Key Facts (one per line)</label>
-              <textarea id="aff-facts" rows="5" placeholder="1. The lease was signed on 1 March 2023&#10;2. The respondent has not paid rent since June 2023&#10;3. Notice to vacate was served on 15 August 2023"></textarea>
+              <textarea id="aff-facts" rows="5" placeholder="1. The lease was signed on 1 March 2023&#10;2. The
+respondent has not paid rent since June 2023&#10;3. Notice to vacate was served on 15 August 2023"></textarea>
             </div>
             <div class="form-group">
               <label>Relief Sought</label>
-              <textarea id="aff-relief" rows="2" placeholder="An order evicting the respondent from Stand 245 Borrowdale, Harare"></textarea>
+              <textarea id="aff-relief" rows="2" placeholder="An order evicting the respondent from Stand 245
+Borrowdale, Harare"></textarea>
             </div>
           </div>
 
@@ -766,7 +787,8 @@ select{cursor:pointer}
           </div>
           <div class="form-group" id="cal-custom-type-group" style="display:none">
             <label>Specify event type</label>
-            <input type="text" id="cal-custom-type" placeholder="e.g. Consultation, Taxation of Bill, Pre-trial conference…"/>
+            <input type="text" id="cal-custom-type" placeholder="e.g. Consultation, Taxation of Bill, Pre-trial
+conference…"/>
           </div>
           <div class="form-row">
             <div class="form-group">
@@ -794,12 +816,14 @@ select{cursor:pointer}
       <div class="card">
         <div class="card-header">
           <div class="card-icon">✉</div>
-          <div><div class="card-title">Email Reminders</div><div class="card-desc">Daily summary of upcoming hearings &amp; deadlines</div></div>
+          <div><div class="card-title">Email Reminders</div><div class="card-desc">Daily summary of upcoming hearings
+&amp; deadlines</div></div>
         </div>
         <div class="card-body">
           <div id="reminder-status" class="status"></div>
           <div id="reminder-smtp-warning" style="display:none;margin-bottom:0.75rem" class="status show error">
-            Email sending is not configured on the server. Ask your administrator to set SMTP_HOST, SMTP_USER, SMTP_PASSWORD, and SMTP_FROM.
+            Email sending is not configured on the server. Ask your administrator to set SMTP_HOST, SMTP_USER,
+SMTP_PASSWORD, and SMTP_FROM.
           </div>
           <div class="form-group">
             <label>Recipient Email</label>
@@ -825,10 +849,12 @@ select{cursor:pointer}
             </div>
           </div>
           <div class="actions-row" style="margin-top:0.25rem">
-            <button class="btn btn-primary" onclick="saveReminderSettings()" style="margin-top:0">💾 Save Settings</button>
+            <button class="btn btn-primary" onclick="saveReminderSettings()" style="margin-top:0">💾 Save
+Settings</button>
             <button class="btn btn-outline" onclick="sendTestReminder()">✉ Send Test Email</button>
           </div>
-          <div class="tip">Reminders cover events in the next 7 days, with anything today or tomorrow highlighted first. An .ics calendar file is attached so you can add events to your phone with one tap.</div>
+          <div class="tip">Reminders cover events in the next 7 days, with anything today or tomorrow highlighted
+first. An .ics calendar file is attached so you can add events to your phone with one tap.</div>
         </div>
       </div>
     </div>
@@ -851,11 +877,14 @@ select{cursor:pointer}
 <div id="tab-legalupdates" style="display:none">
   <div class="section-head">
     <h2>⚖ Legal Updates</h2>
-    <p>Zimbabwean legislation and case law — separate from your firm's private precedents. Upload Acts, Statutory Instruments, and judgments from ZimLII or Veritas.</p>
+    <p>Zimbabwean legislation and case law — separate from your firm's private precedents. Upload Acts, Statutory
+Instruments, and judgments from ZimLII or Veritas.</p>
   </div>
 
   <div class="tip" style="margin-top:0;margin-bottom:1rem">
-    📌 <strong>How to use:</strong> Visit <a href="https://zimlii.org" target="_blank">zimlii.org</a> or <a href="https://veritaszim.net" target="_blank">veritaszim.net</a> as you normally would, download the Act, SI, or judgment PDF you need, then upload it here. Content remains attributed to its source (ZimLII content is CC BY-NC).
+    📌 <strong>How to use:</strong> Visit <a href="https://zimlii.org" target="_blank">zimlii.org</a> or <a
+href="https://veritaszim.net" target="_blank">veritaszim.net</a> as you normally would, download the Act, SI, or
+judgment PDF you need, then upload it here. Content remains attributed to its source (ZimLII content is CC BY-NC).
   </div>
 
   <div class="grid-2">
@@ -863,7 +892,8 @@ select{cursor:pointer}
       <div class="card">
         <div class="card-header">
           <div class="card-icon">⬆</div>
-          <div><div class="card-title">Upload Legislation or Case Law</div><div class="card-desc">PDF, DOCX, or TXT</div></div>
+          <div><div class="card-title">Upload Legislation or Case Law</div><div class="card-desc">PDF, DOCX, or
+TXT</div></div>
         </div>
         <div class="card-body">
           <div id="lu-status" class="status"></div>
@@ -894,7 +924,8 @@ select{cursor:pointer}
             <div style="font-size:2rem">📜</div>
             <strong style="font-size:0.88rem">Drop file here or click to browse</strong>
             <p>PDF, DOCX, TXT</p>
-            <input type="file" id="lu-file-input" style="display:none" accept=".pdf,.docx,.doc,.txt" onchange="handleLuFileSelect(event)"/>
+            <input type="file" id="lu-file-input" style="display:none" accept=".pdf,.docx,.doc,.txt"
+onchange="handleLuFileSelect(event)"/>
           </div>
           <div id="lu-pending" style="margin-top:0.5rem"></div>
           <button class="btn btn-primary" id="lu-upload-btn" onclick="uploadLegalUpdate()" disabled>
@@ -908,7 +939,8 @@ select{cursor:pointer}
       <div class="card">
         <div class="card-header">
           <div class="card-icon">📚</div>
-          <div><div class="card-title">Indexed Items</div><div class="card-desc">Legislation and case law currently searchable</div></div>
+          <div><div class="card-title">Indexed Items</div><div class="card-desc">Legislation and case law currently
+searchable</div></div>
         </div>
         <div class="card-body" id="lu-list">
           <div class="empty-state" style="padding:1.5rem">
@@ -924,79 +956,106 @@ select{cursor:pointer}
 <div id="tab-draft" style="display:none">
   <div class="section-head">
     <h2>✍ Draft Document</h2>
-    <p>AI drafts any Zimbabwe legal document. Select a type or describe what you need, edit in the rich text editor, then export to Word or PDF.</p>
+    <p>AI drafts any Zimbabwe legal document. Select a type or describe what you need, edit in the rich text editor,
+then export to Word or PDF.</p>
   </div>
 
   <!-- Step 1: Document type selection -->
   <div class="card" id="draft-step1">
     <div class="card-header">
       <div class="card-icon">📋</div>
-      <div><div class="card-title">Step 1 — Choose Document Type</div><div class="card-desc">Select a template or use freeform for any other document</div></div>
+      <div><div class="card-title">Step 1 — Choose Document Type</div><div class="card-desc">Select a template or use
+freeform for any other document</div></div>
     </div>
     <div class="card-body">
       <div class="doc-type-grid" id="doc-type-grid">
         <button class="doc-type-btn" onclick="selectDocType('summons_matrimonial')" id="dt-summons_matrimonial">
-          <div class="dt-icon">⚖</div><span class="dt-name">Matrimonial Summons</span><span class="dt-desc">Divorce, custody, maintenance</span>
+          <div class="dt-icon">⚖</div><span class="dt-name">Matrimonial Summons</span><span class="dt-desc">Divorce,
+custody, maintenance</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('summons_civil')" id="dt-summons_civil">
-          <div class="dt-icon">📋</div><span class="dt-name">Civil Summons</span><span class="dt-desc">General civil proceedings</span>
+          <div class="dt-icon">📋</div><span class="dt-name">Civil Summons</span><span class="dt-desc">General civil
+proceedings</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('court_application')" id="dt-court_application">
-          <div class="dt-icon">🏛</div><span class="dt-name">Court Application</span><span class="dt-desc">Notice of motion & draft order</span>
+          <div class="dt-icon">🏛</div><span class="dt-name">Court Application</span><span class="dt-desc">Notice of
+motion & draft order</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('urgent_chamber')" id="dt-urgent_chamber">
-          <div class="dt-icon">⚡</div><span class="dt-name">Urgent Chamber Application</span><span class="dt-desc">Urgent relief, certificate of urgency</span>
+          <div class="dt-icon">⚡</div><span class="dt-name">Urgent Chamber Application</span><span
+class="dt-desc">Urgent relief, certificate of urgency</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('notice_of_appeal')" id="dt-notice_of_appeal">
-          <div class="dt-icon">📤</div><span class="dt-name">Notice of Appeal</span><span class="dt-desc">High Court, Supreme Court</span>
+          <div class="dt-icon">📤</div><span class="dt-name">Notice of Appeal</span><span class="dt-desc">High Court,
+Supreme Court</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('letter_of_demand')" id="dt-letter_of_demand">
-          <div class="dt-icon">✉</div><span class="dt-name">Letter of Demand</span><span class="dt-desc">Formal demand before action</span>
+          <div class="dt-icon">✉</div><span class="dt-name">Letter of Demand</span><span class="dt-desc">Formal demand
+before action</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('review')" id="dt-review">
-          <div class="dt-icon">🔍</div><span class="dt-name">Application for Review</span><span class="dt-desc">Judicial review of decisions</span>
+          <div class="dt-icon">🔍</div><span class="dt-name">Application for Review</span><span
+class="dt-desc">Judicial review of decisions</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('heads_of_argument')" id="dt-heads_of_argument">
-          <div class="dt-icon">📑</div><span class="dt-name">Heads of Argument</span><span class="dt-desc">Structured legal argument</span>
+          <div class="dt-icon">📑</div><span class="dt-name">Heads of Argument</span><span class="dt-desc">Structured
+legal argument</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('legal_opinion')" id="dt-legal_opinion">
-          <div class="dt-icon">💡</div><span class="dt-name">Legal Opinion</span><span class="dt-desc">Formal written opinion</span>
+          <div class="dt-icon">💡</div><span class="dt-name">Legal Opinion</span><span class="dt-desc">Formal written
+opinion</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('client_letter')" id="dt-client_letter">
-          <div class="dt-icon">📧</div><span class="dt-name">Client Letter</span><span class="dt-desc">Formal correspondence</span>
+          <div class="dt-icon">📧</div><span class="dt-name">Client Letter</span><span class="dt-desc">Formal
+correspondence</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('agreement')" id="dt-agreement">
-          <div class="dt-icon">🤝</div><span class="dt-name">Agreement / Contract</span><span class="dt-desc">Commercial, lease, settlement</span>
+          <div class="dt-icon">🤝</div><span class="dt-name">Agreement / Contract</span><span
+class="dt-desc">Commercial, lease, settlement</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('joint_venture')" id="dt-joint_venture">
-          <div class="dt-icon">🏢</div><span class="dt-name">Joint Venture / Shareholders</span><span class="dt-desc">COBE Act, shareholding structure</span>
+          <div class="dt-icon">🏢</div><span class="dt-name">Joint Venture / Shareholders</span><span
+class="dt-desc">COBE Act, shareholding structure</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('agreement_of_sale')" id="dt-agreement_of_sale">
-          <div class="dt-icon">🏠</div><span class="dt-name">Agreement of Sale</span><span class="dt-desc">Immoveable property — Deeds Registry</span>
+          <div class="dt-icon">🏠</div><span class="dt-name">Agreement of Sale</span><span class="dt-desc">Immoveable
+property — Deeds Registry</span>
         </button>
-        <button class="doc-type-btn" onclick="selectDocType('acknowledgement_of_debt')" id="dt-acknowledgement_of_debt">
-          <div class="dt-icon">📜</div><span class="dt-name">Acknowledgement of Debt</span><span class="dt-desc">Liquid document, consent to judgment</span>
+        <button class="doc-type-btn" onclick="selectDocType('acknowledgement_of_debt')"
+id="dt-acknowledgement_of_debt">
+          <div class="dt-icon">📜</div><span class="dt-name">Acknowledgement of Debt</span><span
+class="dt-desc">Liquid document, consent to judgment</span>
         </button>
-        <button class="doc-type-btn" onclick="selectDocType('power_of_attorney_transfer')" id="dt-power_of_attorney_transfer">
-          <div class="dt-icon">🔑</div><span class="dt-name">Power of Attorney — Transfer</span><span class="dt-desc">Conveyancing, Deeds Registry</span>
+        <button class="doc-type-btn" onclick="selectDocType('power_of_attorney_transfer')"
+id="dt-power_of_attorney_transfer">
+          <div class="dt-icon">🔑</div><span class="dt-name">Power of Attorney — Transfer</span><span
+class="dt-desc">Conveyancing, Deeds Registry</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('declaration_transferor')" id="dt-declaration_transferor">
-          <div class="dt-icon">📋</div><span class="dt-name">Declaration by Transferor</span><span class="dt-desc">Seller declaration — Deeds Registry</span>
+          <div class="dt-icon">📋</div><span class="dt-name">Declaration by Transferor</span><span
+class="dt-desc">Seller declaration — Deeds Registry</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('declaration_transferee')" id="dt-declaration_transferee">
-          <div class="dt-icon">📋</div><span class="dt-name">Declaration by Transferee</span><span class="dt-desc">Buyer declaration — Deeds Registry</span>
+          <div class="dt-icon">📋</div><span class="dt-name">Declaration by Transferee</span><span
+class="dt-desc">Buyer declaration — Deeds Registry</span>
         </button>
-        <button class="doc-type-btn" onclick="selectDocType('special_power_of_attorney')" id="dt-special_power_of_attorney">
-          <div class="dt-icon">✍</div><span class="dt-name">Special Power of Attorney</span><span class="dt-desc">Limited, transaction-specific authority</span>
+        <button class="doc-type-btn" onclick="selectDocType('special_power_of_attorney')"
+id="dt-special_power_of_attorney">
+          <div class="dt-icon">✍</div><span class="dt-name">Special Power of Attorney</span><span
+class="dt-desc">Limited, transaction-specific authority</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('sale_of_business')" id="dt-sale_of_business">
-          <div class="dt-icon">🏪</div><span class="dt-name">Sale of Business Agreement</span><span class="dt-desc">Goodwill, assets, employees, restraint</span>
+          <div class="dt-icon">🏪</div><span class="dt-name">Sale of Business Agreement</span><span
+class="dt-desc">Goodwill, assets, employees, restraint</span>
         </button>
-        <button class="doc-type-btn" onclick="selectDocType('memorandum_of_understanding')" id="dt-memorandum_of_understanding">
-          <div class="dt-icon">🤝</div><span class="dt-name">Memorandum of Understanding</span><span class="dt-desc">Binding / non-binding, pre-agreement</span>
+        <button class="doc-type-btn" onclick="selectDocType('memorandum_of_understanding')"
+id="dt-memorandum_of_understanding">
+          <div class="dt-icon">🤝</div><span class="dt-name">Memorandum of Understanding</span><span
+class="dt-desc">Binding / non-binding, pre-agreement</span>
         </button>
         <button class="doc-type-btn" onclick="selectDocType('freeform')" id="dt-freeform">
-          <div class="dt-icon">✍</div><span class="dt-name">Other / Freeform</span><span class="dt-desc">Describe any document</span>
+          <div class="dt-icon">✍</div><span class="dt-name">Other / Freeform</span><span class="dt-desc">Describe any
+document</span>
         </button>
       </div>
     </div>
@@ -1006,15 +1065,18 @@ select{cursor:pointer}
   <div class="card" id="draft-step2" style="display:none">
     <div class="card-header">
       <div class="card-icon">📝</div>
-      <div><div class="card-title" id="draft-form-title">Step 2 — Document Details</div><div class="card-desc">Fill in the key details — AI handles the drafting</div></div>
+      <div><div class="card-title" id="draft-form-title">Step 2 — Document Details</div><div class="card-desc">Fill in
+the key details — AI handles the drafting</div></div>
     </div>
     <div class="card-body">
       <div id="draft-status" class="status"></div>
 
       <!-- Precedent context banner -->
-      <div id="draft-precedent-banner" style="display:none;background:#fdf6e8;border:1px solid var(--gold);border-radius:4px;padding:0.65rem 0.85rem;margin-bottom:0.75rem;display:none;align-items:center;gap:8px">
+      <div id="draft-precedent-banner" style="display:none;background:#fdf6e8;border:1px solid
+var(--gold);border-radius:4px;padding:0.65rem 0.85rem;margin-bottom:0.75rem;display:none;align-items:center;gap:8px">
         <span>📎</span>
-        <div style="flex:1;font-size:0.78rem"><strong style="color:var(--gold)">Precedent loaded:</strong> <span id="draft-precedent-name"></span></div>
+        <div style="flex:1;font-size:0.78rem"><strong style="color:var(--gold)">Precedent loaded:</strong> <span
+id="draft-precedent-name"></span></div>
         <button class="btn btn-sm btn-outline" onclick="clearDraftPrecedent()">Clear</button>
       </div>
 
@@ -1022,8 +1084,10 @@ select{cursor:pointer}
       <div class="form-section" id="draft-parties-section">
         <div class="form-section-label" id="draft-parties-label">Parties</div>
         <div class="form-row">
-          <div class="form-group"><label id="draft-party-a-label">Plaintiff / Applicant</label><input type="text" id="draft-plaintiff" placeholder="e.g. MARY CHIGUMBA"/></div>
-          <div class="form-group"><label id="draft-party-b-label">Defendant / Respondent</label><input type="text" id="draft-defendant" placeholder="e.g. JOHN CHIGUMBA"/></div>
+          <div class="form-group"><label id="draft-party-a-label">Plaintiff / Applicant</label><input type="text"
+id="draft-plaintiff" placeholder="e.g. MARY CHIGUMBA"/></div>
+          <div class="form-group"><label id="draft-party-b-label">Defendant / Respondent</label><input type="text"
+id="draft-defendant" placeholder="e.g. JOHN CHIGUMBA"/></div>
         </div>
         <div class="form-row" id="draft-court-row">
           <div class="form-group">
@@ -1038,7 +1102,8 @@ select{cursor:pointer}
               <option>Administrative Court</option>
             </select>
           </div>
-          <div class="form-group"><label>Case / Matter Number</label><input type="text" id="draft-casenumber" placeholder="e.g. HC 1234/26 or leave blank"/></div>
+          <div class="form-group"><label>Case / Matter Number</label><input type="text" id="draft-casenumber"
+placeholder="e.g. HC 1234/26 or leave blank"/></div>
         </div>
       </div>
 
@@ -1050,11 +1115,13 @@ select{cursor:pointer}
         <div class="form-section-label">Key Facts &amp; Instructions</div>
         <div class="form-group">
           <label>Describe the facts, background, and what the document must achieve *</label>
-          <textarea id="draft-facts" rows="6" placeholder="Describe in plain language what happened, what is needed, and any specific points the document must cover. The AI will structure and draft accordingly."></textarea>
+          <textarea id="draft-facts" rows="6" placeholder="Describe in plain language what happened, what is needed,
+and any specific points the document must cover. The AI will structure and draft accordingly."></textarea>
         </div>
         <div class="form-group">
           <label>Additional instructions (optional)</label>
-          <input type="text" id="draft-instructions" placeholder="e.g. Emphasise urgency · Include prayer for costs · Use formal tone"/>
+          <input type="text" id="draft-instructions" placeholder="e.g. Emphasise urgency · Include prayer for costs ·
+Use formal tone"/>
         </div>
         <div class="form-group">
           <label>Load precedent from vault (optional)</label>
@@ -1066,7 +1133,8 @@ select{cursor:pointer}
 
       <div style="display:flex;gap:0.5rem">
         <button class="btn btn-outline" onclick="resetDraftTab()" style="margin-top:0.5rem">← Change type</button>
-        <button class="btn btn-primary" onclick="generateDocument()" id="draft-gen-btn" style="margin-top:0.5rem">✍ Draft Document</button>
+        <button class="btn btn-primary" onclick="generateDocument()" id="draft-gen-btn" style="margin-top:0.5rem">✍
+Draft Document</button>
       </div>
     </div>
   </div>
@@ -1096,14 +1164,16 @@ select{cursor:pointer}
       <button class="tbar-btn" onclick="fmtDoc('insertOrderedList')" title="Numbered list">1.</button>
       <button class="tbar-btn" onclick="fmtDoc('insertUnorderedList')" title="Bullet list">•</button>
       <div class="tbar-sep"></div>
-      <select onchange="fmtDoc('formatBlock', this.value); this.value=''" style="font-size:0.75rem;padding:2px 4px;border:1px solid var(--border);border-radius:3px;background:white">
+      <select onchange="fmtDoc('formatBlock', this.value); this.value=''" style="font-size:0.75rem;padding:2px
+4px;border:1px solid var(--border);border-radius:3px;background:white">
         <option value="">Paragraph style</option>
         <option value="h1">Heading 1</option>
         <option value="h2">Heading 2</option>
         <option value="p">Normal</option>
       </select>
       <div class="tbar-sep"></div>
-      <select onchange="changeFontSize(this.value); this.value=''" style="font-size:0.75rem;padding:2px 4px;border:1px solid var(--border);border-radius:3px;background:white">
+      <select onchange="changeFontSize(this.value); this.value=''" style="font-size:0.75rem;padding:2px 4px;border:1px
+solid var(--border);border-radius:3px;background:white">
         <option value="">Font size</option>
         <option value="10pt">10pt</option>
         <option value="11pt">11pt</option>
@@ -1128,7 +1198,8 @@ select{cursor:pointer}
 <div id="tab-zlr" style="display:none">
   <div class="section-head">
     <h2>📚 Comparative Law Index</h2>
-    <p>Upload headnotes and judgments from Zimbabwe, South Africa, and English law reports — ZLR, ZimLII, SAFLII, BAILII, All England, and more. Each case is classified by jurisdiction, authority weight, and subject category.</p>
+    <p>Upload headnotes and judgments from Zimbabwe, South Africa, and English law reports — ZLR, ZimLII, SAFLII,
+BAILII, All England, and more. Each case is classified by jurisdiction, authority weight, and subject category.</p>
   </div>
 
   <div class="grid-2">
@@ -1136,7 +1207,8 @@ select{cursor:pointer}
       <div class="card">
         <div class="card-header">
           <div class="card-icon">⬆</div>
-          <div><div class="card-title">Upload Case</div><div class="card-desc">ZLR &middot; SAFLII &middot; BAILII &middot; All England &middot; any jurisdiction</div></div>
+          <div><div class="card-title">Upload Case</div><div class="card-desc">ZLR &middot; SAFLII &middot; BAILII
+&middot; All England &middot; any jurisdiction</div></div>
         </div>
         <div class="card-body">
           <div id="zlr-status" class="status"></div>
@@ -1194,9 +1266,13 @@ select{cursor:pointer}
             Index into Case Law Collection
           </button>
           <div class="tip">
-            📖 <strong>Physical volumes (ZLR, All England, SALR):</strong> Open to the headnote page, photograph clearly in good light, select the correct source and volume year, and upload. OCR reads the citation, judge, subject chains, and summary automatically.<br/><br/>
-            🌐 <strong>ZimLII / SAFLII / BAILII:</strong> Download the judgment PDF or copy the full text, select the matching source, and upload. The ZimLII URL field lets you link directly back to the original.<br/><br/>
-            ⚖ <strong>Authority weight</strong> is set automatically — Zimbabwe cases are <strong>binding</strong>, South African cases <strong>highly persuasive</strong>, English cases <strong>persuasive</strong>.
+            📖 <strong>Physical volumes (ZLR, All England, SALR):</strong> Open to the headnote page, photograph
+clearly in good light, select the correct source and volume year, and upload. OCR reads the citation, judge, subject
+chains, and summary automatically.<br/><br/>
+            🌐 <strong>ZimLII / SAFLII / BAILII:</strong> Download the judgment PDF or copy the full text, select the
+matching source, and upload. The ZimLII URL field lets you link directly back to the original.<br/><br/>
+            ⚖ <strong>Authority weight</strong> is set automatically — Zimbabwe cases are <strong>binding</strong>,
+South African cases <strong>highly persuasive</strong>, English cases <strong>persuasive</strong>.
           </div>
         </div>
       </div>
@@ -1205,11 +1281,14 @@ select{cursor:pointer}
       <div class="card" style="margin-top:1rem">
         <div class="card-header">
           <div class="card-icon">📦</div>
-          <div><div class="card-title">Bulk Import — Cases Decided Digest</div><div class="card-desc">Upload a ZLR digest — imports all cases at once</div></div>
+          <div><div class="card-title">Bulk Import — Cases Decided Digest</div><div class="card-desc">Upload a ZLR
+digest — imports all cases at once</div></div>
         </div>
         <div class="card-body">
           <div id="bulk-import-status" class="status"></div>
-          <p style="font-size:0.78rem;color:var(--ink2);margin-bottom:0.75rem">Upload a ZLR "Cases Decided" DOCX or PDF. The system parses every case individually — extracting judgment numbers, courts, judges, subject chains, and summaries — and indexes them all in one operation.</p>
+          <p style="font-size:0.78rem;color:var(--ink2);margin-bottom:0.75rem">Upload a ZLR "Cases Decided" DOCX or
+PDF. The system parses every case individually — extracting judgment numbers, courts, judges, subject chains, and
+summaries — and indexes them all in one operation.</p>
           <div class="form-row">
             <div class="form-group">
               <label>Source</label>
@@ -1237,7 +1316,8 @@ select{cursor:pointer}
                    onchange="handleBulkFileSelect(event)"/>
           </div>
           <div id="bulk-pending" style="margin-top:0.5rem"></div>
-          <button class="btn btn-primary" id="bulk-import-btn" onclick="runBulkImport()" disabled style="margin-top:0.5rem">
+          <button class="btn btn-primary" id="bulk-import-btn" onclick="runBulkImport()" disabled
+style="margin-top:0.5rem">
             📦 Import All Cases
           </button>
         </div>
@@ -1247,7 +1327,8 @@ select{cursor:pointer}
       <div class="card" style="margin-top:1rem">
         <div class="card-header">
           <div class="card-icon">🔍</div>
-          <div><div class="card-title">Search ZLR Index</div><div class="card-desc">Search by legal principle, case name, or subject</div></div>
+          <div><div class="card-title">Search ZLR Index</div><div class="card-desc">Search by legal principle, case
+name, or subject</div></div>
         </div>
         <div class="card-body">
           <div class="form-group">
@@ -1288,11 +1369,13 @@ select{cursor:pointer}
       <div class="card">
         <div class="card-header">
           <div class="card-icon">📊</div>
-          <div><div class="card-title">Index Statistics</div><div class="card-desc">Cases indexed by category</div></div>
+          <div><div class="card-title">Index Statistics</div><div class="card-desc">Cases indexed by
+category</div></div>
         </div>
         <div class="card-body" id="zlr-stats">
           <div class="empty-state" style="padding:1.5rem">
-            <p style="font-size:0.82rem;color:var(--ink3)">No cases indexed yet. Start by uploading ZLR headnotes or ZimLII judgments.</p>
+            <p style="font-size:0.82rem;color:var(--ink3)">No cases indexed yet. Start by uploading ZLR headnotes or
+ZimLII judgments.</p>
           </div>
         </div>
         <div style="padding:0.75rem 1rem;border-top:1px solid var(--border)">
@@ -1307,7 +1390,8 @@ select{cursor:pointer}
       <div class="card" style="margin-top:1rem">
         <div class="card-header">
           <div class="card-icon">📋</div>
-          <div><div class="card-title">Recently Indexed</div><div class="card-desc">Latest additions to the ZLR Index</div></div>
+          <div><div class="card-title">Recently Indexed</div><div class="card-desc">Latest additions to the ZLR
+Index</div></div>
         </div>
         <div class="card-body" id="zlr-recent">
           <div class="empty-state" style="padding:1.5rem">
@@ -1320,14 +1404,18 @@ select{cursor:pointer}
 </div>
 
 <!-- ═══════════════ DATE EXTRACTION MODAL ═══════════════ -->
-<div id="date-extract-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow-y:auto">
-  <div style="background:white;max-width:600px;margin:2rem auto;border-radius:8px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
-    <div style="background:var(--green);color:white;padding:1rem 1.25rem;display:flex;align-items:center;justify-content:space-between">
+<div id="date-extract-modal"
+style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow-y:auto">
+  <div style="background:white;max-width:600px;margin:2rem auto;border-radius:8px;overflow:hidden;box-shadow:0 20px
+60px rgba(0,0,0,0.3)">
+    <div style="background:var(--green);color:white;padding:1rem
+1.25rem;display:flex;align-items:center;justify-content:space-between">
       <div>
         <div style="font-weight:700;font-size:1rem">📅 Dates Extracted from Document</div>
         <div id="date-modal-filename" style="font-size:0.78rem;opacity:0.8;margin-top:2px"></div>
       </div>
-      <button onclick="closeDateModal()" style="background:none;border:none;color:white;font-size:1.2rem;cursor:pointer">✕</button>
+      <button onclick="closeDateModal()"
+style="background:none;border:none;color:white;font-size:1.2rem;cursor:pointer">✕</button>
     </div>
     <div style="padding:1.25rem">
       <div id="date-modal-status" class="status"></div>
@@ -1336,34 +1424,43 @@ select{cursor:pointer}
           <span class="spinner"></span> Reading document and extracting dates…
         </div>
       </div>
-      <div id="date-modal-actions" style="display:none;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border);display:flex;gap:0.5rem;justify-content:flex-end">
+      <div id="date-modal-actions" style="display:none;margin-top:1rem;padding-top:1rem;border-top:1px solid
+var(--border);display:flex;gap:0.5rem;justify-content:flex-end">
         <button class="btn btn-outline" onclick="closeDateModal()">Cancel</button>
-        <button class="btn btn-primary" onclick="addSelectedDates()" id="add-dates-btn">📅 Add Selected to Calendar</button>
+        <button class="btn btn-primary" onclick="addSelectedDates()" id="add-dates-btn">📅 Add Selected to
+Calendar</button>
       </div>
     </div>
   </div>
 </div>
 
 <!-- ═══════════════ IDENTITY MODAL ═══════════════ -->
-<div id="identity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:2001;align-items:center;justify-content:center">
-  <div style="background:white;max-width:360px;width:90%;border-radius:8px;padding:1.5rem;box-shadow:0 10px 40px rgba(0,0,0,0.2)">
+<div id="identity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:2001;align-items
+:center;justify-content:center">
+  <div style="background:white;max-width:360px;width:90%;border-radius:8px;padding:1.5rem;box-shadow:0 10px 40px
+rgba(0,0,0,0.2)">
     <div style="font-weight:700;font-size:1rem;margin-bottom:0.5rem">👤 Who are you?</div>
-    <p style="font-size:0.82rem;color:var(--ink2);margin-bottom:1rem">Your name will appear on all progress notes and actions you take in the system.</p>
+    <p style="font-size:0.82rem;color:var(--ink2);margin-bottom:1rem">Your name will appear on all progress notes and
+actions you take in the system.</p>
     <input type="text" id="identity-name-input"
       placeholder="e.g. Nyari Maphosa"
-      style="width:100%;padding:0.6rem 0.75rem;border:1px solid var(--border);border-radius:4px;font-size:0.9rem;margin-bottom:1rem"
+      style="width:100%;padding:0.6rem 0.75rem;border:1px solid
+var(--border);border-radius:4px;font-size:0.9rem;margin-bottom:1rem"
       onkeydown="if(event.key==='Enter')saveIdentity()"/>
     <button class="btn btn-primary" style="width:100%" onclick="saveIdentity()">Save & Continue</button>
   </div>
 </div>
 
 <!-- ═══════════════ NOTE MODAL ═══════════════ -->
-<div id="note-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
-  <div style="background:white;max-width:480px;width:90%;border-radius:8px;padding:1.5rem;box-shadow:0 10px 40px rgba(0,0,0,0.2)">
+<div id="note-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:cen
+ter;justify-content:center">
+  <div style="background:white;max-width:480px;width:90%;border-radius:8px;padding:1.5rem;box-shadow:0 10px 40px
+rgba(0,0,0,0.2)">
     <div style="font-weight:700;font-size:1rem;margin-bottom:1rem">📝 Add Progress Note</div>
     <textarea id="note-modal-input" rows="4"
       placeholder="e.g. Called client, confirmed meeting for 14 July 2026 at 2pm…"
-      style="width:100%;padding:0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;resize:vertical;margin-bottom:1rem"></textarea>
+      style="width:100%;padding:0.6rem;border:1px solid
+#ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;resize:vertical;margin-bottom:1rem"></textarea>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn btn-outline" onclick="closeNoteModal()">Cancel</button>
       <button class="btn btn-primary" id="note-modal-submit">Add Note</button>
@@ -1375,7 +1472,8 @@ select{cursor:pointer}
   <div id="tab-users" style="display:none">
     <div class="section-head">
       <h2>👥 Users &amp; Access</h2>
-      <p>Invite lawyers, associates, and interns to Mutemo Desk. Invites are sent by email and access is granted automatically.</p>
+      <p>Invite lawyers, associates, and interns to Mutemo Desk. Invites are sent by email and access is granted
+automatically.</p>
     </div>
 
     <div class="grid-2">
@@ -1606,59 +1704,6 @@ async function logout() {
 
 
 
-function openNewMatterModal() {
-  const modal = document.getElementById('new-matter-modal');
-  modal.style.display = 'flex';
-  document.getElementById('nm-name').focus();
-}
-
-function closeNewMatterModal() {
-  document.getElementById('new-matter-modal').style.display = 'none';
-  ['nm-name','nm-internal-ref','nm-external-ref','nm-client'].forEach(id => {
-    document.getElementById(id).value = '';
-  });
-  document.getElementById('nm-type').value = '';
-  document.getElementById('nm-status').value = 'Active';
-  document.getElementById('nm-status-msg').className = 'status';
-  document.getElementById('nm-status-msg').textContent = '';
-}
-
-async function submitNewMatter() {
-  const name = document.getElementById('nm-name').value.trim();
-  if (!name) {
-    const msg = document.getElementById('nm-status-msg');
-    msg.className = 'status show error';
-    msg.textContent = 'Matter name is required.';
-    return;
-  }
-  const msg = document.getElementById('nm-status-msg');
-  msg.className = 'status show';
-  msg.textContent = 'Creating…';
-  try {
-    const res = await fetch(`${API}/api/matters`, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        name,
-        internal_ref: document.getElementById('nm-internal-ref').value.trim() || null,
-        external_ref: document.getElementById('nm-external-ref').value.trim() || null,
-        client_name: document.getElementById('nm-client').value.trim() || null,
-        status: document.getElementById('nm-status').value || 'Active',
-        matter_type: document.getElementById('nm-type').value || null,
-      })
-    });
-    const m = await res.json();
-    if (!res.ok) throw new Error(m.detail || 'Failed to create matter');
-    msg.className = 'status show success';
-    msg.textContent = `✓ Matter "${m.name}" created.`;
-    await loadMatters();
-    setTimeout(() => closeNewMatterModal(), 800);
-  } catch(e) {
-    msg.className = 'status show error';
-    msg.textContent = `Error: ${e.message}`;
-  }
-}
-
 async function loadMatters() {
   try {
     const res = await fetch(`${API}/api/matters`);
@@ -1769,14 +1814,16 @@ function renderMattersList(filtered = null) {
     if (isSearching) {
       countEl.textContent = `${showing} of ${total} matters`;
     } else {
-      countEl.textContent = total > 10 ? `Showing 10 of ${total} — search to find others` : `${total} matter${total !== 1 ? 's' : ''}`;
+      countEl.textContent = total > 10 ? `Showing 10 of ${total} — search to find others` : `${total} matter${total
+!== 1 ? 's' : ''}`;
     }
   }
 
   if (!displayList.length) {
     el.innerHTML = isSearching
       ? '<div class="empty-state"><p>No matters match your search.</p></div>'
-      : '<div class="empty-state"><div class="icon">📂</div><p>No matters yet. Upload documents or use Bulk Import to get started.</p></div>';
+      : '<div class="empty-state"><div class="icon">📂</div><p>No matters yet. Upload documents or use Bulk Import to
+get started.</p></div>';
     return;
   }
 
@@ -1789,33 +1836,35 @@ function renderMattersList(filtered = null) {
     return `
     <div class="matter-item">
       <div class="matter-row" onclick="toggleMatter('${m.id}')">
-        <div class="matter-icon">${(() => {
-          const t = (m.matter_type || '').toLowerCase().replace(/_/g,' ');
-          return t.includes('labour') || t.includes('employment') ? '👷' :
-                 t.includes('family') || t.includes('divorce') || t.includes('matrimonial') ? '👨‍👩‍👧' :
-                 t.includes('criminal') ? '⚖' :
-                 t.includes('property') || t.includes('convey') || t.includes('deeds') ? '🏠' :
-                 t.includes('commercial') || t.includes('contract') || t.includes('company') ? '💼' :
-                 t.includes('debt') || t.includes('insurance') || t.includes('claim') ? '💰' :
-                 t.includes('estate') || t.includes('probate') || t.includes('deceased') ? '📜' :
-                 '📁';
-        })()}</div>
+        <div class="matter-icon">${
+          m.matter_type?.includes('labour') ? '👷' :
+          m.matter_type?.includes('family') || m.matter_type?.includes('divorce') ? '👨‍👩‍👧' :
+          m.matter_type?.includes('criminal') ? '⚖' :
+          m.matter_type?.includes('property') || m.matter_type?.includes('convey') ? '🏠' :
+          m.matter_type?.includes('commercial') || m.matter_type?.includes('contract') ? '💼' :
+          '📁'
+        }</div>
         <div class="matter-expand">
           <div class="matter-name">
-            ${ref ? `<span style="color:var(--ink3);font-size:0.75rem;font-weight:600;margin-right:6px">${escHtml(ref)}</span>` : ''}
+            ${ref ? `<span
+style="color:var(--ink3);font-size:0.75rem;font-weight:600;margin-right:6px">${escHtml(ref)}</span>` : ''}
             ${escHtml(m.name)}
           </div>
           <div class="matter-meta">
             ${extRef ? `<span class="chip chip-blue" title="External reference">${escHtml(extRef)}</span>` : ''}
             ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
             <span class="chip ${statusColor}">${escHtml(status)}</span>
-            <span style="font-size:0.7rem;color:var(--ink3)">${m.document_count || 0} doc${m.document_count !== 1 ? 's' : ''}</span>
-            ${(m.progress_notes||[]).length ? `<span style="font-size:0.7rem;color:var(--ink3)">${m.progress_notes.length} note${m.progress_notes.length !== 1 ? 's' : ''}</span>` : ''}
+            <span style="font-size:0.7rem;color:var(--ink3)">${m.document_count || 0} doc${m.document_count !== 1 ?
+'s' : ''}</span>
+            ${(m.progress_notes||[]).length ? `<span
+style="font-size:0.7rem;color:var(--ink3)">${m.progress_notes.length} note${m.progress_notes.length !== 1 ? 's' :
+''}</span>` : ''}
             ${lastActivity ? `<span style="font-size:0.7rem;color:var(--ink3)">· ${lastActivity}</span>` : ''}
           </div>
         </div>
         <div class="matter-actions">
-          ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();deleteMatter('${m.id}')">🗑</button>` : ''}
+          ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm btn-outline"
+onclick="event.stopPropagation();deleteMatter('${m.id}')">🗑</button>` : ''}
           <span style="color:var(--ink3);font-size:0.8rem" id="expand-icon-${m.id}">▶</span>
         </div>
       </div>
@@ -1872,18 +1921,21 @@ async function renderMatterPanel(id) {
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">INT REF</label>
             <input type="text" value="${escHtml(matter.internal_ref || matter.number || '')}"
-              style="width:90px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              style="width:90px;padding:4px 8px;border:1px solid
+var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
               onchange="updateMatterField('${id}','internal_ref',this.value)" placeholder="NGM 1"/>
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">EXT REF</label>
             <input type="text" value="${escHtml(matter.external_ref || '')}"
-              style="width:130px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              style="width:130px;padding:4px 8px;border:1px solid
+var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
               onchange="updateMatterField('${id}','external_ref',this.value)" placeholder="HC 1234/26"/>
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">STATUS</label>
-            <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+            <select style="padding:4px 8px;border:1px solid
+var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
                     onchange="updateMatterField('${id}','status',this.value)">
               ${['Active','Awaiting Client','Awaiting Court','On Hold','Closed'].map(s =>
                 `<option value="${s}" ${s===status?'selected':''}>${s}</option>`
@@ -1898,7 +1950,8 @@ async function renderMatterPanel(id) {
       <!-- Progress Notes -->
       <div class="matter-section">
         <div class="matter-section-title">📝 Progress Notes
-          <button class="btn btn-primary btn-sm" onclick="openNoteModal('${id}')" style="margin-left:auto;font-size:0.7rem;padding:3px 10px">+ Add Note</button>
+          <button class="btn btn-primary btn-sm" onclick="openNoteModal('${id}')"
+style="margin-left:auto;font-size:0.7rem;padding:3px 10px">+ Add Note</button>
         </div>
         <div id="note-date-prompt-${id}" style="display:none"></div>
         <div id="notes-list-${id}">
@@ -1907,7 +1960,8 @@ async function renderMatterPanel(id) {
               <div class="note-text">${escHtml(n.text)}</div>
               <div class="note-footer">
                 <span>🖊 ${n.author} · ${n.created_at?.slice(0,10)}</span>
-                ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}" class="note-delete note-delete-btn">✕ Remove</button>` : ''}
+                ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}"
+class="note-delete note-delete-btn">✕ Remove</button>` : ''}
               </div>
             </div>`).join('') : '<p style="color:var(--ink3);font-size:0.78rem;padding:0.25rem 0">No notes yet.</p>'}
         </div>
@@ -1916,38 +1970,36 @@ async function renderMatterPanel(id) {
       <!-- Documents -->
       <div class="matter-section">
         <div class="matter-section-title">📄 Documents
-          <button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')" style="margin-left:auto;font-size:0.7rem;padding:3px 10px">⬆ Upload</button>
+          <button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')"
+style="margin-left:auto;font-size:0.7rem;padding:3px 10px">⬆ Upload</button>
         </div>
         ${!docs.length ? '<p style="color:var(--ink3);font-size:0.78rem">No documents uploaded yet.</p>' :
           docs.map(d => `
           <div class="doc-item">
-            <div class="doc-icon">${d.document_type?.includes('judgment') || d.document_type?.includes('court') ? '⚖' : '📄'}</div>
+            <div class="doc-icon">${d.document_type?.includes('judgment') || d.document_type?.includes('court') ? '⚖'
+: '📄'}</div>
             <div style="flex:1;min-width:0">
-              <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
+              <div class="doc-name"
+style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
               <div class="doc-meta" style="margin-top:2px">
                 ${d.document_type ? `<span class="chip chip-gray">${d.document_type.replace(/_/g,' ')}</span>` : ''}
                 ${d.doc_date ? `<span class="chip chip-blue">${d.doc_date}</span>` : ''}
                 ${d.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
-                <span class="chip ${d.status==='complete'?'chip-green':d.status==='error'?'chip-red':'chip-gold'}">${d.status}</span>
+                <span class="chip
+${d.status==='complete'?'chip-green':d.status==='error'?'chip-red':'chip-gold'}">${d.status}</span>
               </div>
             </div>
             ${d.status === 'complete' ? `
             <div style="display:flex;gap:4px;flex-shrink:0">
               ${d.r2_key ? `
-              <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}','${escHtml(d.filename)}')"
-                      title="View document">👁 View</button>
-              <button class="btn btn-sm btn-outline" onclick="downloadDocument('${d.id}','${escHtml(d.filename)}')"
-                      title="Download document">⬇</button>
+              <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}')" title="View">👁 View</button>
+              <button class="btn btn-sm btn-outline" onclick="downloadDocument('${d.id}','${escHtml(d.filename)}')" title="Download">⬇</button>
               ` : ''}
-              <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
-                      title="Extract court dates and deadlines">📅</button>
-              <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
-                      title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
-            </div>` : `
-            <div style="display:flex;gap:4px;flex-shrink:0">
-              <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
-                      title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
-            </div>`}
+              <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')" title="Extract dates">📅</button>
+              <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')" title="Delete" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
+            </div>` :
+            `<button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')" title="Delete" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>`
+            }
           </div>`).join('')}
       </div>
 
@@ -1957,7 +2009,9 @@ async function renderMatterPanel(id) {
         <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:0.5rem">
           <div>
             <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Procedure</label>
-            <select id="proc-type-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid var(--border);border-radius:4px" onchange="document.getElementById('proc-province-${id}').style.display=this.value==='magistrates_civil'?'block':'none'">
+            <select id="proc-type-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid
+var(--border);border-radius:4px" onchange="document.getElementById('proc-province-${id}').style.display=this.value==='m
+agistrates_civil'?'block':'none'">
               <option value="high_court_action">High Court — Action (Summons)</option>
               <option value="high_court_application">High Court — Application</option>
               <option value="labour_court">Labour Court</option>
@@ -1966,11 +2020,14 @@ async function renderMatterPanel(id) {
           </div>
           <div>
             <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Date of service</label>
-            <input type="date" id="proc-date-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+            <input type="date" id="proc-date-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid
+var(--border);border-radius:4px">
           </div>
           <div id="proc-province-${id}" style="display:none">
-            <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Defendant location</label>
-            <select id="proc-same-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+            <label style="font-size:0.7rem;color:var(--ink3);display:block;margin-bottom:2px">Defendant
+location</label>
+            <select id="proc-same-${id}" style="font-size:0.78rem;padding:3px 6px;border:1px solid
+var(--border);border-radius:4px">
               <option value="true">Same province</option>
               <option value="false">Different province / 100km+</option>
             </select>
@@ -1980,10 +2037,13 @@ async function renderMatterPanel(id) {
           <details style="font-size:0.75rem">
             <summary style="cursor:pointer;color:var(--ink3)">⚠ Add recess periods (Heads of Argument only)</summary>
             <div id="recess-list-${id}" style="margin-top:0.4rem"></div>
-            <button onclick="addRecessPeriod('${id}')" style="font-size:0.72rem;margin-top:4px;background:none;border:1px solid var(--ink3);border-radius:4px;padding:2px 8px;cursor:pointer;color:var(--ink3)">+ Add period</button>
+            <button onclick="addRecessPeriod('${id}')"
+style="font-size:0.72rem;margin-top:4px;background:none;border:1px solid var(--ink3);border-radius:4px;padding:2px
+8px;cursor:pointer;color:var(--ink3)">+ Add period</button>
           </details>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="calculateProcedure('${id}','${escHtml(matter.name || '')}')">⚖ Calculate Deadlines</button>
+        <button class="btn btn-primary btn-sm" onclick="calculateProcedure('${id}','${escHtml(matter.name || '')}')">⚖
+Calculate Deadlines</button>
         <div id="proc-result-${id}" style="margin-top:0.6rem"></div>
       </div>
     `;
@@ -2076,7 +2136,8 @@ function showNoteDatePrompt(matterId, dates) {
   container.style.display = 'block';
   container.innerHTML = `
     <div style="background:#fdf6e8;border:1px solid #f0c040;border-radius:6px;padding:0.75rem;margin-bottom:0.75rem">
-      <div style="font-weight:600;font-size:0.78rem;margin-bottom:0.5rem">📅 Date detected in note — add to calendar?</div>
+      <div style="font-weight:600;font-size:0.78rem;margin-bottom:0.5rem">📅 Date detected in note — add to
+calendar?</div>
       ${dates.map((d, i) => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
           <input type="checkbox" id="note-date-${matterId}-${i}" checked style="width:14px;height:14px">
@@ -2085,8 +2146,10 @@ function showNoteDatePrompt(matterId, dates) {
           </label>
         </div>`).join('')}
       <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="btn btn-primary btn-sm" onclick="addNoteDatesToCalendar('${matterId}', ${JSON.stringify(dates).replace(/"/g,'&quot;')})">Add to Calendar</button>
-        <button class="btn btn-outline btn-sm" onclick="document.getElementById('note-date-prompt-${matterId}').style.display='none'">Dismiss</button>
+        <button class="btn btn-primary btn-sm" onclick="addNoteDatesToCalendar('${matterId}',
+${JSON.stringify(dates).replace(/"/g,'&quot;')})">Add to Calendar</button>
+        <button class="btn btn-outline btn-sm"
+onclick="document.getElementById('note-date-prompt-${matterId}').style.display='none'">Dismiss</button>
       </div>
     </div>`;
 }
@@ -2122,7 +2185,9 @@ async function addNoteDatesToCalendar(matterId, dates) {
 
   if (added > 0) {
     const notif = document.createElement('div');
-    notif.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;background:var(--green);color:white;padding:0.75rem 1.25rem;border-radius:6px;font-size:0.85rem;font-weight:600;z-index:999;box-shadow:0 4px 16px rgba(0,0,0,0.2)';
+    notif.style.cssText =
+'position:fixed;bottom:1.5rem;right:1.5rem;background:var(--green);color:white;padding:0.75rem
+1.25rem;border-radius:6px;font-size:0.85rem;font-weight:600;z-index:999;box-shadow:0 4px 16px rgba(0,0,0,0.2)';
     notif.textContent = `✓ ${added} date${added!==1?'s':''} added to calendar`;
     document.body.appendChild(notif);
     setTimeout(() => notif.remove(), 3500);
@@ -2299,7 +2364,8 @@ async function doSearch() {
     const data = await res.json();
     renderSearchResults(data, query);
   } catch(e) {
-    document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}. Is the server running?</div>`;
+    document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}.
+Is the server running?</div>`;
   } finally {
     document.getElementById('search-loading').style.display = 'none';
     document.getElementById('search-btn').disabled = false;
@@ -2311,7 +2377,8 @@ function printSearchResults() {
   const query = document.getElementById('search-query').value.trim();
   document.getElementById('search-print-query').textContent = `Query: "${query}"`;
   document.getElementById('search-print-date').textContent =
-    `Generated: ${new Date().toLocaleDateString('en-ZW', {day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit'})}`;
+    `Generated: ${new Date().toLocaleDateString('en-ZW', {day:'numeric', month:'long', year:'numeric', hour:'2-digit',
+minute:'2-digit'})}`;
   document.getElementById('search-print-header').style.display = 'block';
   window.print();
   // Hide header again after print dialog closes
@@ -2326,9 +2393,13 @@ function renderSearchResults(data, query) {
     document.getElementById('search-print-btn').style.display = 'none';
     const isVerbatim = /quote|verbatim|exact wording|what does section|word for word/i.test(query);
     const hint = isVerbatim
-      ? `<p style="font-size:0.8rem;color:var(--ink3);margin-top:0.5rem">💡 Tip: Search by topic rather than section number — e.g. instead of "quote section 44", try "Islamic marriage requirements" or "qualified civil marriage conditions".</p>`
-      : `<p style="font-size:0.8rem;color:var(--ink3);margin-top:0.5rem">💡 Try rephrasing using keywords from the topic area, or upload more relevant documents to the vault.</p>`;
-    el.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>${data.message || 'No results found.'}</p>${hint}</div>`;
+      ? `<p style="font-size:0.8rem;color:var(--ink3);margin-top:0.5rem">💡 Tip: Search by topic rather than section
+number — e.g. instead of "quote section 44", try "Islamic marriage requirements" or "qualified civil marriage
+conditions".</p>`
+      : `<p style="font-size:0.8rem;color:var(--ink3);margin-top:0.5rem">💡 Try rephrasing using keywords from the
+topic area, or upload more relevant documents to the vault.</p>`;
+    el.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><p>${data.message || 'No results
+found.'}</p>${hint}</div>`;
     return;
   }
 
@@ -2337,12 +2408,15 @@ function renderSearchResults(data, query) {
   if (data.answer) {
     const sufficient = data.sources_sufficient !== false;
     const groundingBadge = !sufficient
-      ? `<div style="margin-top:0.5rem;padding:0.4rem 0.6rem;background:#fff8e6;border:1px solid #e8c050;border-radius:4px;font-size:0.75rem;color:#7a6000">
-          ⚠ <strong>Partial sources</strong> — ${escHtml(data.grounding_note || 'Some claims are general principles not verified from retrieved sources.')}
+      ? `<div style="margin-top:0.5rem;padding:0.4rem 0.6rem;background:#fff8e6;border:1px solid
+#e8c050;border-radius:4px;font-size:0.75rem;color:#7a6000">
+          ⚠ <strong>Partial sources</strong> — ${escHtml(data.grounding_note || 'Some claims are general principles
+not verified from retrieved sources.')}
           ${data.source_gap ? `<br><em>Missing: ${escHtml(data.source_gap)}</em>` : ''}
          </div>`
       : (data.grounding_note
-          ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
+          ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓
+${escHtml(data.grounding_note)}</div>`
           : '');
     html += `<div class="ai-answer">
       <div class="ai-answer-label">⚡ AI Analysis</div>
@@ -2359,15 +2433,19 @@ function renderSearchResults(data, query) {
   });
 
   const docCount = Object.keys(grouped).length;
-  html += `<p style="font-size:0.75rem;color:var(--ink3);margin-bottom:0.75rem">${docCount} document${docCount!==1?'s':''} · ${data.results.length} excerpt${data.results.length!==1?'s':''} for "${escHtml(query)}"</p>`;
+  html += `<p style="font-size:0.75rem;color:var(--ink3);margin-bottom:0.75rem">${docCount}
+document${docCount!==1?'s':''} · ${data.results.length} excerpt${data.results.length!==1?'s':''} for
+"${escHtml(query)}"</p>`;
 
   Object.entries(grouped).forEach(([docId, chunks]) => {
     const first = chunks[0];
     const topScore = Math.max(...chunks.map(c => c.similarity));
 
     if (first.result_source === 'zlr') {
-      const weightBadge = first.authority_weight === 'Binding' ? '🟢' : first.authority_weight === 'Highly Persuasive' ? '🔵' : '⚪';
-      const weightColor = first.authority_weight === 'Binding' ? 'chip-green' : first.authority_weight === 'Highly Persuasive' ? 'chip-blue' : 'chip-gray';
+      const weightBadge = first.authority_weight === 'Binding' ? '🟢' : first.authority_weight === 'Highly Persuasive'
+? '🔵' : '⚪';
+      const weightColor = first.authority_weight === 'Binding' ? 'chip-green' : first.authority_weight === 'Highly
+Persuasive' ? 'chip-blue' : 'chip-gray';
       html += `<div class="search-result" style="border-left:3px solid var(--green)">
         <div class="sr-header">
           <div style="font-size:1.2rem">📖</div>
@@ -2375,7 +2453,8 @@ function renderSearchResults(data, query) {
             <div style="font-weight:700;font-size:0.88rem">${escHtml(first.filename)}</div>
             <div style="margin-top:3px">
               ${first.citation ? `<span class="chip chip-green">${escHtml(first.citation)}</span>` : ''}
-              ${first.taxonomy_category ? `<span class="chip chip-blue">${escHtml(first.taxonomy_category)}</span>` : ''}
+              ${first.taxonomy_category ? `<span class="chip chip-blue">${escHtml(first.taxonomy_category)}</span>` :
+''}
               <span class="chip ${weightColor}">${weightBadge} ${escHtml(first.authority_weight || '')}</span>
               ${first.court ? `<span class="chip chip-gray">${escHtml(first.court)}</span>` : ''}
             </div>
@@ -2388,7 +2467,8 @@ function renderSearchResults(data, query) {
         </div>
         <div class="sr-body">
           ${first.summary ? `<div class="sr-excerpt">${escHtml(first.summary.slice(0,350))}</div>` : ''}
-          ${first.zimlii_url ? `<a href="${escHtml(first.zimlii_url)}" target="_blank" class="btn btn-sm btn-outline">View online ↗</a>` : ''}
+          ${first.zimlii_url ? `<a href="${escHtml(first.zimlii_url)}" target="_blank" class="btn btn-sm
+btn-outline">View online ↗</a>` : ''}
         </div>
       </div>`;
       return;
@@ -2396,14 +2476,16 @@ function renderSearchResults(data, query) {
 
     if (first.result_source === 'legal_update') {
       const isLegislation = first.source_type === 'legislation';
-      html += `<div class="search-result" style="border-left:3px solid ${isLegislation ? 'var(--gold2)' : 'var(--blue)'}">
+      html += `<div class="search-result" style="border-left:3px solid ${isLegislation ? 'var(--gold2)' :
+'var(--blue)'}">
         <div class="sr-header">
           <div style="font-size:1.2rem">${isLegislation ? '📜' : '⚖'}</div>
           <div style="flex:1">
             <div style="font-weight:700;font-size:0.88rem">${escHtml(first.reference || first.filename)}</div>
             <div style="font-size:0.72rem;color:var(--ink3);margin-top:2px">${escHtml(first.filename)}</div>
             <div style="margin-top:5px">
-              <span class="chip ${isLegislation ? 'chip-gold' : 'chip-blue'}">${isLegislation ? 'Legislation' : 'Case Law'}</span>
+              <span class="chip ${isLegislation ? 'chip-gold' : 'chip-blue'}">${isLegislation ? 'Legislation' : 'Case
+Law'}</span>
               <span class="chip chip-gray">${escHtml(first.source_name || 'ZimLII')} · CC BY-NC</span>
               ${first.doc_date ? `<span class="chip chip-blue">${first.doc_date}</span>` : ''}
               ${first.court ? `<span class="chip chip-green">${escHtml(first.court)}</span>` : ''}
@@ -2412,8 +2494,10 @@ function renderSearchResults(data, query) {
           <span class="sr-score">${Math.round(topScore*100)}% match</span>
         </div>
         <div class="sr-body">
-          <div class="sr-excerpt">${escHtml(chunks[0].text.slice(0,400))}${chunks[0].text.length > 400 ? '…' : ''}</div>
-          <div style="font-size:0.7rem;color:var(--ink3)">${chunks.length} excerpt${chunks.length!==1?'s':''} · Public legal source</div>
+          <div class="sr-excerpt">${escHtml(chunks[0].text.slice(0,400))}${chunks[0].text.length > 400 ? '…' :
+''}</div>
+          <div style="font-size:0.7rem;color:var(--ink3)">${chunks.length} excerpt${chunks.length!==1?'s':''} · Public
+legal source</div>
         </div>
       </div>`;
       return;
@@ -2435,7 +2519,8 @@ function renderSearchResults(data, query) {
             ${escHtml(first.matter_name)}${first.matter_number ? ` — ${first.matter_number}` : ''}
           </div>
           <div style="margin-top:5px">
-            ${first.document_type ? `<span class="chip chip-gray">${first.document_type.replace(/_/g,' ')}</span>` : ''}
+            ${first.document_type ? `<span class="chip chip-gray">${first.document_type.replace(/_/g,' ')}</span>` :
+''}
             ${first.doc_date ? `<span class="chip chip-blue">${first.doc_date}</span>` : ''}
             ${first.court ? `<span class="chip chip-green">${escHtml(first.court)}</span>` : ''}
           </div>
@@ -2593,7 +2678,8 @@ function renderEventList(elId, events, showEmpty) {
   if (!events.length) {
     el.innerHTML = showEmpty
       ? '<div class="empty-state"><div class="icon">📅</div><p>No upcoming events.</p></div>'
-      : '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No events recorded yet.</p></div>';
+      : '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No events
+recorded yet.</p></div>';
     return;
   }
 
@@ -2617,7 +2703,8 @@ function renderEventList(elId, events, showEmpty) {
             ? `<span class="chip chip-gold">${days} days</span>`
             : `<span class="chip chip-gray">In ${days} days</span>`;
 
-    return `<div class="cal-event ${typeClass} ${isUrgent && !isPast ? 'urgent' : ''}" style="${isPast?'opacity:0.6':''}">
+    return `<div class="cal-event ${typeClass} ${isUrgent && !isPast ? 'urgent' : ''}"
+style="${isPast?'opacity:0.6':''}">
       <div class="cal-date-block" style="${isPast?'background:var(--ink3)':''}">
         <div class="cal-day">${day}</div>
         <div class="cal-month">${month}</div>
@@ -2632,7 +2719,8 @@ function renderEventList(elId, events, showEmpty) {
         </div>
         ${e.notes ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:3px">${escHtml(e.notes)}</div>` : ''}
       </div>
-      <button class="btn btn-sm" style="background:none;color:var(--ink3);flex-shrink:0" onclick="deleteEvent('${e.id}')">✕</button>
+      <button class="btn btn-sm" style="background:none;color:var(--ink3);flex-shrink:0"
+onclick="deleteEvent('${e.id}')">✕</button>
     </div>`;
   }).join('');
 }
@@ -2757,7 +2845,8 @@ async function sendTestReminder() {
     const res = await fetch(`${API}/api/reminders/test`, {method:'POST'});
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed'); }
     const data = await res.json();
-    showReminderStatus(`✓ Test email sent to ${email} (${data.event_count} upcoming event${data.event_count!==1?'s':''}).`, 'success');
+    showReminderStatus(`✓ Test email sent to ${email} (${data.event_count} upcoming
+event${data.event_count!==1?'s':''}).`, 'success');
   } catch(e) {
     showReminderStatus(`Could not send: ${e.message}`, 'error');
   }
@@ -2796,7 +2885,8 @@ function setLuFile(file) {
       <span>📜</span>
       <span class="name">${escHtml(file.name)}</span>
       <span style="font-size:0.7rem;color:var(--ink3)">${(file.size/1024).toFixed(0)} KB</span>
-      <button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="luPendingFile=null;document.getElementById('lu-pending').innerHTML='';document.getElementById('lu-upload-btn').disabled=true">✕</button>
+      <button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="luPendingFile=null;document.getElem
+entById('lu-pending').innerHTML='';document.getElementById('lu-upload-btn').disabled=true">✕</button>
     </div>`;
   document.getElementById('lu-upload-btn').disabled = false;
 }
@@ -2844,7 +2934,8 @@ async function renderLegalUpdates() {
     const res = await fetch(`${API}/api/legal-updates`);
     const items = await res.json();
     if (!items.length) {
-      el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No items uploaded yet.</p></div>';
+      el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p
+style="font-size:0.82rem;color:var(--ink3)">No items uploaded yet.</p></div>';
       return;
     }
     el.innerHTML = items.map(item => `
@@ -2853,15 +2944,18 @@ async function renderLegalUpdates() {
         <div style="flex:1">
           <div class="doc-name">${escHtml(item.filename)}</div>
           <div class="doc-meta" style="margin-top:3px">
-            <span class="chip ${item.source_type === 'legislation' ? 'chip-gold' : 'chip-blue'}">${item.source_type === 'legislation' ? 'Legislation' : 'Case Law'}</span>
+            <span class="chip ${item.source_type === 'legislation' ? 'chip-gold' : 'chip-blue'}">${item.source_type
+=== 'legislation' ? 'Legislation' : 'Case Law'}</span>
             <span class="chip chip-gray">${escHtml(item.source_name)}</span>
             ${item.reference ? `<span class="chip chip-green">${escHtml(item.reference)}</span>` : ''}
             ${item.doc_date ? `<span class="chip chip-blue">${item.doc_date}</span>` : ''}
             ${item.ocr_used ? `<span class="chip chip-gold">OCR scanned</span>` : ''}
-            <span class="chip ${item.status==='complete'?'chip-green':item.status==='error'?'chip-red':'chip-gold'}">${item.status}</span>
+            <span class="chip
+${item.status==='complete'?'chip-green':item.status==='error'?'chip-red':'chip-gold'}">${item.status}</span>
           </div>
         </div>
-        ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteLegalUpdate('${item.id}')">🗑</button>` : ''}
+        ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3)"
+onclick="deleteLegalUpdate('${item.id}')">🗑</button>` : ''}
       </div>
     `).join('');
   } catch(e) {
@@ -2971,7 +3065,8 @@ async function loadDraftPrecedent() {
     const first = docs[0];
     const matter = matters.find(m => m.id === matterId);
     draftPrecedentContext = {
-      text: `Document from matter: ${matter?.name || ''}. Type: ${first.document_type || 'document'}. Parties: ${first.parties || 'unknown'}.`,
+      text: `Document from matter: ${matter?.name || ''}. Type: ${first.document_type || 'document'}. Parties:
+${first.parties || 'unknown'}.`,
       filename: first.filename,
       matter_name: matter?.name || '',
     };
@@ -3022,7 +3117,8 @@ async function generateDocument() {
       .map(line => {
         const t = line.trim();
         if (!t) return '<p><br></p>';
-        if (t === t.toUpperCase() && t.length > 3 && t.length < 80) return `<p style="text-align:center"><strong>${escHtml(t)}</strong></p>`;
+        if (t === t.toUpperCase() && t.length > 3 && t.length < 80) return `<p
+style="text-align:center"><strong>${escHtml(t)}</strong></p>`;
         if (/^\d+\./.test(t)) return `<p>${escHtml(t)}</p>`;
         return `<p>${escHtml(t)}</p>`;
       }).join('');
@@ -3122,7 +3218,8 @@ function setBulkFile(file) {
       <span class="name">${escHtml(file.name)}</span>
       <span style="font-size:0.7rem;color:var(--ink3)">${(file.size/1024).toFixed(0)} KB</span>
       <button class="btn btn-sm" style="background:none;color:var(--ink3)"
-        onclick="bulkPendingFile=null;document.getElementById('bulk-pending').innerHTML='';document.getElementById('bulk-import-btn').disabled=true">✕</button>
+        onclick="bulkPendingFile=null;document.getElementById('bulk-pending').innerHTML='';document.getElementById('bul
+k-import-btn').disabled=true">✕</button>
     </div>`;
   document.getElementById('bulk-import-btn').disabled = false;
 }
@@ -3131,7 +3228,8 @@ async function runBulkImport() {
   if (!bulkPendingFile) return;
   const btn = document.getElementById('bulk-import-btn');
   btn.disabled = true;
-  showBulkStatus('<span class="spinner"></span> Parsing and indexing all cases — this may take 30–60 seconds…', 'loading');
+  showBulkStatus('<span class="spinner"></span> Parsing and indexing all cases — this may take 30–60 seconds…',
+'loading');
 
   try {
     const fd = new FormData();
@@ -3190,7 +3288,8 @@ function setZlrFile(file) {
       <span class="name">${escHtml(file.name)}</span>
       <span style="font-size:0.7rem;color:var(--ink3)">${(file.size/1024).toFixed(0)} KB</span>
       <button class="btn btn-sm" style="background:none;color:var(--ink3)"
-        onclick="zlrPendingFile=null;document.getElementById('zlr-pending').innerHTML='';document.getElementById('zlr-upload-btn').disabled=true">✕</button>
+        onclick="zlrPendingFile=null;document.getElementById('zlr-pending').innerHTML='';document.getElementById('zlr-u
+pload-btn').disabled=true">✕</button>
     </div>`;
   document.getElementById('zlr-upload-btn').disabled = false;
 }
@@ -3221,7 +3320,8 @@ async function uploadZlrEntry() {
 
     const cat = item.taxonomy_category || 'General';
     const cite = item.citation || item.judgment_number || '';
-    showZlrStatus(`✓ Indexed: ${escHtml(item.case_name || item.filename)} [${escHtml(cat)}] ${cite ? '· ' + escHtml(cite) : ''}`, 'success');
+    showZlrStatus(`✓ Indexed: ${escHtml(item.case_name || item.filename)} [${escHtml(cat)}] ${cite ? '· ' +
+escHtml(cite) : ''}`, 'success');
     await renderZlrTab();
   } catch(e) {
     showZlrStatus(`Error: ${e.message}`, 'error');
@@ -3247,20 +3347,24 @@ async function renderZlrStats() {
     const res = await fetch(`${API}/api/zlr/categories`);
     const cats = await res.json();
     if (!cats.length) {
-      el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No cases indexed yet.</p></div>';
+      el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p
+style="font-size:0.82rem;color:var(--ink3)">No cases indexed yet.</p></div>';
       return;
     }
     const total = cats.reduce((s, c) => s + c.count, 0);
     el.innerHTML = `
-      <p style="font-size:0.75rem;color:var(--ink3);margin-bottom:0.75rem"><strong>${total}</strong> case${total!==1?'s':''} indexed across ${cats.length} categor${cats.length!==1?'ies':'y'}</p>
+      <p style="font-size:0.75rem;color:var(--ink3);margin-bottom:0.75rem"><strong>${total}</strong>
+case${total!==1?'s':''} indexed across ${cats.length} categor${cats.length!==1?'ies':'y'}</p>
       ${cats.map(c => `
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:0.4rem;cursor:pointer"
              onclick="document.getElementById('zlr-category-filter').value='${escHtml(c.category)}';searchZlr()">
           <div style="flex:1;font-size:0.78rem;color:var(--ink2)">${escHtml(c.category)}</div>
-          <div style="background:var(--green);color:white;border-radius:10px;padding:1px 8px;font-size:0.68rem;font-weight:700">${c.count}</div>
+          <div style="background:var(--green);color:white;border-radius:10px;padding:1px
+8px;font-size:0.68rem;font-weight:700">${c.count}</div>
         </div>
         <div style="height:3px;background:var(--paper2);border-radius:2px;margin-bottom:0.4rem">
-          <div style="height:100%;background:var(--green);border-radius:2px;width:${Math.round(c.count/total*100)}%"></div>
+          <div
+style="height:100%;background:var(--green);border-radius:2px;width:${Math.round(c.count/total*100)}%"></div>
         </div>
       `).join('')}
     `;
@@ -3275,27 +3379,36 @@ async function renderZlrRecent() {
     const res = await fetch(`${API}/api/zlr?limit=10`);
     const items = await res.json();
     if (!items.length) {
-      el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No entries yet.</p></div>';
+      el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p
+style="font-size:0.82rem;color:var(--ink3)">No entries yet.</p></div>';
       return;
     }
     el.innerHTML = items.map(item => {
-      const weightBadge = item.authority_weight === 'Binding' ? '🟢' : item.authority_weight === 'Highly Persuasive' ? '🔵' : '⚪';
-      const weightColor = item.authority_weight === 'Binding' ? 'chip-green' : item.authority_weight === 'Highly Persuasive' ? 'chip-blue' : 'chip-gray';
+      const weightBadge = item.authority_weight === 'Binding' ? '🟢' : item.authority_weight === 'Highly Persuasive' ?
+'🔵' : '⚪';
+      const weightColor = item.authority_weight === 'Binding' ? 'chip-green' : item.authority_weight === 'Highly
+Persuasive' ? 'chip-blue' : 'chip-gray';
       return `
       <div class="doc-item" style="align-items:flex-start;padding:0.65rem 0">
         <span style="margin-top:2px">📖</span>
         <div style="flex:1">
-          <div style="font-weight:700;font-size:0.82rem;color:var(--ink)">${escHtml(item.case_name || item.filename)}</div>
+          <div style="font-weight:700;font-size:0.82rem;color:var(--ink)">${escHtml(item.case_name ||
+item.filename)}</div>
           <div style="margin-top:3px">
             ${item.citation ? `<span class="chip chip-green">${escHtml(item.citation)}</span>` : ''}
-            ${item.judgment_number && !item.citation ? `<span class="chip chip-gray">${escHtml(item.judgment_number)}</span>` : ''}
+            ${item.judgment_number && !item.citation ? `<span class="chip
+chip-gray">${escHtml(item.judgment_number)}</span>` : ''}
             ${item.taxonomy_category ? `<span class="chip chip-blue">${escHtml(item.taxonomy_category)}</span>` : ''}
-            <span class="chip ${weightColor}">${weightBadge} ${escHtml(item.authority_weight || item.jurisdiction || item.source)}</span>
+            <span class="chip ${weightColor}">${weightBadge} ${escHtml(item.authority_weight || item.jurisdiction ||
+item.source)}</span>
           </div>
-          ${item.summary ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:3px;font-style:italic">${escHtml(item.summary.slice(0,120))}…</div>` : ''}
-          ${item.zimlii_url ? `<a href="${escHtml(item.zimlii_url)}" target="_blank" style="font-size:0.7rem;color:var(--green)">View online ↗</a>` : ''}
+          ${item.summary ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:3px;font-style:italic">${escHtml
+(item.summary.slice(0,120))}…</div>` : ''}
+          ${item.zimlii_url ? `<a href="${escHtml(item.zimlii_url)}" target="_blank"
+style="font-size:0.7rem;color:var(--green)">View online ↗</a>` : ''}
         </div>
-        ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3);flex-shrink:0" onclick="deleteZlrEntry('${item.id}')">🗑</button>` : ''}
+        ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm"
+style="background:none;color:var(--ink3);flex-shrink:0" onclick="deleteZlrEntry('${item.id}')">🗑</button>` : ''}
       </div>
     `}).join('');
   } catch(e) {
@@ -3308,7 +3421,8 @@ async function searchZlr() {
   if (!query) return;
   const category = document.getElementById('zlr-category-filter').value;
   const el = document.getElementById('zlr-search-results');
-  el.innerHTML = '<div style="text-align:center;padding:1rem;color:var(--ink3)"><span class="spinner"></span> Searching…</div>';
+  el.innerHTML = '<div style="text-align:center;padding:1rem;color:var(--ink3)"><span class="spinner"></span>
+Searching…</div>';
 
   try {
     const res = await fetch(`${API}/api/zlr/search`, {
@@ -3319,15 +3433,19 @@ async function searchZlr() {
     const data = await res.json();
 
     if (!data.results.length) {
-      el.innerHTML = `<div class="empty-state" style="padding:1rem"><p style="font-size:0.82rem">No cases found for "${escHtml(query)}".</p></div>`;
+      el.innerHTML = `<div class="empty-state" style="padding:1rem"><p style="font-size:0.82rem">No cases found for
+"${escHtml(query)}".</p></div>`;
       return;
     }
 
     el.innerHTML = `
-      <p style="font-size:0.72rem;color:var(--ink3);margin-bottom:0.75rem">${data.count} result${data.count!==1?'s':''}</p>
+      <p style="font-size:0.72rem;color:var(--ink3);margin-bottom:0.75rem">${data.count}
+result${data.count!==1?'s':''}</p>
       ${data.results.map(r => {
-        const weightBadge = r.authority_weight === 'Binding' ? '🟢' : r.authority_weight === 'Highly Persuasive' ? '🔵' : '⚪';
-        const weightColor = r.authority_weight === 'Binding' ? 'chip-green' : r.authority_weight === 'Highly Persuasive' ? 'chip-blue' : 'chip-gray';
+        const weightBadge = r.authority_weight === 'Binding' ? '🟢' : r.authority_weight === 'Highly Persuasive' ?
+'🔵' : '⚪';
+        const weightColor = r.authority_weight === 'Binding' ? 'chip-green' : r.authority_weight === 'Highly
+Persuasive' ? 'chip-blue' : 'chip-gray';
         return `
         <div class="search-result" style="margin-bottom:0.75rem">
           <div class="sr-header">
@@ -3336,9 +3454,11 @@ async function searchZlr() {
               <div style="font-weight:700;font-size:0.85rem">${escHtml(r.case_name || 'Unknown')}</div>
               <div style="margin-top:3px">
                 ${r.citation ? `<span class="chip chip-green">${escHtml(r.citation)}</span>` : ''}
-                ${r.judgment_number && !r.citation ? `<span class="chip chip-gray">${escHtml(r.judgment_number)}</span>` : ''}
+                ${r.judgment_number && !r.citation ? `<span class="chip
+chip-gray">${escHtml(r.judgment_number)}</span>` : ''}
                 ${r.taxonomy_category ? `<span class="chip chip-blue">${escHtml(r.taxonomy_category)}</span>` : ''}
-                <span class="chip ${weightColor}">${weightBadge} ${escHtml(r.authority_weight || r.jurisdiction || '')}</span>
+                <span class="chip ${weightColor}">${weightBadge} ${escHtml(r.authority_weight || r.jurisdiction ||
+'')}</span>
                 ${r.court ? `<span class="chip chip-gray">${escHtml(r.court)}</span>` : ''}
               </div>
               ${r.subject_chains && r.subject_chains.length ? `
@@ -3350,7 +3470,8 @@ async function searchZlr() {
           </div>
           <div class="sr-body">
             ${r.summary ? `<div class="sr-excerpt">${escHtml(r.summary)}</div>` : ''}
-            ${r.zimlii_url ? `<a href="${escHtml(r.zimlii_url)}" target="_blank" class="btn btn-sm btn-outline" style="margin-top:0.4rem">View online ↗</a>` : ''}
+            ${r.zimlii_url ? `<a href="${escHtml(r.zimlii_url)}" target="_blank" class="btn btn-sm btn-outline"
+style="margin-top:0.4rem">View online ↗</a>` : ''}
           </div>
         </div>
       `}).join('')}
@@ -3370,7 +3491,8 @@ async function reclassifyZlr() {
     const res = await fetch(`${API}/api/admin/reclassify-zlr`, {method:'POST'});
     if (!res.ok) throw new Error('Failed');
     const data = await res.json();
-    status.innerHTML = `✓ Done — ${data.updated} case${data.updated!==1?'s':''} reclassified${data.failed ? `, ${data.failed} failed` : ''}.`;
+    status.innerHTML = `✓ Done — ${data.updated} case${data.updated!==1?'s':''} reclassified${data.failed ? `,
+${data.failed} failed` : ''}.`;
     status.className = 'status show success';
     await renderZlrTab();
   } catch(e) {
@@ -3401,10 +3523,13 @@ function addRecessPeriod(matterId) {
   div.style = 'display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap';
   div.innerHTML = `
     <label style="font-size:0.72rem;color:var(--ink3)">From</label>
-    <input type="date" id="rs-${matterId}-${id}" style="font-size:0.72rem;padding:2px 5px;border:1px solid var(--border);border-radius:4px">
+    <input type="date" id="rs-${matterId}-${id}" style="font-size:0.72rem;padding:2px 5px;border:1px solid
+var(--border);border-radius:4px">
     <label style="font-size:0.72rem;color:var(--ink3)">to</label>
-    <input type="date" id="re-${matterId}-${id}" style="font-size:0.72rem;padding:2px 5px;border:1px solid var(--border);border-radius:4px">
-    <button onclick="document.getElementById('recess-${matterId}-${id}').remove()" style="background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.78rem">✕</button>
+    <input type="date" id="re-${matterId}-${id}" style="font-size:0.72rem;padding:2px 5px;border:1px solid
+var(--border);border-radius:4px">
+    <button onclick="document.getElementById('recess-${matterId}-${id}').remove()"
+style="background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.78rem">✕</button>
   `;
   list.appendChild(div);
 }
@@ -3452,10 +3577,14 @@ async function calculateProcedure(matterId, matterName) {
     if (!res.ok) throw new Error(data.detail || 'Calculation failed');
 
     const barAlert = data.has_bar_risk
-      ? `<div style="background:#FEE;border:1px solid #F88;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:0.78rem;color:#c00;font-weight:500">⚠ BAR RISK — Labour Court Rule 19: failure to file Heads by deadline = barred from oral submissions.</div>`
+      ? `<div style="background:#FEE;border:1px solid #F88;border-radius:6px;padding:6px
+10px;margin-bottom:8px;font-size:0.78rem;color:#c00;font-weight:500">⚠ BAR RISK — Labour Court Rule 19: failure to
+file Heads by deadline = barred from oral submissions.</div>`
       : '';
     const critAlert = data.has_critical && !data.has_bar_risk
-      ? `<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:0.78rem;color:#E65100;font-weight:500">⚠ CRITICAL deadlines calculated. Default judgment risk if missed.</div>`
+      ? `<div style="background:#FFF3E0;border:1px solid #FFB74D;border-radius:6px;padding:6px
+10px;margin-bottom:8px;font-size:0.78rem;color:#E65100;font-weight:500">⚠ CRITICAL deadlines calculated. Default
+judgment risk if missed.</div>`
       : '';
 
     const rows = data.deadlines.map(dl => {
@@ -3464,22 +3593,28 @@ async function calculateProcedure(matterId, matterName) {
       const color = isCrit ? '#c00' : isHigh ? '#b85c00' : 'var(--ink2)';
       const bg = isCrit ? '#FEF2F2' : isHigh ? '#FFFBEB' : 'transparent';
       return `
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:5px 6px;background:${bg};border-radius:4px;margin-bottom:3px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:5px
+6px;background:${bg};border-radius:4px;margin-bottom:3px">
           <div style="flex:1">
             <div style="font-size:0.78rem;font-weight:500;color:${color}">${escHtml(dl.title)}</div>
-            <div style="font-size:0.68rem;color:var(--ink3)">${escHtml(dl.rule)}${dl.recess_days_hit ? ` · +${dl.recess_days_hit} recess day(s)` : ''}</div>
+            <div style="font-size:0.68rem;color:var(--ink3)">${escHtml(dl.rule)}${dl.recess_days_hit ? ` ·
++${dl.recess_days_hit} recess day(s)` : ''}</div>
           </div>
-          <div style="font-size:0.78rem;font-weight:600;color:${color};white-space:nowrap;margin-left:8px">${dl.date}</div>
+          <div
+style="font-size:0.78rem;font-weight:600;color:${color};white-space:nowrap;margin-left:8px">${dl.date}</div>
         </div>`;
     }).join('');
 
     const eventsNote = data.calendar_events_created > 0
-      ? `<div style="font-size:0.7rem;color:var(--ink3);margin-top:6px">✓ ${data.calendar_events_created} deadline(s) added to calendar.</div>`
+      ? `<div style="font-size:0.7rem;color:var(--ink3);margin-top:6px">✓ ${data.calendar_events_created} deadline(s)
+added to calendar.</div>`
       : '';
 
     resultEl.innerHTML = `
       <div style="background:var(--paper2);border:1px solid var(--border);border-radius:8px;padding:0.6rem 0.75rem">
-        <div style="font-size:0.72rem;font-weight:600;color:var(--ink3);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">${escHtml(data.court_label)} — ${escHtml(procType.replace(/_/g,' '))} · Service date: ${triggerDate}</div>
+        <div style="font-size:0.72rem;font-weight:600;color:var(--ink3);margin-bottom:6px;text-transform:uppercase;lett
+er-spacing:0.5px">${escHtml(data.court_label)} — ${escHtml(procType.replace(/_/g,' '))} · Service date:
+${triggerDate}</div>
         ${barAlert}${critAlert}${rows}${eventsNote}
       </div>`;
 
@@ -3488,15 +3623,13 @@ async function calculateProcedure(matterId, matterName) {
   }
 }
 
-async function viewDocument(docId, filename) {
+async function viewDocument(docId) {
   try {
     const res = await fetch(`${API}/api/documents/${docId}/view-url`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Could not get file URL');
     window.open(data.url, '_blank');
-  } catch(e) {
-    alert(`Could not open document: ${e.message}`);
-  }
+  } catch(e) { alert('Could not open document: ' + e.message); }
 }
 
 async function downloadDocument(docId, filename) {
@@ -3505,24 +3638,17 @@ async function downloadDocument(docId, filename) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Could not get file URL');
     const a = document.createElement('a');
-    a.href = data.url;
-    a.download = filename;
-    a.click();
-  } catch(e) {
-    alert(`Could not download document: ${e.message}`);
-  }
+    a.href = data.url; a.download = filename; a.click();
+  } catch(e) { alert('Could not download: ' + e.message); }
 }
 
 async function deleteDocument(docId, filename, matterId) {
-  if (!confirm(`Delete "${filename}"?\n\nThis will remove the document and all its indexed content. This cannot be undone.`)) return;
+  if (!confirm(`Delete "${filename}"?\n\nThis cannot be undone.`)) return;
   try {
     const res = await fetch(`${API}/api/documents/${docId}`, { method: 'DELETE' });
     if (!res.ok) throw new Error((await res.json()).detail || 'Delete failed');
-    // Refresh the matter panel
     await renderMatterPanel(matterId);
-  } catch(e) {
-    alert(`Could not delete document: ${e.message}`);
-  }
+  } catch(e) { alert('Could not delete: ' + e.message); }
 }
 
 async function extractDates(docId, filename) {
@@ -3550,7 +3676,8 @@ async function extractDates(docId, filename) {
       document.getElementById('date-modal-content').innerHTML = `
         <div class="empty-state" style="padding:1.5rem">
           <p>No specific dates or deadlines found in this document.</p>
-          <p style="font-size:0.78rem;color:var(--ink3);margin-top:0.5rem">The document may not contain court orders with specific due dates.</p>
+          <p style="font-size:0.78rem;color:var(--ink3);margin-top:0.5rem">The document may not contain court orders
+with specific due dates.</p>
         </div>`;
       return;
     }
@@ -3565,7 +3692,8 @@ async function extractDates(docId, filename) {
         Select which ones to add to your calendar:
       </p>
       ${data.dates.map((e, i) => `
-        <div style="border:1px solid var(--border);border-radius:6px;padding:0.75rem;margin-bottom:0.5rem;cursor:pointer"
+        <div style="border:1px solid
+var(--border);border-radius:6px;padding:0.75rem;margin-bottom:0.5rem;cursor:pointer"
              id="date-card-${i}" onclick="toggleDateCard(${i})">
           <div style="display:flex;align-items:flex-start;gap:10px">
             <input type="checkbox" id="date-check-${i}" checked
@@ -3581,7 +3709,8 @@ async function extractDates(docId, filename) {
                 <span class="chip chip-blue">${escHtml(e.event_type)}</span>
                 ${e.court ? `<span class="chip chip-gray">${escHtml(e.court)}</span>` : ''}
               </div>
-              ${e.notes ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:4px">${escHtml(e.notes)}</div>` : ''}
+              ${e.notes ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:4px">${escHtml(e.notes)}</div>`
+: ''}
             </div>
           </div>
         </div>
@@ -3659,7 +3788,9 @@ async function addSelectedDates() {
   const msg = failed > 0
     ? `✓ ${added} date${added !== 1 ? 's' : ''} added · ${failed} skipped (invalid or unclear date)`
     : `✓ ${added} date${added !== 1 ? 's' : ''} added to calendar`;
-  notif.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;background:var(--green);color:white;padding:0.75rem 1.25rem;border-radius:6px;font-size:0.85rem;font-weight:600;z-index:999;box-shadow:0 4px 16px rgba(0,0,0,0.2);max-width:400px';
+  notif.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;background:var(--green);color:white;padding:0.75rem
+1.25rem;border-radius:6px;font-size:0.85rem;font-weight:600;z-index:999;box-shadow:0 4px 16px
+rgba(0,0,0,0.2);max-width:400px';
   notif.textContent = msg;
   document.body.appendChild(notif);
   setTimeout(() => notif.remove(), 4000);
@@ -3717,7 +3848,8 @@ async function loadUsers() {
     const users = await res.json();
     if (!users.length) { el.innerHTML = '<em>No users yet.</em>'; return; }
     el.innerHTML = users.map(u => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--gold2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid
+var(--gold2)">
         <div>
           <strong>${u.display_name}</strong>
           <span style="font-size:0.75rem;color:var(--ink3);margin-left:6px">${u.phone || u.email || ''}</span><br/>
@@ -3756,15 +3888,19 @@ async function loadInvites() {
     const invites = await res.json();
     if (!invites.length) { el.innerHTML = '<em>No pending invites.</em>'; return; }
     el.innerHTML = invites.map(inv => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--gold2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid
+var(--gold2)">
         <div>
           <strong>${inv.display_name}</strong><br/>
           <span style="font-size:0.75rem;color:var(--ink3)">${inv.email}</span>
-          <span style="font-size:0.75rem;color:var(--green);margin-left:6px">${ROLE_LABELS[inv.role] || inv.role}</span><br/>
+          <span style="font-size:0.75rem;color:var(--green);margin-left:6px">${ROLE_LABELS[inv.role] ||
+inv.role}</span><br/>
           <span style="font-size:0.7rem;color:var(--ink3)">Invited ${inv.sent_at ? inv.sent_at.slice(0,10) : ''}</span>
-          ${inv.accepted_at ? '<span style="font-size:0.7rem;color:var(--green);margin-left:6px">✓ Accepted</span>' : ''}
+          ${inv.accepted_at ? '<span style="font-size:0.7rem;color:var(--green);margin-left:6px">✓ Accepted</span>' :
+''}
         </div>
-        <button class="btn btn-outline" style="font-size:0.75rem;padding:4px 10px" onclick="cancelInvite('${inv.id}')">✕ Cancel</button>
+        <button class="btn btn-outline" style="font-size:0.75rem;padding:4px 10px"
+onclick="cancelInvite('${inv.id}')">✕ Cancel</button>
       </div>
     `).join('');
   } catch(e) { el.innerHTML = '<em>Error loading invites.</em>'; }
@@ -3812,3 +3948,7 @@ checkAuthAndBoot();
 </script>
 </body>
 </html>
+
+
+
+PS C:\Users\lenar\Documents\Tandem Hive\Mutemo 2.0>
