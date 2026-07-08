@@ -3507,7 +3507,10 @@ async function downloadDocument(docId, filename) {
     const a = document.createElement('a');
     a.href = data.url;
     a.download = filename;
+    a.target = '_blank';
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
   } catch(e) {
     alert(`Could not download document: ${e.message}`);
   }
