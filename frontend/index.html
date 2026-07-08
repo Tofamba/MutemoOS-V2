@@ -750,43 +750,10 @@ select{cursor:pointer}
             <div class="form-group">
               <label>Type</label>
               <select id="cal-type" onchange="toggleCustomEventType(this)">
-                <optgroup label="Court">
-                  <option value="hearing">Court Hearing</option>
-                  <option value="deadline">Deadline / Dies</option>
-                  <option value="filing">Filing Date</option>
-                  <option value="round_table">Round Table Conference</option>
-                  <option value="ptc">Pre-Trial Conference</option>
-                  <option value="mediation">Mediation / Arbitration</option>
-                </optgroup>
-                <optgroup label="Client & Office">
-                  <option value="meeting">Client Meeting</option>
-                  <option value="consultation">Consultation</option>
-                  <option value="signing">Document Signing</option>
-                  <option value="call">Phone / Video Call</option>
-                </optgroup>
-                <optgroup label="Professional">
-                  <option value="speaking">Speaking Engagement</option>
-                  <option value="radio_tv">Radio / TV Programme</option>
-                  <option value="cpd">CPD / Training</option>
-                  <option value="lsz">Law Society Event</option>
-                  <option value="board">Board Meeting</option>
-                </optgroup>
-                <optgroup label="Practice & Internal">
-                  <option value="staff_meeting">Staff / Admin Meeting</option>
-                  <option value="leave">Leave / Absence</option>
-                  <option value="billing_review">Billing / Finance Review</option>
-                  <option value="pro_bono">Pro Bono</option>
-                  <option value="networking">Networking / Business Development</option>
-                </optgroup>
-                <optgroup label="Court & Litigation">
-                  <option value="chamber_application">Chamber Application</option>
-                  <option value="judgment_awaiting">Judgment / Order Awaiting</option>
-                </optgroup>
-                <optgroup label="Personal">
-                  <option value="social">Social Event</option>
-                  <option value="church">Church / Ministry</option>
-                  <option value="personal">Personal</option>
-                </optgroup>
+                <option value="hearing">Court Hearing</option>
+                <option value="deadline">Deadline</option>
+                <option value="filing">Filing Date</option>
+                <option value="meeting">Client Meeting</option>
                 <option value="other">Other (specify below)</option>
               </select>
             </div>
@@ -2880,23 +2847,46 @@ async function renderLegalUpdates() {
       el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No items uploaded yet.</p></div>';
       return;
     }
-    el.innerHTML = items.map(item => `
-      <div class="doc-item" style="align-items:flex-start">
-        <span style="margin-top:2px">${item.source_type === 'legislation' ? '📜' : '⚖'}</span>
-        <div style="flex:1">
-          <div class="doc-name">${escHtml(item.filename)}</div>
-          <div class="doc-meta" style="margin-top:3px">
-            <span class="chip ${item.source_type === 'legislation' ? 'chip-gold' : 'chip-blue'}">${item.source_type === 'legislation' ? 'Legislation' : 'Case Law'}</span>
-            <span class="chip chip-gray">${escHtml(item.source_name)}</span>
-            ${item.reference ? `<span class="chip chip-green">${escHtml(item.reference)}</span>` : ''}
-            ${item.doc_date ? `<span class="chip chip-blue">${item.doc_date}</span>` : ''}
-            ${item.ocr_used ? `<span class="chip chip-gold">OCR scanned</span>` : ''}
-            <span class="chip ${item.status==='complete'?'chip-green':item.status==='error'?'chip-red':'chip-gold'}">${item.status}</span>
+    // Group items into three categories
+    const legislation = items.filter(i => i.source_type === 'legislation');
+    const judgments   = items.filter(i => i.source_type === 'case_law' || i.source_type === 'judgment');
+    const news        = items.filter(i => i.source_type === 'news' || i.source_type === 'legal_update' || i.source_type === 'press_statement');
+
+    function renderGroup(groupItems) {
+      return groupItems.map(item => `
+        <div class="doc-item" style="align-items:flex-start">
+          <span style="margin-top:2px">${
+            item.source_type === 'legislation' ? '📜' :
+            (item.source_type === 'news' || item.source_type === 'legal_update' || item.source_type === 'press_statement') ? '📰' : '⚖'
+          }</span>
+          <div style="flex:1">
+            <div class="doc-name">${escHtml(item.reference || item.filename)}</div>
+            <div class="doc-meta" style="margin-top:3px">
+              <span class="chip chip-gray">${escHtml(item.source_name)}</span>
+              ${item.doc_date ? `<span class="chip chip-blue">${item.doc_date}</span>` : ''}
+              ${item.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
+              <span class="chip ${item.status==='complete'?'chip-green':item.status==='error'?'chip-red':'chip-gold'}">${item.status}</span>
+              ${item.source_url ? `<a href="${escHtml(item.source_url)}" target="_blank" class="chip chip-blue" style="text-decoration:none">View online ↗</a>` : ''}
+            </div>
           </div>
+          ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteLegalUpdate('${item.id}')">🗑</button>` : ''}
         </div>
-        ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteLegalUpdate('${item.id}')">🗑</button>` : ''}
-      </div>
-    `).join('');
+      `).join('');
+    }
+
+    function renderSection(title, icon, groupItems) {
+      if (!groupItems.length) return '';
+      return `
+        <div style="margin-bottom:1rem">
+          <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.5rem;padding:0.4rem 0;border-bottom:2px solid var(--border)">${icon} ${title} <span style="font-weight:400;color:var(--ink3)">(${groupItems.length})</span></div>
+          ${renderGroup(groupItems)}
+        </div>`;
+    }
+
+    el.innerHTML =
+      renderSection('Legislation', '📜', legislation) +
+      renderSection('Judgments', '⚖', judgments) +
+      renderSection('Legal News & Updates', '📰', news);
   } catch(e) {
     el.innerHTML = '<p style="font-size:0.8rem;color:var(--ink3)">Could not load items.</p>';
   }
@@ -3590,7 +3580,7 @@ async function extractDates(docId, filename) {
 
     extractedDates = data.dates;
 
-    const EVENT_ICONS = { hearing: '⚖', deadline: '⏰', filing: '📋', round_table: '🤝', ptc: '👨‍⚖️', mediation: '🕊', meeting: '👤', consultation: '💬', signing: '✍', call: '📞', speaking: '🎤', radio_tv: '📻', cpd: '📚', lsz: '⚖', board: '🏛', staff_meeting: '👥', leave: '🏖', billing_review: '💰', pro_bono: '🤲', networking: '🤝', chamber_application: '⚡', judgment_awaiting: '⏳', social: '🎉', church: '✝', personal: '👤', other: '📅' };
+    const EVENT_ICONS = { hearing: '⚖', deadline: '⏰', filing: '📋', other: '📅' };
 
     document.getElementById('date-modal-content').innerHTML = `
       <p style="font-size:0.82rem;color:var(--ink2);margin-bottom:1rem">
