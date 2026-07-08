@@ -1935,9 +1935,7 @@ async function renderMatterPanel(id) {
             <div style="display:flex;gap:4px;flex-shrink:0">
               ${d.r2_key ? `
               <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}','${escHtml(d.filename)}')"
-                      title="View document">👁 View</button>
-              <button class="btn btn-sm btn-outline" onclick="downloadDocument('${d.id}','${escHtml(d.filename)}')"
-                      title="Download document">⬇</button>
+                      title="View / Download — opens in new tab, save with Ctrl+S">👁 View</button>
               ` : ''}
               <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
                       title="Extract court dates and deadlines">📅</button>
