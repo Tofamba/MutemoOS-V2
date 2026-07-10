@@ -820,6 +820,16 @@ select{cursor:pointer}
             <label>Notes</label>
             <textarea id="cal-notes" rows="2" placeholder="Any additional notes…"></textarea>
           </div>
+          <div class="form-group">
+            <label>Invite attendees (optional)</label>
+            <div id="cal-attendee-rows"></div>
+            <button type="button" class="btn btn-sm btn-outline" style="margin-top:4px" onclick="addAttendeeRow()">+ Add attendee</button>
+          </div>
+          <div class="form-group" id="cal-invite-message-group" style="display:none">
+            <label>Message to attendees (optional)</label>
+            <textarea id="cal-invite-message" rows="2" placeholder="e.g. Please bring the signed lease agreement…"></textarea>
+            <div id="cal-invite-message-hint" style="font-size:0.7rem;color:var(--ink3);margin-top:4px"></div>
+          </div>
           <button class="btn btn-primary" onclick="addCalendarEvent()">📅 Add to Calendar</button>
         </div>
       </div>
@@ -1529,6 +1539,7 @@ async function checkAuthAndBoot() {
     const data = await res.json();
     if (!data.auth_enabled || data.authenticated) {
       window._userRole = data.role || 'partner';
+      window._userDisplayName = data.display_name || '';
       applyRoleUI(window._userRole);
       document.getElementById('login-overlay').style.display = 'none';
       document.getElementById('main-app').style.display = 'block';
@@ -2664,10 +2675,103 @@ function renderEventList(elId, events, showEmpty) {
           ${daysLabel}
         </div>
         ${e.notes ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:3px">${escHtml(e.notes)}</div>` : ''}
+        ${(e.attendees && e.attendees.length) ? `<div style="font-size:0.7rem;color:var(--ink3);margin-top:4px">👥 ${e.attendees.map(a => escHtml(a.name || a.email)).join(', ')}</div>` : ''}
       </div>
-      <button class="btn btn-sm" style="background:none;color:var(--ink3);flex-shrink:0" onclick="deleteEvent('${e.id}')">✕</button>
+      <div style="display:flex;flex-direction:column;gap:2px;flex-shrink:0">
+        <button class="btn btn-sm" style="background:none;color:var(--ink3)" title="Invite someone to this event" onclick="promptInviteToEvent('${e.id}')">✉</button>
+        <button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteEvent('${e.id}')">✕</button>
+      </div>
     </div>`;
   }).join('');
+}
+
+async function promptInviteToEvent(eventId) {
+  const email = prompt('Email address to invite:');
+  if (!email || !email.trim()) return;
+  const name = prompt('Their name (optional):') || null;
+  const message = prompt(`Message to include (optional) — shown under "From the Desk of ${currentUserDisplayName()}":`) || null;
+
+  try {
+    const res = await fetch(`${API}/api/calendar/${eventId}/invite`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        attendees: [{ email: email.trim(), name }],
+        invite_message: message,
+      })
+    });
+    if (!res.ok) throw new Error('Failed');
+    const data = await res.json();
+    if (data.added && data.added.length) {
+      showCalStatus(`✓ Invite sent to ${email.trim()}.`, 'success');
+      await renderCalendar();
+    } else {
+      showCalStatus(data.message || 'That person is already invited.', 'error');
+    }
+  } catch(e) {
+    showCalStatus('Could not send invite.', 'error');
+  }
+}
+
+function currentUserDisplayName() {
+  return window._userDisplayName || 'the office';
+}
+
+let attendeeRowCount = 0;
+
+function addAttendeeRow() {
+  attendeeRowCount++;
+  const id = attendeeRowCount;
+  const container = document.getElementById('cal-attendee-rows');
+  const row = document.createElement('div');
+  row.className = 'form-row';
+  row.id = `attendee-row-${id}`;
+  row.style.marginBottom = '6px';
+  row.innerHTML = `
+    <div class="form-group">
+      <input type="text" id="attendee-name-${id}" placeholder="Name (optional)"/>
+    </div>
+    <div class="form-group">
+      <input type="email" id="attendee-email-${id}" placeholder="email@example.com" oninput="updateInviteMessageVisibility()"/>
+    </div>
+    <button type="button" class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="removeAttendeeRow(${id})">✕</button>
+  `;
+  container.appendChild(row);
+  updateInviteMessageVisibility();
+}
+
+function removeAttendeeRow(id) {
+  const row = document.getElementById(`attendee-row-${id}`);
+  if (row) row.remove();
+  updateInviteMessageVisibility();
+}
+
+function collectAttendeeRows() {
+  const rows = document.querySelectorAll('#cal-attendee-rows > div');
+  const attendees = [];
+  rows.forEach(row => {
+    const idMatch = row.id.match(/attendee-row-(\d+)/);
+    if (!idMatch) return;
+    const email = document.getElementById(`attendee-email-${idMatch[1]}`)?.value.trim();
+    const name = document.getElementById(`attendee-name-${idMatch[1]}`)?.value.trim();
+    if (email) attendees.push({ email, name: name || null });
+  });
+  return attendees;
+}
+
+function updateInviteMessageVisibility() {
+  const hasAttendees = collectAttendeeRows().length > 0;
+  const group = document.getElementById('cal-invite-message-group');
+  const hint = document.getElementById('cal-invite-message-hint');
+  group.style.display = hasAttendees ? 'block' : 'none';
+  if (hint) hint.textContent = `Shown under "From the Desk of ${currentUserDisplayName()}" in the invite email.`;
+}
+
+function clearAttendeeRows() {
+  document.getElementById('cal-attendee-rows').innerHTML = '';
+  document.getElementById('cal-invite-message').value = '';
+  document.getElementById('cal-invite-message-group').style.display = 'none';
+  attendeeRowCount = 0;
 }
 
 async function addCalendarEvent() {
@@ -2689,6 +2793,8 @@ async function addCalendarEvent() {
   const timeVal = /^\d{1,2}:\d{2}$/.test(rawTime) ? rawTime.padStart(5,'0') : null;
 
   try {
+    const attendees = collectAttendeeRows();
+    const inviteMessage = document.getElementById('cal-invite-message').value.trim() || null;
     const res = await fetch(`${API}/api/calendar`, {
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -2701,6 +2807,8 @@ async function addCalendarEvent() {
         time: timeVal,
         court: document.getElementById('cal-court').value.trim() || null,
         notes: document.getElementById('cal-notes').value.trim() || null,
+        attendees: attendees.length ? attendees : null,
+        invite_message: attendees.length ? inviteMessage : null,
       })
     });
     if (!res.ok) throw new Error('Failed');
@@ -2712,8 +2820,9 @@ async function addCalendarEvent() {
     document.getElementById('cal-custom-type').value = '';
     document.getElementById('cal-custom-type-group').style.display = 'none';
     document.getElementById('cal-type').value = 'hearing';
+    clearAttendeeRows();
     await renderCalendar();
-    showCalStatus('✓ Event added.', 'success');
+    showCalStatus(attendees.length ? `✓ Event added. Invite sent to ${attendees.length} attendee(s).` : '✓ Event added.', 'success');
   } catch(e) { showCalStatus('Could not save event.', 'error'); }
 }
 

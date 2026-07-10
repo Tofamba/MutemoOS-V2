@@ -251,9 +251,11 @@ async def run_migrations():
             matter_name TEXT,
             notes       TEXT,
             source      TEXT DEFAULT 'manual',
+            attendees   JSONB DEFAULT '[]'::jsonb,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_by  UUID REFERENCES users(id)
         );
+        ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS attendees JSONB DEFAULT '[]'::jsonb;
         CREATE INDEX IF NOT EXISTS idx_calendar_firm ON calendar_events(firm_id);
         CREATE INDEX IF NOT EXISTS idx_calendar_date ON calendar_events(firm_id, date);
 
@@ -1515,6 +1517,14 @@ class ExportRequest(BaseModel):
     deponent_name: Optional[str] = "Deponent"
     document_id: Optional[str] = "DOC"
 
+class Attendee(BaseModel):
+    email: str
+    name: Optional[str] = None
+
+class InviteRequest(BaseModel):
+    attendees: List[Attendee]
+    invite_message: Optional[str] = None
+
 class CalendarEvent(BaseModel):
     title: str
     matter_id: Optional[str] = None
@@ -1524,6 +1534,8 @@ class CalendarEvent(BaseModel):
     time: Optional[str] = None
     court: Optional[str] = None
     notes: Optional[str] = None
+    attendees: Optional[List[Attendee]] = None
+    invite_message: Optional[str] = None
 
 class LegalUpdateSearchRequest(BaseModel):
     query: str
@@ -1579,6 +1591,16 @@ def _row_to_event(row) -> dict:
         d["date"] = str(d["date"])
     if d.get("time"):
         d["time"] = str(d["time"])[:5]  # HH:MM
+    if d.get("attendees") is not None:
+        # asyncpg may return jsonb as a raw string depending on codec config —
+        # handle both an already-decoded list and a raw JSON string safely.
+        if isinstance(d["attendees"], str):
+            try:
+                d["attendees"] = json.loads(d["attendees"])
+            except (ValueError, TypeError):
+                d["attendees"] = []
+    else:
+        d["attendees"] = []
     return d
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -3695,7 +3717,7 @@ async def list_calendar(request: Request):
     return [_row_to_event(r) for r in rows]
 
 @app.post("/api/calendar")
-async def add_calendar_event(event: CalendarEvent, request: Request):
+async def add_calendar_event(event: CalendarEvent, background_tasks: BackgroundTasks, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "calendar:create")
     try:
@@ -3717,17 +3739,66 @@ async def add_calendar_event(event: CalendarEvent, request: Request):
         except ValueError:
             pass
 
+    attendees_list = [a.dict() for a in event.attendees] if event.attendees else []
+
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO calendar_events (firm_id, matter_id, title, date, time, event_type, court, matter_name, notes, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *
+            INSERT INTO calendar_events (firm_id, matter_id, title, date, time, event_type, court, matter_name, notes, attendees, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11) RETURNING *
         """,
         FIRM_ID, matter_id_uuid, event.title,
         datetime.strptime(event.date, "%Y-%m-%d").date(),
         time_val, event.event_type, event.court, event.matter_name, event.notes,
+        json.dumps(attendees_list),
         _uuid_mod.UUID(str(user["id"])) if user and user.get("id") else None
         )
-    return _row_to_event(row)
+    result = _row_to_event(row)
+
+    if attendees_list and is_email_configured():
+        organizer_name = (user or {}).get("display_name") or FIRM_NAME
+        background_tasks.add_task(send_event_invites, result, attendees_list, organizer_name, event.invite_message)
+
+    return result
+
+@app.post("/api/calendar/{event_id}/invite")
+async def invite_to_calendar_event(event_id: str, req: InviteRequest, background_tasks: BackgroundTasks, request: Request):
+    """
+    Add one or more attendees to an existing event and send them a calendar
+    invite. Covers the "just got off the phone, want to loop in another
+    lawyer" case — no need to recreate the whole event.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "calendar:create")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM calendar_events WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(event_id), FIRM_ID
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        existing_event = _row_to_event(row)
+        existing_attendees = existing_event.get("attendees") or []
+        existing_emails = {a["email"].lower() for a in existing_attendees}
+
+        new_attendees = [a.dict() for a in req.attendees if a.email.lower() not in existing_emails]
+        if not new_attendees:
+            return {"added": [], "message": "All provided attendees are already on this event"}
+
+        merged_attendees = existing_attendees + new_attendees
+        updated_row = await conn.fetchrow(
+            "UPDATE calendar_events SET attendees=$1::jsonb WHERE id=$2 RETURNING *",
+            json.dumps(merged_attendees), _uuid_mod.UUID(event_id)
+        )
+
+    result = _row_to_event(updated_row)
+
+    if is_email_configured():
+        organizer_name = (user or {}).get("display_name") or FIRM_NAME
+        background_tasks.add_task(send_event_invites, result, new_attendees, organizer_name, req.invite_message)
+
+    return {"added": [a["email"] for a in new_attendees], "event": result}
 
 @app.delete("/api/calendar/{event_id}")
 async def delete_calendar_event(event_id: str, request: Request):
@@ -4096,6 +4167,160 @@ def build_ics(events: list) -> str:
         lines += ["BEGIN:VEVENT", f"UID:{uid}", f"DTSTART:{dtstart}", f"SUMMARY:{summary}", "END:VEVENT"]
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines) + "\r\n"
+
+def _ics_escape(s: str) -> str:
+    return (s or "").replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
+
+def build_invite_ics(event: dict, attendees: list, organizer_name: str, organizer_email: str) -> str:
+    """
+    Build a proper calendar INVITE (METHOD:REQUEST) for a single event, with
+    an ORGANIZER and one ATTENDEE line per invitee. This is what makes Gmail/
+    Outlook render Accept/Decline buttons — build_ics() above uses
+    METHOD:PUBLISH instead, which is right for a personal reminder digest but
+    doesn't get treated as an invite by mail clients.
+    """
+    uid = f"{event.get('id', 'evt')}@mutemodesk"
+    now_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    dtstart = str(event["date"]).replace("-", "")
+    has_time = bool(event.get("time"))
+    if has_time:
+        t = str(event["time"]).replace(":", "")[:4]
+        dtstart = f"{dtstart}T{t}00"
+        # Default 1-hour duration — the app doesn't track an explicit end time.
+        start_dt = datetime.strptime(f"{event['date']} {event['time']}", "%Y-%m-%d %H:%M")
+        end_dt = start_dt + timedelta(hours=1)
+        dtend = end_dt.strftime("%Y%m%dT%H%M00")
+    else:
+        dtend = None
+
+    summary = _ics_escape(event.get("title", ""))
+    desc_parts = []
+    if event.get("matter_name"):
+        desc_parts.append(f"Matter: {event['matter_name']}")
+    if event.get("notes"):
+        desc_parts.append(f"Notes: {event['notes']}")
+    description = _ics_escape("\\n".join(desc_parts))
+    location = _ics_escape(event.get("court", "") or "")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        f"PRODID:-//Mutemo Desk//{FIRM_NAME}//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:REQUEST",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{now_stamp}",
+        f"DTSTART:{dtstart}",
+    ]
+    if dtend:
+        lines.append(f"DTEND:{dtend}")
+    lines += [
+        f"SUMMARY:{summary}",
+        f"DESCRIPTION:{description}",
+        f"LOCATION:{location}",
+        "SEQUENCE:0",
+        "STATUS:CONFIRMED",
+        f'ORGANIZER;CN="{_ics_escape(organizer_name)}":MAILTO:{organizer_email}',
+    ]
+    for a in attendees:
+        name = a.get("name") or a.get("email")
+        lines.append(
+            f'ATTENDEE;CN="{_ics_escape(name)}";ROLE=REQ-PARTICIPANT;'
+            f'PARTSTAT=NEEDS-ACTION;RSVP=TRUE:MAILTO:{a["email"]}'
+        )
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    return "\r\n".join(lines) + "\r\n"
+
+def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, text_body: str,
+                                       ics_content: str, method: str = "REQUEST") -> None:
+    """Same as _send_via_resend_sync but sets the correct calendar MIME type
+    (text/calendar;method=REQUEST) so mail clients recognize this as an
+    invite rather than a plain attachment."""
+    import base64
+    api_key = os.environ.get("RESEND_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("RESEND_API_KEY not configured")
+    from_addr = os.environ.get("RESEND_FROM", f"reminders@{os.environ.get('RESEND_FROM_DOMAIN', 'tofamba.com')}")
+    payload = {
+        "from": f"Mutemo Desk <{from_addr}>",
+        "to": [to],
+        "subject": subject,
+        "html": html_body,
+        "text": text_body,
+        "attachments": [{
+            "filename": "invite.ics",
+            "content": base64.b64encode(ics_content.encode("utf-8")).decode("utf-8"),
+        }],
+    }
+    import httpx
+    with httpx.Client(timeout=15) as http:
+        resp = http.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text}")
+
+async def send_event_invites(event: dict, attendees: list, organizer_name: str, invite_message: Optional[str] = None) -> dict:
+    """
+    Send a calendar invite email (with .ics attachment) to each attendee on
+    an event. Sends one email per attendee — each ICS carries the full
+    attendee list, so recipients' calendar apps still show the full guest
+    list even though the email itself is addressed individually.
+
+    invite_message is an optional free-text note from whoever is sending the
+    invite, giving the recipient context ("Please bring the signed lease
+    agreement", etc.) — shown under the "From the Desk of ..." heading.
+    Returns {"sent": [...], "failed": [...]}.
+    """
+    organizer_email = os.environ.get("RESEND_FROM", f"reminders@{os.environ.get('RESEND_FROM_DOMAIN', 'tofamba.com')}")
+    ics_content = build_invite_ics(event, attendees, organizer_name, organizer_email)
+
+    date_str = event.get("date", "")
+    time_str = f" at {event['time']}" if event.get("time") else ""
+    location_line = f"<p><strong>Location:</strong> {event['court']}</p>" if event.get("court") else ""
+    notes_line = f"<p><strong>Notes:</strong> {event['notes']}</p>" if event.get("notes") else ""
+    message_html = (
+        f'<div style="background:#f5f3ee;border-left:3px solid #8a7a5c;padding:10px 14px;margin:12px 0;font-size:14px">'
+        f'{_escape_html(invite_message)}</div>'
+        if invite_message else ""
+    )
+    message_text = f"\n\"{invite_message}\"\n" if invite_message else ""
+
+    subject = f"Invitation: {event.get('title', 'Event')} — {date_str}{time_str}"
+    html_body = f"""
+        <p style="font-size:15px;font-weight:600;margin-bottom:2px">From the Desk of {_escape_html(organizer_name)}</p>
+        <p style="color:#6b6b64;font-size:13px;margin-top:0">You've been invited to the following:</p>
+        <p><strong>{_escape_html(event.get('title', ''))}</strong></p>
+        <p><strong>Date:</strong> {date_str}{time_str}</p>
+        {location_line}
+        {notes_line}
+        {message_html}
+        <p style="color:#6b6b64;font-size:13px">Sent via Mutemo Desk. Open the attached invite to add this to your calendar.</p>
+    """
+    text_body = (
+        f"From the Desk of {organizer_name}\n\n"
+        f"You've been invited to: {event.get('title', '')}\n"
+        f"Date: {date_str}{time_str}\n"
+        + (f"Location: {event['court']}\n" if event.get("court") else "")
+        + (f"Notes: {event['notes']}\n" if event.get("notes") else "")
+        + message_text
+    )
+
+    sent, failed = [], []
+    for a in attendees:
+        try:
+            await asyncio.to_thread(
+                _send_via_resend_sync_with_method, a["email"], subject, html_body, text_body, ics_content
+            )
+            sent.append(a["email"])
+        except Exception as e:
+            print(f"[calendar-invite] failed to send to {a.get('email')}: {e}")
+            failed.append(a["email"])
+    return {"sent": sent, "failed": failed}
 
 def is_email_configured() -> bool:
     return bool(os.environ.get("RESEND_API_KEY") or os.environ.get("SMTP_HOST"))
