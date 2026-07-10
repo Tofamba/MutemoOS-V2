@@ -252,10 +252,12 @@ async def run_migrations():
             notes       TEXT,
             source      TEXT DEFAULT 'manual',
             attendees   JSONB DEFAULT '[]'::jsonb,
+            sequence    INTEGER NOT NULL DEFAULT 0,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_by  UUID REFERENCES users(id)
         );
         ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS attendees JSONB DEFAULT '[]'::jsonb;
+        ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS sequence INTEGER NOT NULL DEFAULT 0;
         CREATE INDEX IF NOT EXISTS idx_calendar_firm ON calendar_events(firm_id);
         CREATE INDEX IF NOT EXISTS idx_calendar_date ON calendar_events(firm_id, date);
 
@@ -1524,6 +1526,15 @@ class Attendee(BaseModel):
 class InviteRequest(BaseModel):
     attendees: List[Attendee]
     invite_message: Optional[str] = None
+
+class CalendarEventUpdate(BaseModel):
+    title: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    court: Optional[str] = None
+    notes: Optional[str] = None
+    event_type: Optional[str] = None
+    update_message: Optional[str] = None  # note to attendees explaining the change
 
 class CalendarEvent(BaseModel):
     title: str
@@ -3800,18 +3811,115 @@ async def invite_to_calendar_event(event_id: str, req: InviteRequest, background
 
     return {"added": [a["email"] for a in new_attendees], "event": result}
 
+@app.patch("/api/calendar/{event_id}")
+async def update_calendar_event(event_id: str, update: CalendarEventUpdate,
+                                 background_tasks: BackgroundTasks, request: Request):
+    """
+    Update an event — the postponement/rescheduling path. Only the fields
+    provided are changed. If the event has attendees, they get an updated
+    calendar invite (same UID, incremented SEQUENCE, so it replaces the
+    existing entry on their calendar rather than creating a duplicate).
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "calendar:create")
+
+    async with _db_pool.acquire() as conn:
+        existing_row = await conn.fetchrow(
+            "SELECT * FROM calendar_events WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(event_id), FIRM_ID
+        )
+        if not existing_row:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        existing = _row_to_event(existing_row)
+
+        new_date = update.date
+        if new_date:
+            try:
+                datetime.strptime(new_date, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"Invalid date format: {new_date}. Use YYYY-MM-DD.")
+
+        new_time_val = None
+        if update.time is not None:
+            if update.time == "":
+                new_time_val = None
+            else:
+                try:
+                    new_time_val = datetime.strptime(update.time, "%H:%M").time()
+                except ValueError:
+                    raise HTTPException(status_code=422, detail=f"Invalid time format: {update.time}. Use HH:MM.")
+
+        set_parts, values = [], []
+        i = 1
+        if update.title is not None:
+            set_parts.append(f"title=${i}"); values.append(update.title); i += 1
+        if new_date:
+            set_parts.append(f"date=${i}"); values.append(datetime.strptime(new_date, "%Y-%m-%d").date()); i += 1
+        if update.time is not None:
+            set_parts.append(f"time=${i}"); values.append(new_time_val); i += 1
+        if update.court is not None:
+            set_parts.append(f"court=${i}"); values.append(update.court); i += 1
+        if update.notes is not None:
+            set_parts.append(f"notes=${i}"); values.append(update.notes); i += 1
+        if update.event_type is not None:
+            set_parts.append(f"event_type=${i}"); values.append(update.event_type); i += 1
+
+        if not set_parts:
+            raise HTTPException(status_code=400, detail="No fields to update")
+        set_parts.append("sequence=sequence+1")
+        values.append(_uuid_mod.UUID(event_id))
+        updated_row = await conn.fetchrow(
+            f"UPDATE calendar_events SET {', '.join(set_parts)} WHERE id=${i} RETURNING *",
+            *values
+        )
+
+    result = _row_to_event(updated_row)
+    attendees = result.get("attendees") or []
+
+    if attendees and is_email_configured():
+        organizer_name = (user or {}).get("display_name") or FIRM_NAME
+        background_tasks.add_task(
+            send_event_invites, result, attendees, organizer_name,
+            update.update_message, "updated", result.get("sequence", 1)
+        )
+
+    return result
+
 @app.delete("/api/calendar/{event_id}")
-async def delete_calendar_event(event_id: str, request: Request):
+async def delete_calendar_event(event_id: str, background_tasks: BackgroundTasks, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "calendar:delete")
+
     async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM calendar_events WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(event_id), FIRM_ID
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        event = _row_to_event(row)
         result = await conn.execute(
             "DELETE FROM calendar_events WHERE id=$1 AND firm_id=$2",
             _uuid_mod.UUID(event_id), FIRM_ID
         )
+
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Event not found")
-    return {"deleted": True}
+
+    attendees = event.get("attendees") or []
+    if attendees and is_email_configured():
+        organizer_name = (user or {}).get("display_name") or FIRM_NAME
+        # Cancellation notice — the row is already gone from our DB, but the
+        # attendee's own calendar app still has it until we tell it to
+        # remove/cancel the entry via METHOD:CANCEL.
+        background_tasks.add_task(
+            send_event_invites, event, attendees, organizer_name,
+            None, "cancelled", event.get("sequence", 0) + 1
+        )
+
+    return {"deleted": True, "notified": [a["email"] for a in attendees]}
 
 @app.get("/api/calendar/export-ics")
 async def export_calendar_ics(request: Request):
@@ -4171,13 +4279,20 @@ def build_ics(events: list) -> str:
 def _ics_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace(",", "\\,").replace(";", "\\;").replace("\n", "\\n")
 
-def build_invite_ics(event: dict, attendees: list, organizer_name: str, organizer_email: str) -> str:
+def build_invite_ics(event: dict, attendees: list, organizer_name: str, organizer_email: str,
+                      method: str = "REQUEST", sequence: int = 0) -> str:
     """
-    Build a proper calendar INVITE (METHOD:REQUEST) for a single event, with
-    an ORGANIZER and one ATTENDEE line per invitee. This is what makes Gmail/
-    Outlook render Accept/Decline buttons — build_ics() above uses
-    METHOD:PUBLISH instead, which is right for a personal reminder digest but
-    doesn't get treated as an invite by mail clients.
+    Build a calendar invite (METHOD:REQUEST for new/updated events,
+    METHOD:CANCEL to cancel one) with an ORGANIZER and one ATTENDEE line per
+    invitee. This is what makes Gmail/Outlook render Accept/Decline buttons —
+    build_ics() above uses METHOD:PUBLISH instead, which is right for a
+    personal reminder digest but doesn't get treated as an invite by mail
+    clients.
+
+    UID must stay identical across create/update/cancel for the same event
+    so calendar clients treat them as the same entry rather than duplicates.
+    SEQUENCE must increase on every update/cancel — clients use UID+SEQUENCE
+    together to know a later message supersedes an earlier one.
     """
     uid = f"{event.get('id', 'evt')}@mutemodesk"
     now_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -4202,13 +4317,14 @@ def build_invite_ics(event: dict, attendees: list, organizer_name: str, organize
         desc_parts.append(f"Notes: {event['notes']}")
     description = _ics_escape("\\n".join(desc_parts))
     location = _ics_escape(event.get("court", "") or "")
+    status = "CANCELLED" if method == "CANCEL" else "CONFIRMED"
 
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         f"PRODID:-//Mutemo Desk//{FIRM_NAME}//EN",
         "CALSCALE:GREGORIAN",
-        "METHOD:REQUEST",
+        f"METHOD:{method}",
         "BEGIN:VEVENT",
         f"UID:{uid}",
         f"DTSTAMP:{now_stamp}",
@@ -4220,24 +4336,32 @@ def build_invite_ics(event: dict, attendees: list, organizer_name: str, organize
         f"SUMMARY:{summary}",
         f"DESCRIPTION:{description}",
         f"LOCATION:{location}",
-        "SEQUENCE:0",
-        "STATUS:CONFIRMED",
+        f"SEQUENCE:{sequence}",
+        f"STATUS:{status}",
         f'ORGANIZER;CN="{_ics_escape(organizer_name)}":MAILTO:{organizer_email}',
     ]
     for a in attendees:
         name = a.get("name") or a.get("email")
+        partstat = "NEEDS-ACTION" if method != "CANCEL" else "DECLINED"
         lines.append(
             f'ATTENDEE;CN="{_ics_escape(name)}";ROLE=REQ-PARTICIPANT;'
-            f'PARTSTAT=NEEDS-ACTION;RSVP=TRUE:MAILTO:{a["email"]}'
+            f'PARTSTAT={partstat};RSVP=TRUE:MAILTO:{a["email"]}'
         )
     lines += ["END:VEVENT", "END:VCALENDAR"]
     return "\r\n".join(lines) + "\r\n"
 
 def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, text_body: str,
                                        ics_content: str, method: str = "REQUEST") -> None:
-    """Same as _send_via_resend_sync but sets the correct calendar MIME type
-    (text/calendar;method=REQUEST) so mail clients recognize this as an
-    invite rather than a plain attachment."""
+    """
+    Same as _send_via_resend_sync but sets the calendar attachment's
+    content_type explicitly to text/calendar with the given method.
+
+    This is required, not optional: without it, Resend infers the
+    attachment's MIME type from the filename alone, which does not include
+    the `method=REQUEST` parameter that Outlook specifically requires to
+    render Accept/Decline buttons, and that Gmail also wants for full RSVP
+    support rather than just silently adding the event.
+    """
     import base64
     api_key = os.environ.get("RESEND_API_KEY", "")
     if not api_key:
@@ -4252,6 +4376,7 @@ def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, tex
         "attachments": [{
             "filename": "invite.ics",
             "content": base64.b64encode(ics_content.encode("utf-8")).decode("utf-8"),
+            "content_type": f'text/calendar; charset=utf-8; method={method}',
         }],
     }
     import httpx
@@ -4264,20 +4389,31 @@ def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, tex
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text}")
 
-async def send_event_invites(event: dict, attendees: list, organizer_name: str, invite_message: Optional[str] = None) -> dict:
+async def send_event_invites(event: dict, attendees: list, organizer_name: str,
+                              invite_message: Optional[str] = None,
+                              kind: str = "new", sequence: int = 0) -> dict:
     """
-    Send a calendar invite email (with .ics attachment) to each attendee on
-    an event. Sends one email per attendee — each ICS carries the full
-    attendee list, so recipients' calendar apps still show the full guest
-    list even though the email itself is addressed individually.
+    Send a calendar invite/update/cancellation email (with .ics attachment)
+    to each attendee on an event. Sends one email per attendee — each ICS
+    carries the full attendee list, so recipients' calendar apps still show
+    the full guest list even though the email itself is addressed
+    individually.
+
+    kind: "new" (initial invite), "updated" (date/time/location changed —
+    the .ics UID stays the same so it updates the existing calendar entry
+    rather than creating a duplicate), or "cancelled" (event removed —
+    sends METHOD:CANCEL so it's struck through / removed on the attendee's
+    calendar, not just left dangling).
 
     invite_message is an optional free-text note from whoever is sending the
-    invite, giving the recipient context ("Please bring the signed lease
-    agreement", etc.) — shown under the "From the Desk of ..." heading.
+    invite, giving the recipient context — shown under the "From the Desk
+    of ..." heading.
     Returns {"sent": [...], "failed": [...]}.
     """
     organizer_email = os.environ.get("RESEND_FROM", f"reminders@{os.environ.get('RESEND_FROM_DOMAIN', 'tofamba.com')}")
-    ics_content = build_invite_ics(event, attendees, organizer_name, organizer_email)
+    ics_method = "CANCEL" if kind == "cancelled" else "REQUEST"
+    ics_content = build_invite_ics(event, attendees, organizer_name, organizer_email,
+                                   method=ics_method, sequence=sequence)
 
     date_str = event.get("date", "")
     time_str = f" at {event['time']}" if event.get("time") else ""
@@ -4290,20 +4426,32 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str, 
     )
     message_text = f"\n\"{invite_message}\"\n" if invite_message else ""
 
-    subject = f"Invitation: {event.get('title', 'Event')} — {date_str}{time_str}"
+    if kind == "cancelled":
+        lead_line = "The following event has been <strong>cancelled</strong>:"
+        lead_text = "The following event has been CANCELLED:"
+        subject = f"Cancelled: {event.get('title', 'Event')} — {date_str}{time_str}"
+    elif kind == "updated":
+        lead_line = "The following event has been <strong>updated</strong> — please check the new details:"
+        lead_text = "The following event has been UPDATED — please check the new details:"
+        subject = f"Updated: {event.get('title', 'Event')} — {date_str}{time_str}"
+    else:
+        lead_line = "You've been invited to the following:"
+        lead_text = "You've been invited to:"
+        subject = f"Invitation: {event.get('title', 'Event')} — {date_str}{time_str}"
+
     html_body = f"""
         <p style="font-size:15px;font-weight:600;margin-bottom:2px">From the Desk of {_escape_html(organizer_name)}</p>
-        <p style="color:#6b6b64;font-size:13px;margin-top:0">You've been invited to the following:</p>
+        <p style="color:#6b6b64;font-size:13px;margin-top:0">{lead_line}</p>
         <p><strong>{_escape_html(event.get('title', ''))}</strong></p>
         <p><strong>Date:</strong> {date_str}{time_str}</p>
         {location_line}
         {notes_line}
         {message_html}
-        <p style="color:#6b6b64;font-size:13px">Sent via Mutemo Desk. Open the attached invite to add this to your calendar.</p>
+        <p style="color:#6b6b64;font-size:13px">Sent via Mutemo Desk.{' Open the attached invite to add this to your calendar.' if kind != 'cancelled' else ' This will remove or mark the event as cancelled on your calendar if you added it previously.'}</p>
     """
     text_body = (
         f"From the Desk of {organizer_name}\n\n"
-        f"You've been invited to: {event.get('title', '')}\n"
+        f"{lead_text} {event.get('title', '')}\n"
         f"Date: {date_str}{time_str}\n"
         + (f"Location: {event['court']}\n" if event.get("court") else "")
         + (f"Notes: {event['notes']}\n" if event.get("notes") else "")
@@ -4314,7 +4462,8 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str, 
     for a in attendees:
         try:
             await asyncio.to_thread(
-                _send_via_resend_sync_with_method, a["email"], subject, html_body, text_body, ics_content
+                _send_via_resend_sync_with_method, a["email"], subject, html_body, text_body,
+                ics_content, ics_method
             )
             sent.append(a["email"])
         except Exception as e:

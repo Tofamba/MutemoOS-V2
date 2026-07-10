@@ -2679,6 +2679,7 @@ function renderEventList(elId, events, showEmpty) {
       </div>
       <div style="display:flex;flex-direction:column;gap:2px;flex-shrink:0">
         <button class="btn btn-sm" style="background:none;color:var(--ink3)" title="Invite someone to this event" onclick="promptInviteToEvent('${e.id}')">✉</button>
+        <button class="btn btn-sm" style="background:none;color:var(--ink3)" title="Postpone / reschedule" onclick="promptRescheduleEvent('${e.id}')">📅↻</button>
         <button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteEvent('${e.id}')">✕</button>
       </div>
     </div>`;
@@ -2710,6 +2711,48 @@ async function promptInviteToEvent(eventId) {
     }
   } catch(e) {
     showCalStatus('Could not send invite.', 'error');
+  }
+}
+
+async function promptRescheduleEvent(eventId) {
+  const event = calEvents.find(e => e.id === eventId);
+  if (!event) return;
+
+  const newDate = prompt(`New date (YYYY-MM-DD) — currently ${event.date}:`, event.date);
+  if (!newDate || !newDate.trim()) return;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate.trim())) {
+    showCalStatus('Date must be in YYYY-MM-DD format.', 'error');
+    return;
+  }
+
+  const newTime = prompt(`New time (HH:MM, or leave blank for no time) — currently ${event.time || '(none)'}:`, event.time || '');
+
+  const hasAttendees = event.attendees && event.attendees.length > 0;
+  let message = null;
+  if (hasAttendees) {
+    message = prompt(`Note to attendees about this change (optional) — shown under "From the Desk of ${currentUserDisplayName()}":`) || null;
+  }
+
+  try {
+    const res = await fetch(`${API}/api/calendar/${eventId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        date: newDate.trim(),
+        time: newTime !== null ? newTime.trim() : undefined,
+        update_message: message,
+      })
+    });
+    if (!res.ok) throw new Error('Failed');
+    await renderCalendar();
+    showCalStatus(
+      hasAttendees
+        ? `✓ Event rescheduled. Update sent to ${event.attendees.length} attendee(s).`
+        : '✓ Event rescheduled.',
+      'success'
+    );
+  } catch(e) {
+    showCalStatus('Could not reschedule event.', 'error');
   }
 }
 
@@ -2827,8 +2870,22 @@ async function addCalendarEvent() {
 }
 
 async function deleteEvent(id) {
-  await fetch(`${API}/api/calendar/${id}`, {method:'DELETE'});
-  await renderCalendar();
+  const event = calEvents.find(e => e.id === id);
+  const hasAttendees = event && event.attendees && event.attendees.length > 0;
+
+  const confirmMsg = hasAttendees
+    ? `This event has ${event.attendees.length} attendee(s). Deleting it will send them a cancellation notice. Continue?`
+    : 'Delete this event?';
+  if (!confirm(confirmMsg)) return;
+
+  try {
+    const res = await fetch(`${API}/api/calendar/${id}`, {method:'DELETE'});
+    if (!res.ok) throw new Error('Failed');
+    await renderCalendar();
+    if (hasAttendees) showCalStatus(`✓ Event deleted. Cancellation sent to ${event.attendees.length} attendee(s).`, 'success');
+  } catch(e) {
+    showCalStatus('Could not delete event.', 'error');
+  }
 }
 
 function toggleCustomEventType(sel) {
