@@ -1027,8 +1027,7 @@ async def update_invite(invite_id: str, req: UpdateInviteRequest, request: Reque
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid invite_id")
 
-    if req.organisation_role and req.organisation_role not in ("ops_manager", "panel_lawyer",
-                                                                "org_admin", "lawyer", "paralegal"):
+    if req.organisation_role and req.organisation_role not in ("ops_manager", "panel_lawyer"):
         raise HTTPException(status_code=400, detail="Invalid organisation_role")
     if req.role and req.role not in ("partner", "associate", "secretary", "admin"):
         raise HTTPException(status_code=400, detail="Invalid role")
@@ -1714,11 +1713,30 @@ async def reclassify_zlr(request: Request):
 async def list_matters(request: Request):
     user = await get_current_user(request)
     _check_permission(user, "matter:read")
+
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+
     async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM matters WHERE firm_id=$1 ORDER BY last_activity DESC NULLS LAST, created_at DESC",
-            FIRM_ID
-        )
+        org_role = None
+        if user_id:
+            org_role_row = await conn.fetchrow(
+                "SELECT role FROM organisation_roles WHERE firm_id=$1 AND user_id=$2",
+                FIRM_ID, user_id
+            )
+            org_role = org_role_row["role"] if org_role_row else None
+
+        if org_role == "panel_lawyer":
+            # Panel lawyers only see matters assigned to them, not the whole firm's docket.
+            rows = await conn.fetch(
+                "SELECT * FROM matters WHERE firm_id=$1 AND assigned_lawyer_id=$2 "
+                "ORDER BY last_activity DESC NULLS LAST, created_at DESC",
+                FIRM_ID, user_id
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM matters WHERE firm_id=$1 ORDER BY last_activity DESC NULLS LAST, created_at DESC",
+                FIRM_ID
+            )
     matters = []
     for row in rows:
         m = _row_to_matter(row)
@@ -2297,23 +2315,31 @@ async def list_legal_updates(source_type: Optional[str] = None, request: Request
     return [_row_to_doc(r) for r in rows]
 
 async def _process_legal_update_background(item_id: str, content: bytes, filename: str, ext: str,
-                                            source_type: str, source_name: str, reference: str):
+                                            source_type: str, source_name: str, reference: str,
+                                            summary: str = ""):
     """Background task: extract, classify, chunk, and index a legal update document."""
     text = ""
     word_count = 0
     page_count = 1
     ocr_used = False
 
-    try:
-        if ext == "pdf":
-            text, page_count, ocr_used = extract_pdf_text(content)
-        elif ext in ("docx", "doc"):
-            text = extract_docx_text(content)
-        else:
-            text = content.decode("utf-8", errors="replace")
+    if content:
+        try:
+            if ext == "pdf":
+                text, page_count, ocr_used = extract_pdf_text(content)
+            elif ext in ("docx", "doc"):
+                text = extract_docx_text(content)
+            else:
+                text = content.decode("utf-8", errors="replace")
+            word_count = len(text.split())
+        except Exception as e:
+            print(f"[legal-update] text extraction failed for {filename}: {e}")
+    elif summary:
+        # No file attached (e.g. a scraped news article) — fall back to the
+        # scraper-provided summary so the item still lands as usable content
+        # instead of an empty 'error' row.
+        text = summary
         word_count = len(text.split())
-    except Exception as e:
-        print(f"[legal-update] text extraction failed for {filename}: {e}")
 
     metadata = {}
     if text:
@@ -2371,20 +2397,28 @@ async def _process_legal_update_background(item_id: str, content: bytes, filenam
 @app.post("/api/legal-updates/upload", status_code=202)
 async def upload_legal_update(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     source_type: str = Form(...),
     source_name: str = Form(""),
     reference: str = Form(""),
     source_url: str = Form(""),
     scraped_at: str = Form(""),
+    summary: str = Form(""),
     request: Request = None,
 ):
     if request:
         user = await get_current_user(request)
         _check_permission(user, "legal:upload")
 
-    content = await file.read()
-    filename = file.filename or "document"
+    # Items without a PDF (e.g. scraped news articles) arrive with no file —
+    # `file` is optional precisely for that case. Fall back to a synthetic
+    # filename/extension so the row still gets a sensible `filename` value.
+    if file is not None:
+        content = await file.read()
+        filename = file.filename or "document"
+    else:
+        content = b""
+        filename = f"{source_name or source_type or 'item'}.txt"
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "bin"
     item_id = str(_uuid_mod.uuid4())
 
@@ -2409,7 +2443,7 @@ async def upload_legal_update(
 
     background_tasks.add_task(
         _process_legal_update_background, item_id, content, filename, ext,
-        source_type, source_name, reference
+        source_type, source_name, reference, summary
     )
 
     return {**_row_to_doc(row), "processing": True,
@@ -2680,6 +2714,7 @@ JSON only:"""}]
 
 JURISDICTION_MAP = {
     "ZLR": "Zimbabwe", "ZimLII": "Zimbabwe", "SC": "Zimbabwe",
+    "Laws.Africa": "Zimbabwe",
     "SADC": "SADC", "ECOWAS": "ECOWAS",
     "UKSC": "United Kingdom", "UKHL": "United Kingdom",
     "NZCA": "New Zealand", "NZSC": "New Zealand",
@@ -2893,36 +2928,52 @@ async def zlr_categories(request: Request = None):
     return [{"category": r["taxonomy_category"], "count": r["count"]} for r in rows]
 
 async def _process_zlr_background(item_id: str, content: bytes, filename: str, ext: str,
-                                   source: str, volume_year: Optional[str], zimlii_url: Optional[str]):
-    """Background task: parse, classify, chunk, and index a ZLR entry."""
+                                   source: str, volume_year: Optional[str], zimlii_url: Optional[str],
+                                   scraper_meta: Optional[dict] = None):
+    """Background task: parse, classify, chunk, and index a ZLR entry.
+
+    `scraper_meta` carries whatever the feed service already extracted
+    (case_name, citation, court, judge, judgment_date, summary) so that
+    items pushed without a PDF (download failed, or none exists) don't lose
+    that metadata — previously it was accepted as form fields but never
+    passed through, so it was silently discarded on every push.
+    """
+    scraper_meta = scraper_meta or {}
     text = ""
     page_count = 1
     ocr_used = False
 
-    try:
-        if ext == "pdf":
-            text, page_count, ocr_used = extract_pdf_text(content)
-        elif ext in ("docx", "doc"):
-            text = extract_docx_text(content)
-        elif ext in ("txt", "rtf"):
-            text = content.decode("utf-8", errors="replace")
-        elif ext in ("jpg", "jpeg", "png", "webp"):
-            with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            try:
-                import subprocess as sp
-                ocr_result = sp.run(["tesseract", tmp_path, "stdout", "-l", "eng"],
-                                    capture_output=True, text=True, timeout=60)
-                text = ocr_result.stdout.strip()
-                ocr_used = True
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-        else:
-            text = content.decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"[zlr] text extraction failed for {filename}: {e}")
+    if content:
+        try:
+            if ext == "pdf":
+                text, page_count, ocr_used = extract_pdf_text(content)
+            elif ext in ("docx", "doc"):
+                text = extract_docx_text(content)
+            elif ext in ("txt", "rtf"):
+                text = content.decode("utf-8", errors="replace")
+            elif ext in ("jpg", "jpeg", "png", "webp"):
+                with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                try:
+                    import subprocess as sp
+                    ocr_result = sp.run(["tesseract", tmp_path, "stdout", "-l", "eng"],
+                                        capture_output=True, text=True, timeout=60)
+                    text = ocr_result.stdout.strip()
+                    ocr_used = True
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+            else:
+                text = content.decode("utf-8", errors="replace")
+        except Exception as e:
+            print(f"[zlr] text extraction failed for {filename}: {e}")
+
+    if not text and scraper_meta.get("summary"):
+        # No PDF attached/downloadable — use the scraper's own summary as the
+        # raw text so the entry still lands with usable content instead of
+        # being marked 'error' and losing everything the scraper found.
+        text = scraper_meta["summary"]
 
     if not text:
         async with _db_pool.acquire() as conn:
@@ -2933,6 +2984,13 @@ async def _process_zlr_background(item_id: str, content: bytes, filename: str, e
         return
 
     parsed = parse_zlr_headnote(text)
+
+    # Fill any gaps in what parse_zlr_headnote found from raw text with
+    # whatever the scraper already told us directly (most reliable when
+    # there's no PDF/full text to parse from).
+    for key in ("case_name", "citation", "court", "judge", "judgment_date", "summary"):
+        if not parsed.get(key) and scraper_meta.get(key):
+            parsed[key] = scraper_meta[key]
     if parsed.get("taxonomy_category") == "General" or not parsed.get("summary") or len(parsed.get("subject_chains", [])) == 0:
         ai_meta = await asyncio.to_thread(classify_case_with_ai, text, filename)
         if ai_meta:
@@ -3009,20 +3067,35 @@ FULL TEXT:
 @app.post("/api/zlr/upload", status_code=202)
 async def upload_zlr_document(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     source: str = Form("ZLR"),
     volume_year: Optional[str] = Form(None),
     zimlii_url: Optional[str] = Form(None),
+    source_url: str = Form(""),
+    case_name: str = Form(""),
+    citation: str = Form(""),
+    court: str = Form(""),
+    judge: str = Form(""),
+    judgment_date: str = Form(""),
+    summary: str = Form(""),
+    scraped_at: str = Form(""),
     request: Request = None,
 ):
     if request:
         user = await get_current_user(request)
         _check_permission(user, "legal:upload")
 
-    content = await file.read()
-    filename = file.filename or "zlr_entry"
+    # `file` is optional — the feed service pushes metadata-only when a PDF
+    # couldn't be downloaded (e.g. ZimLII Cloudflare blocking the download).
+    if file is not None:
+        content = await file.read()
+        filename = file.filename or "zlr_entry"
+    else:
+        content = b""
+        filename = f"{source or 'zlr'}_entry.txt"
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "bin"
     item_id = str(_uuid_mod.uuid4())
+    zimlii_url = zimlii_url or source_url or None
 
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
@@ -3034,8 +3107,13 @@ async def upload_zlr_document(
         get_jurisdiction(source), get_authority_weight(source)
         )
 
+    scraper_meta = {
+        "case_name": case_name, "citation": citation, "court": court,
+        "judge": judge, "judgment_date": judgment_date, "summary": summary,
+    }
     background_tasks.add_task(
-        _process_zlr_background, item_id, content, filename, ext, source, volume_year, zimlii_url
+        _process_zlr_background, item_id, content, filename, ext, source, volume_year, zimlii_url,
+        scraper_meta
     )
 
     d = dict(row)
@@ -4340,11 +4418,22 @@ async def get_settings(request: Request):
 async def update_settings(body: dict, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
-    allowed = {"name", "short_name", "city", "country"}
+    allowed = {"name", "short_name", "city", "country", "features"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update")
-    set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(updates.keys()))
+
+    if "features" in updates:
+        if not isinstance(updates["features"], list) or not all(
+            isinstance(f, str) for f in updates["features"]
+        ):
+            raise HTTPException(status_code=400, detail="features must be a list of strings")
+        updates["features"] = json.dumps(updates["features"])
+
+    set_clauses = ", ".join(
+        f"{k}=${i+2}::jsonb" if k == "features" else f"{k}=${i+2}"
+        for i, k in enumerate(updates.keys())
+    )
     values = list(updates.values())
     async with _db_pool.acquire() as conn:
         await conn.execute(
