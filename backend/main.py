@@ -4258,6 +4258,23 @@ def build_reminder_email_body(events: list) -> tuple:
 
     return text, html
 
+async def get_firm_contact_email() -> Optional[str]:
+    """
+    The email address the firm already set up on the Calendar tab for daily
+    reminders (reminder_settings.recipient_email). Reused as the calendar
+    invite ORGANIZER/CC/Reply-To so Accept/Decline responses and any
+    "reply" from an attendee actually reach the firm, not a generic system
+    inbox nobody reads.
+    """
+    if not _db_pool:
+        return None
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT recipient_email FROM reminder_settings WHERE firm_id=$1", FIRM_ID
+        )
+    email = row["recipient_email"] if row else None
+    return email.strip() if email and email.strip() else None
+
 def build_ics(events: list) -> str:
     """Build an ICS calendar string from a list of event dicts."""
     lines = [
@@ -4351,7 +4368,8 @@ def build_invite_ics(event: dict, attendees: list, organizer_name: str, organize
     return "\r\n".join(lines) + "\r\n"
 
 def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, text_body: str,
-                                       ics_content: str, method: str = "REQUEST") -> None:
+                                       ics_content: str, method: str = "REQUEST",
+                                       cc: Optional[str] = None, reply_to: Optional[str] = None) -> None:
     """
     Same as _send_via_resend_sync but sets the calendar attachment's
     content_type explicitly to text/calendar with the given method.
@@ -4361,6 +4379,11 @@ def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, tex
     the `method=REQUEST` parameter that Outlook specifically requires to
     render Accept/Decline buttons, and that Gmail also wants for full RSVP
     support rather than just silently adding the event.
+
+    cc/reply_to are the firm's own contact email (reminder_settings.
+    recipient_email) — CC'd so there's a visible record it went out, and
+    Reply-To so a plain "Reply" in the recipient's mail client reaches the
+    firm rather than a generic system inbox.
     """
     import base64
     api_key = os.environ.get("RESEND_API_KEY", "")
@@ -4379,6 +4402,10 @@ def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, tex
             "content_type": f'text/calendar; charset=utf-8; method={method}',
         }],
     }
+    if cc:
+        payload["cc"] = [cc]
+    if reply_to:
+        payload["reply_to"] = reply_to
     import httpx
     with httpx.Client(timeout=15) as http:
         resp = http.post(
@@ -4410,7 +4437,10 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
     of ..." heading.
     Returns {"sent": [...], "failed": [...]}.
     """
-    organizer_email = os.environ.get("RESEND_FROM", f"reminders@{os.environ.get('RESEND_FROM_DOMAIN', 'tofamba.com')}")
+    firm_contact_email = await get_firm_contact_email()
+    organizer_email = firm_contact_email or os.environ.get(
+        "RESEND_FROM", f"reminders@{os.environ.get('RESEND_FROM_DOMAIN', 'tofamba.com')}"
+    )
     ics_method = "CANCEL" if kind == "cancelled" else "REQUEST"
     ics_content = build_invite_ics(event, attendees, organizer_name, organizer_email,
                                    method=ics_method, sequence=sequence)
@@ -4425,6 +4455,15 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
         if invite_message else ""
     )
     message_text = f"\n\"{invite_message}\"\n" if invite_message else ""
+    contact_html = (
+        f'<p style="font-size:13px">Should you need to discuss this further, please feel free to '
+        f'contact me on {_escape_html(firm_contact_email)}.</p>'
+        if firm_contact_email and kind != "cancelled" else ""
+    )
+    contact_text = (
+        f"\nShould you need to discuss this further, please feel free to contact me on {firm_contact_email}.\n"
+        if firm_contact_email and kind != "cancelled" else ""
+    )
 
     if kind == "cancelled":
         lead_line = "The following event has been <strong>cancelled</strong>:"
@@ -4447,6 +4486,7 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
         {location_line}
         {notes_line}
         {message_html}
+        {contact_html}
         <p style="color:#6b6b64;font-size:13px">Sent via Mutemo Desk.{' Open the attached invite to add this to your calendar.' if kind != 'cancelled' else ' This will remove or mark the event as cancelled on your calendar if you added it previously.'}</p>
     """
     text_body = (
@@ -4456,6 +4496,7 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
         + (f"Location: {event['court']}\n" if event.get("court") else "")
         + (f"Notes: {event['notes']}\n" if event.get("notes") else "")
         + message_text
+        + contact_text
     )
 
     sent, failed = [], []
@@ -4463,7 +4504,7 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
         try:
             await asyncio.to_thread(
                 _send_via_resend_sync_with_method, a["email"], subject, html_body, text_body,
-                ics_content, ics_method
+                ics_content, ics_method, firm_contact_email, firm_contact_email
             )
             sent.append(a["email"])
         except Exception as e:
