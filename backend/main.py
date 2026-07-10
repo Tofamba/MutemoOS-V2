@@ -209,6 +209,18 @@ async def run_migrations():
         -- Migration: add source_url and scraped_at to existing deployments
         ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS source_url TEXT;
         ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS scraped_at TIMESTAMPTZ;
+        -- Dedup cleanup: earlier pushes from the feed service could land as
+        -- repeated rows for the same URL whenever the feed's own dedup state
+        -- got reset (e.g. before a persistent volume was mounted). Clean up
+        -- existing duplicates (keep earliest) before adding the constraint
+        -- that prevents this going forward.
+        DELETE FROM legal_updates a USING legal_updates b
+        WHERE a.source_url IS NOT NULL
+          AND a.source_url = b.source_url
+          AND a.firm_id = b.firm_id
+          AND a.uploaded_at > b.uploaded_at;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_updates_dedup
+            ON legal_updates(firm_id, source_url) WHERE source_url IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS zlr_entries (
             id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -238,6 +250,14 @@ async def run_migrations():
         );
         CREATE INDEX IF NOT EXISTS idx_zlr_firm ON zlr_entries(firm_id);
         CREATE INDEX IF NOT EXISTS idx_zlr_category ON zlr_entries(firm_id, taxonomy_category);
+        -- Same dedup cleanup as legal_updates, for the same reason.
+        DELETE FROM zlr_entries a USING zlr_entries b
+        WHERE a.zimlii_url IS NOT NULL
+          AND a.zimlii_url = b.zimlii_url
+          AND a.firm_id = b.firm_id
+          AND a.uploaded_at > b.uploaded_at;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_zlr_entries_dedup
+            ON zlr_entries(firm_id, zimlii_url) WHERE zimlii_url IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS calendar_events (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2437,6 +2457,7 @@ async def upload_legal_update(
     source_url: str = Form(""),
     scraped_at: str = Form(""),
     summary: str = Form(""),
+    title: str = Form(""),
     request: Request = None,
 ):
     if request:
@@ -2444,14 +2465,16 @@ async def upload_legal_update(
         _check_permission(user, "legal:upload")
 
     # Items without a PDF (e.g. scraped news articles) arrive with no file —
-    # `file` is optional precisely for that case. Fall back to a synthetic
-    # filename/extension so the row still gets a sensible `filename` value.
+    # `file` is optional precisely for that case. Prefer the real article/
+    # item title as the display name (there's no dedicated `title` column,
+    # `filename` is what the UI renders as the heading) — only fall back to
+    # the generic "<source>.txt" placeholder if no title was actually sent.
     if file is not None:
         content = await file.read()
         filename = file.filename or "document"
     else:
         content = b""
-        filename = f"{source_name or source_type or 'item'}.txt"
+        filename = title.strip() or f"{source_name or source_type or 'item'}.txt"
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "bin"
     item_id = str(_uuid_mod.uuid4())
 
@@ -2468,11 +2491,19 @@ async def upload_legal_update(
             INSERT INTO legal_updates
                 (id, firm_id, filename, source_type, source_name, reference,
                  source_url, scraped_at, status, uploaded_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'processing',NOW()) RETURNING *
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'processing',NOW())
+            ON CONFLICT (firm_id, source_url) WHERE source_url IS NOT NULL DO NOTHING
+            RETURNING *
         """,
         _uuid_mod.UUID(item_id), FIRM_ID, filename, source_type, source_name, reference,
         source_url or None, scraped_at_ts
         )
+
+    if not row:
+        # Already have this URL for this firm — the feed service pushed
+        # something it thought was new (its own dedup state may have reset),
+        # but we already have it. No need to process or index it again.
+        return {"status": "duplicate", "source_url": source_url}
 
     background_tasks.add_task(
         _process_legal_update_background, item_id, content, filename, ext,
@@ -3120,12 +3151,15 @@ async def upload_zlr_document(
 
     # `file` is optional — the feed service pushes metadata-only when a PDF
     # couldn't be downloaded (e.g. ZimLII Cloudflare blocking the download).
+    # Prefer the actual case name as the display name when there's no file —
+    # same class of gap as legal-updates: without this, entries render with
+    # a generic "<source>_entry.txt" heading instead of the case name.
     if file is not None:
         content = await file.read()
         filename = file.filename or "zlr_entry"
     else:
         content = b""
-        filename = f"{source or 'zlr'}_entry.txt"
+        filename = case_name.strip() or f"{source or 'zlr'}_entry.txt"
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "bin"
     item_id = str(_uuid_mod.uuid4())
     zimlii_url = zimlii_url or source_url or None
@@ -3134,11 +3168,16 @@ async def upload_zlr_document(
         row = await conn.fetchrow("""
             INSERT INTO zlr_entries (id, firm_id, filename, source, volume_year, zimlii_url,
                                      jurisdiction, authority_weight, uploaded_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW()) RETURNING *
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+            ON CONFLICT (firm_id, zimlii_url) WHERE zimlii_url IS NOT NULL DO NOTHING
+            RETURNING *
         """,
         _uuid_mod.UUID(item_id), FIRM_ID, filename, source, volume_year, zimlii_url,
         get_jurisdiction(source), get_authority_weight(source)
         )
+
+    if not row:
+        return {"status": "duplicate", "zimlii_url": zimlii_url}
 
     scraper_meta = {
         "case_name": case_name, "citation": citation, "court": court,
