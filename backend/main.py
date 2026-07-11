@@ -481,6 +481,7 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.to_thread(get_embedding_model)
             await asyncio.to_thread(get_chroma_collections)
+            await reconcile_chroma_index()
             print("[startup] semantic search ready")
         except Exception as e:
             print(f"[startup] semantic search unavailable, will use keyword fallback: {e}")
@@ -1472,7 +1473,17 @@ def get_chroma_collections():
     global _chroma_client, _firm_collection, _legal_collection, _zlr_collection
     if _chroma_client is None:
         import chromadb
-        chroma_path = os.path.join(os.path.dirname(__file__), "..", "data", "chroma")
+        # CHROMA_DATA_DIR should point at a mounted persistent volume in
+        # production (e.g. /data/chroma) — without it, the vector index
+        # lives on the container's ephemeral filesystem and is wiped on
+        # every redeploy, even though Postgres (the real source of truth
+        # for chunk text) survives fine. Falls back to the old relative
+        # path for local/dev use where persistence across restarts doesn't
+        # matter.
+        chroma_path = os.environ.get(
+            "CHROMA_DATA_DIR",
+            os.path.join(os.path.dirname(__file__), "..", "data", "chroma")
+        )
         os.makedirs(chroma_path, exist_ok=True)
         _chroma_client = chromadb.PersistentClient(path=chroma_path)
         _firm_collection = _chroma_client.get_or_create_collection(
@@ -1486,6 +1497,68 @@ def get_chroma_collections():
         )
         print("[vector_store] ChromaDB initialized")
     return _firm_collection, _legal_collection, _zlr_collection
+
+async def reconcile_chroma_index():
+    """
+    Cheap self-healing check, run once at startup: compare each ChromaDB
+    collection's count against how many chunks Postgres actually has for
+    that source. Postgres is the real source of truth (chunk text is
+    already fully extracted and chunked there) — ChromaDB is a derived
+    index that can go out of sync if it's ever reset (volume detached,
+    first deploy after adding a volume, manual intervention, etc.).
+
+    Only re-embeds when there's an actual mismatch — this is NOT a full
+    reindex on every boot, which would slow down every single redeploy
+    proportional to total corpus size. In the common case (index already
+    matches Postgres) this adds a few cheap COUNT queries and nothing else.
+    """
+    if not _db_pool:
+        return
+    try:
+        firm_col, legal_col, zlr_col = get_chroma_collections()
+    except Exception as e:
+        print(f"[reconcile] ChromaDB unavailable, skipping: {e}")
+        return
+
+    async with _db_pool.acquire() as conn:
+        pg_counts = {}
+        for source in ("firm", "legal", "zlr"):
+            row = await conn.fetchrow(
+                "SELECT COUNT(*) AS n FROM chunks WHERE firm_id=$1 AND chunk_source=$2",
+                FIRM_ID, source
+            )
+            pg_counts[source] = row["n"] if row else 0
+
+    collections = {"firm": firm_col, "legal": legal_col, "zlr": zlr_col}
+    for source, col in collections.items():
+        try:
+            chroma_count = col.count()
+        except Exception:
+            chroma_count = 0
+        pg_count = pg_counts.get(source, 0)
+
+        if pg_count == 0:
+            continue  # nothing to index for this source
+        if chroma_count == pg_count:
+            continue  # already in sync, nothing to do
+
+        print(f"[reconcile] {source}: Postgres has {pg_count} chunks, "
+              f"ChromaDB has {chroma_count} — rebuilding index from Postgres")
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source=$2", FIRM_ID, source
+            )
+        chunks_to_index = [{
+            "id": r["id"],
+            "text": r["text"],
+            "document_id": str(r["document_id"]),
+            "matter_id": r["matter_id"],
+            "chunk_index": r["chunk_index"],
+            "page_number": r["page_number"],
+        } for r in rows]
+        if chunks_to_index:
+            await asyncio.to_thread(index_chunks_in_chroma, chunks_to_index, source)
+            print(f"[reconcile] {source}: re-indexed {len(chunks_to_index)} chunks")
 
 # ── Pydantic Models ───────────────────────────────────────────────────────────
 
