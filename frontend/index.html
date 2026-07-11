@@ -477,6 +477,11 @@ select{cursor:pointer}
           </select>
         </div>
       </div>
+      <div class="form-group" style="margin-bottom:0.75rem">
+        <label style="font-size:0.8rem;color:var(--ink3)">Attach a document (optional) — get an opinion grounded in the document itself, e.g. "Is this lease agreement proper?"</label>
+        <input type="file" id="search-attach-file" accept=".pdf,.docx,.doc,.txt" onchange="updateSearchAttachLabel()"/>
+        <div id="search-attach-label" style="font-size:0.75rem;color:var(--ink3);margin-top:2px"></div>
+      </div>
       <button class="btn btn-primary" onclick="doSearch()" id="search-btn" style="margin-top:0">
         🔍 Search Vault
       </button>
@@ -2320,6 +2325,13 @@ function showVaultStatus(msg, type) {
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
+function updateSearchAttachLabel() {
+  const fileInput = document.getElementById('search-attach-file');
+  const label = document.getElementById('search-attach-label');
+  const file = fileInput.files[0];
+  label.textContent = file ? `📎 ${file.name} will be attached to this search.` : '';
+}
+
 async function doSearch() {
   const query = document.getElementById('search-query').value.trim();
   if (!query) return;
@@ -2329,17 +2341,33 @@ async function doSearch() {
   document.getElementById('search-loading').style.display = 'block';
   document.getElementById('search-btn').disabled = true;
 
+  const attachedFile = document.getElementById('search-attach-file').files[0];
+
   try {
-    const res = await fetch(`${API}/api/search`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        query,
-        matter_type: document.getElementById('filter-matter-type').value || null,
-        document_type: document.getElementById('filter-doc-type').value || null,
-        limit: 8,
-      })
-    });
+    let res;
+    if (attachedFile) {
+      const formData = new FormData();
+      formData.append('file', attachedFile);
+      formData.append('query', query);
+      formData.append('include_legal_updates', 'true');
+      formData.append('limit', '8');
+      res = await fetch(`${API}/api/search/document`, { method: 'POST', body: formData });
+    } else {
+      res = await fetch(`${API}/api/search`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          query,
+          matter_type: document.getElementById('filter-matter-type').value || null,
+          document_type: document.getElementById('filter-doc-type').value || null,
+          limit: 8,
+        })
+      });
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Search failed');
+    }
     const data = await res.json();
     renderSearchResults(data, query);
   } catch(e) {
@@ -2388,8 +2416,12 @@ function renderSearchResults(data, query) {
       : (data.grounding_note
           ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
           : '');
+    const attachedBadge = data.attached_document
+      ? `<div style="margin-bottom:0.5rem;font-size:0.75rem;color:var(--ink3)">📎 Analyzing: <strong>${escHtml(data.attached_document.filename)}</strong>${data.attached_document.truncated ? ' (document was long — analysis based on the first portion)' : ''}</div>`
+      : '';
     html += `<div class="ai-answer">
       <div class="ai-answer-label">⚡ AI Analysis</div>
+      ${attachedBadge}
       <div class="ai-answer-text">${escHtml(data.answer)}</div>
       ${groundingBadge}
     </div>`;

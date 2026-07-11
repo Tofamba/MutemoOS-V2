@@ -3509,6 +3509,101 @@ async def search_documents(req: SearchRequest, request: Request):
     answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3])
     return {"answer": answer, "results": all_results}
 
+# Cap on attached-document text sent to the model — generous enough for a
+# full lease agreement, contract, or affidavit (roughly 40k chars is well
+# within Sonnet's context window even alongside retrieved chunks), while
+# still bounding cost/latency for anything unusually long.
+MAX_ATTACHED_DOC_CHARS = 40_000
+
+@app.post("/api/search/document")
+async def search_with_document(
+    request: Request,
+    file: UploadFile = File(...),
+    query: str = Form(...),
+    matter_id: Optional[str] = Form(None),
+    include_legal_updates: bool = Form(True),
+    limit: int = Form(8),
+):
+    """
+    Search Vault, extended: upload a document ad-hoc (lease, contract,
+    affidavit, etc.) and ask a question about it. The document is analyzed
+    directly — not permanently stored or indexed, since this is a one-off
+    query, not a matter document — and the answer is grounded in both the
+    document's own text and the firm's existing indexed knowledge (firm
+    precedent, legal updates, ZLR judgments), same as a normal Search Vault
+    query.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "search")
+
+    content = await file.read()
+    filename = file.filename or "document"
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
+    try:
+        if ext == "pdf":
+            doc_text, _, _ = extract_pdf_text(content)
+        elif ext in ("docx", "doc"):
+            doc_text = extract_docx_text(content)
+        else:
+            doc_text = content.decode("utf-8", errors="replace")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not read document: {e}")
+
+    if not doc_text or not doc_text.strip():
+        raise HTTPException(status_code=422, detail="No readable text found in the uploaded document.")
+
+    truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
+    if truncated:
+        doc_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+
+    req = SearchRequest(
+        query=query, matter_id=matter_id, limit=limit,
+        include_legal_updates=include_legal_updates,
+    )
+
+    async with _db_pool.acquire() as conn:
+        firm_chunk_rows = await conn.fetch(
+            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
+        )
+        legal_chunk_rows = await conn.fetch(
+            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
+        )
+        zlr_chunk_rows = await conn.fetch(
+            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='zlr'", FIRM_ID
+        )
+    firm_chunks = [dict(r) for r in firm_chunk_rows]
+    legal_chunks = [dict(r) for r in legal_chunk_rows]
+    zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
+
+    results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
+    legal_results = []
+    if include_legal_updates:
+        legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
+    zlr_results = []
+    if zlr_chunks_list:
+        raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, query, None, 3)
+        for r in raw_zlr:
+            zlr_results.append({
+                "result_source": "zlr", "chunk_id": r.get("item_id"),
+                "text": r.get("relevant_excerpt", ""), "similarity": r.get("similarity", 0),
+                "document_id": r.get("item_id"),
+                "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
+                "citation": r.get("citation"), "taxonomy_category": r.get("taxonomy_category"),
+                "summary": r.get("summary"),
+            })
+
+    all_results = results + legal_results + zlr_results
+    answer = await asyncio.to_thread(
+        synthesise_answer_sync, query, results[:5], legal_results[:3], doc_text, filename
+    )
+
+    return {
+        "answer": answer,
+        "results": all_results,
+        "attached_document": {"filename": filename, "truncated": truncated, "char_count": len(doc_text)},
+    }
+
 def _semantic_search_firm(req, chunks: list) -> list:
     results = []
     try:
@@ -3596,8 +3691,10 @@ def _semantic_search_legal(req, chunks: list) -> list:
         print(f"[search] legal semantic search failed: {e}")
     return results
 
-def synthesise_answer_sync(query: str, results: list, legal_results: list) -> str:
-    if not results and not legal_results:
+def synthesise_answer_sync(query: str, results: list, legal_results: list,
+                            attached_doc_text: Optional[str] = None,
+                            attached_doc_name: Optional[str] = None) -> str:
+    if not results and not legal_results and not attached_doc_text:
         return None
     context_parts = []
     for r in results[:5]:
@@ -3606,24 +3703,46 @@ def synthesise_answer_sync(query: str, results: list, legal_results: list) -> st
         ref = r.get("reference") or r.get("source_name") or "Legal Source"
         context_parts.append(f"[{ref}]\n{r['text']}")
     context = "\n\n---\n\n".join(context_parts)
-    try:
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=600,
-            messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 
-Query: {query}
+    attached_block = ""
+    if attached_doc_text:
+        attached_block = f"""
 
-Sources:
-{context}
+ATTACHED DOCUMENT ({attached_doc_name or 'uploaded document'}) — this is the primary
+subject of the query. Analyze it directly and specifically, quoting or
+referencing its actual clauses/wording where relevant:
+---
+{attached_doc_text}
+---"""
 
-Answer directly and practically:
+    if attached_doc_text:
+        instructions = """Answer the question about the attached document directly and specifically:
+- Ground your analysis in the document's actual wording — reference specific clauses, dates, or terms where relevant
+- Where firm precedent or legal sources below are relevant, cross-reference them explicitly (e.g. "this clause is consistent with/departs from [reference]")
+- If the document appears to have a legal defect, gap, or unusual provision, flag it clearly
+- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection"""
+    else:
+        instructions = """Answer directly and practically:
 - If firm precedents are present, identify patterns and note them by document ID
 - If legislation or case law is present, summarise the relevant legal position and cite by reference
 - Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents
+- For drafting queries, suggest specific language from the firm precedents"""
 
-Professional, direct, max 4 paragraphs. Clearly distinguish firm precedent from public legal sources."""}]
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=900 if attached_doc_text else 600,
+            messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
+
+Query: {query}
+{attached_block}
+
+Sources:
+{context if context else '(no additional firm/legal sources retrieved)'}
+
+{instructions}
+
+Professional, direct, max {6 if attached_doc_text else 4} paragraphs. Clearly distinguish the attached document's own content from firm precedent and from public legal sources."""}]
         )
         return msg.content[0].text
     except Exception:
