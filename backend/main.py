@@ -177,11 +177,15 @@ async def run_migrations():
             page_count      INT DEFAULT 1,
             chunk_count     INT DEFAULT 0,
             ocr_used        BOOLEAN DEFAULT FALSE,
+            ocr_confidence  FLOAT,
+            needs_review    BOOLEAN DEFAULT FALSE,
             status          TEXT DEFAULT 'processing',
             error_message   TEXT,
             uploaded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             uploaded_by     UUID REFERENCES users(id)
         );
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS ocr_confidence FLOAT;
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS idx_documents_matter ON documents(matter_id);
         CREATE INDEX IF NOT EXISTS idx_documents_firm ON documents(firm_id);
 
@@ -203,8 +207,12 @@ async def run_migrations():
             error_message   TEXT,
             uploaded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             source_url      TEXT,
-            scraped_at      TIMESTAMPTZ
+            scraped_at      TIMESTAMPTZ,
+            ocr_confidence  FLOAT,
+            needs_review    BOOLEAN DEFAULT FALSE
         );
+        ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS ocr_confidence FLOAT;
+        ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS idx_legal_updates_firm ON legal_updates(firm_id);
         -- Migration: add source_url and scraped_at to existing deployments
         ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS source_url TEXT;
@@ -246,8 +254,12 @@ async def run_migrations():
             word_count          INT DEFAULT 0,
             chunk_count         INT DEFAULT 0,
             ocr_used            BOOLEAN DEFAULT FALSE,
+            ocr_confidence      FLOAT,
+            needs_review        BOOLEAN DEFAULT FALSE,
             uploaded_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        ALTER TABLE zlr_entries ADD COLUMN IF NOT EXISTS ocr_confidence FLOAT;
+        ALTER TABLE zlr_entries ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS idx_zlr_firm ON zlr_entries(firm_id);
         CREATE INDEX IF NOT EXISTS idx_zlr_category ON zlr_entries(firm_id, taxonomy_category);
         -- Same dedup cleanup as legal_updates, for the same reason.
@@ -2282,10 +2294,11 @@ async def _process_document_background(doc_id: str, matter_id: str, content: byt
     word_count = 0
     page_count = 1
     ocr_used = False
+    ocr_confidence = None
 
     try:
         if ext == "pdf":
-            text, page_count, ocr_used = extract_pdf_text(content)
+            text, page_count, ocr_used, ocr_confidence = extract_pdf_text(content)
         elif ext in ("docx", "doc"):
             text = extract_docx_text(content)
         elif ext in ("xlsx", "xlsm"):
@@ -2356,24 +2369,29 @@ async def _process_document_background(doc_id: str, matter_id: str, content: byt
             r2_key = None
 
     async with _db_pool.acquire() as conn:
+        needs_review = ocr_used and (ocr_confidence is not None) and (ocr_confidence < 80)
         await conn.execute("""
             UPDATE documents SET
                 document_type=$1, matter_type=$2, parties=$3,
                 doc_date=$4, court=$5, word_count=$6, page_count=$7,
-                chunk_count=$8, ocr_used=$9, status='complete', r2_key=$12
+                chunk_count=$8, ocr_used=$9, status='complete', r2_key=$12,
+                ocr_confidence=$13, needs_review=$14
             WHERE id=$10 AND firm_id=$11
         """,
         metadata.get("document_type"), metadata.get("matter_type"),
         str(metadata.get("parties", "")) if metadata.get("parties") else None,
         doc_date, metadata.get("court"),
         word_count, page_count, chunk_count, ocr_used,
-        _uuid_mod.UUID(doc_id), FIRM_ID, r2_key
+        _uuid_mod.UUID(doc_id), FIRM_ID, r2_key,
+        ocr_confidence, needs_review
         )
         await conn.execute(
             "UPDATE matters SET document_count = document_count + 1, last_activity=NOW() WHERE id=$1 AND firm_id=$2",
             _uuid_mod.UUID(matter_id), FIRM_ID
         )
 
+    if needs_review:
+        print(f"[upload] ⚠ {filename}: OCR confidence {ocr_confidence}% (below 80%) — flagged for manual review")
     print(f"[upload] processed {filename}: {word_count} words, {chunk_count} chunks, ocr={ocr_used}")
 
 @app.post("/api/upload", status_code=202)
@@ -2448,11 +2466,12 @@ async def _process_legal_update_background(item_id: str, content: bytes, filenam
     word_count = 0
     page_count = 1
     ocr_used = False
+    ocr_confidence = None
 
     if content:
         try:
             if ext == "pdf":
-                text, page_count, ocr_used = extract_pdf_text(content)
+                text, page_count, ocr_used, ocr_confidence = extract_pdf_text(content)
             elif ext in ("docx", "doc"):
                 text = extract_docx_text(content)
             else:
@@ -2507,18 +2526,22 @@ async def _process_legal_update_background(item_id: str, content: bytes, filenam
             doc_date = None
 
     async with _db_pool.acquire() as conn:
+        needs_review = ocr_used and (ocr_confidence is not None) and (ocr_confidence < 80)
         await conn.execute("""
             UPDATE legal_updates SET
                 document_type=$1, matter_type=$2, doc_date=$3, court=$4,
                 word_count=$5, chunk_count=$6, ocr_used=$7,
                 status=CASE WHEN $5 > 0 THEN 'complete' ELSE 'error' END,
-                error_message=CASE WHEN $5 = 0 THEN 'Could not extract text' ELSE NULL END
+                error_message=CASE WHEN $5 = 0 THEN 'Could not extract text' ELSE NULL END,
+                ocr_confidence=$10, needs_review=$11
             WHERE id=$8 AND firm_id=$9
         """,
         metadata.get("document_type"), metadata.get("matter_type"), doc_date,
         metadata.get("court"), word_count, chunk_count, ocr_used,
-        _uuid_mod.UUID(item_id), FIRM_ID
+        _uuid_mod.UUID(item_id), FIRM_ID, ocr_confidence, needs_review
         )
+        if needs_review:
+            print(f"[legal-update] ⚠ {filename}: OCR confidence {ocr_confidence}% (below 80%) — flagged for manual review")
 
 @app.post("/api/legal-updates/upload", status_code=202)
 async def upload_legal_update(
@@ -2665,7 +2688,9 @@ async def search_legal_updates(req: LegalUpdateSearchRequest, request: Request):
 
 def extract_pdf_text(content: bytes):
     """Extract text from PDF. Falls back to OCR for scanned/image-only pages.
-    Returns (text, page_count, ocr_used)"""
+    Returns (text, page_count, ocr_used, ocr_confidence).
+    ocr_confidence is the average tesseract word-confidence (0-100) across
+    any OCR'd pages, or None if no OCR was needed."""
     try:
         import pdfplumber, io
         pages = []
@@ -2680,16 +2705,21 @@ def extract_pdf_text(content: bytes):
                     needs_ocr_pages.append(i)
         total_pages = len(pages)
         ocr_used = bool(needs_ocr_pages)
+        page_confidences = []
         if needs_ocr_pages:
             ocr_results = ocr_pdf_pages(content, needs_ocr_pages)
-            for i, ocr_text in ocr_results.items():
+            for i, (ocr_text, ocr_conf) in ocr_results.items():
                 pages[i] = ocr_text
+                if ocr_conf is not None:
+                    page_confidences.append(ocr_conf)
+        avg_confidence = round(sum(page_confidences) / len(page_confidences), 1) if page_confidences else None
         final_pages = [p for p in pages if p and p.strip()]
-        return "\n\n".join(final_pages), max(1, total_pages), ocr_used
+        return "\n\n".join(final_pages), max(1, total_pages), ocr_used, avg_confidence
     except Exception:
-        return content.decode("utf-8", errors="replace"), 1, False
+        return content.decode("utf-8", errors="replace"), 1, False, None
 
 def ocr_pdf_pages(content: bytes, page_indices: list) -> dict:
+    """Returns {page_index: (text, confidence)} for each successfully-OCR'd page."""
     import subprocess as sp
     results = {}
     if not page_indices:
@@ -2717,7 +2747,8 @@ def ocr_pdf_pages(content: bytes, page_indices: list) -> dict:
                                     capture_output=True, text=True, timeout=60, check=False)
                 text = ocr_result.stdout.strip()
                 if text:
-                    results[idx] = text
+                    confidence = _tesseract_confidence(img_path)
+                    results[idx] = (text, confidence)
             except Exception:
                 continue
     return results
@@ -2742,27 +2773,75 @@ def extract_xlsx_text(content: bytes):
         print(f"[extract_xlsx_text] failed: {e}")
         return ""
 
-def ocr_image_bytes(content: bytes, ext: str) -> str:
+def _tesseract_confidence(image_path: str) -> Optional[float]:
     """
-    OCR a photographed document (jpg/png/webp/etc). Same tesseract-based
-    approach already used for ZLR image uploads — factored out here so the
-    Search Vault document-upload feature can use it too. Real-world use in a
-    Zimbabwean practice means people will very often attach a phone photo
-    of a paper document, not a clean PDF/docx — without this, those uploads
-    silently produce garbage text (a raw UTF-8 decode of binary image bytes)
-    instead of an actual error or actual content.
+    Run tesseract in TSV mode to get per-word confidence scores and return
+    the average (0-100). Separate from the plain-text extraction call
+    (which stays unchanged, to avoid touching working text-reconstruction
+    logic) — this is purely for quality signal so low-confidence OCR can be
+    flagged for manual review before it ends up misquoted in something like
+    a court filing (e.g. "US$120" misread as "US$12O").
+    """
+    import subprocess as sp
+    try:
+        result = sp.run(["tesseract", image_path, "stdout", "-l", "eng", "tsv"],
+                        capture_output=True, text=True, timeout=60, check=False)
+        lines = result.stdout.strip().split("\n")
+        if len(lines) < 2:
+            return None
+        header = lines[0].split("\t")
+        try:
+            conf_idx = header.index("conf")
+            text_idx = header.index("text")
+        except ValueError:
+            return None
+        confidences = []
+        for line in lines[1:]:
+            fields = line.split("\t")
+            if len(fields) <= max(conf_idx, text_idx):
+                continue
+            try:
+                conf = float(fields[conf_idx])
+            except ValueError:
+                continue
+            # -1 marks structural rows (page/block/para/line), not actual
+            # recognized words — only real word-level confidence counts.
+            if conf < 0:
+                continue
+            if not fields[text_idx].strip():
+                continue
+            confidences.append(conf)
+        if not confidences:
+            return None
+        return round(sum(confidences) / len(confidences), 1)
+    except Exception:
+        return None
+
+def ocr_image_bytes(content: bytes, ext: str) -> tuple:
+    """
+    OCR a photographed document (jpg/png/webp/etc), returning (text, confidence).
+    Same tesseract-based approach already used for ZLR image uploads —
+    factored out here so it's used consistently everywhere a raw image gets
+    OCR'd, with a confidence score attached so low-quality reads can be
+    flagged rather than silently trusted. Real-world use in a Zimbabwean
+    practice means people will very often attach a phone photo of a paper
+    document, not a clean PDF/docx — without this, those uploads silently
+    produce garbage text (a raw UTF-8 decode of binary image bytes) instead
+    of an actual error or actual content.
     """
     import shutil
     import subprocess as sp
     if not shutil.which("tesseract"):
-        return ""
+        return "", None
     with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
     try:
         ocr_result = sp.run(["tesseract", tmp_path, "stdout", "-l", "eng"],
                             capture_output=True, text=True, timeout=60, check=False)
-        return ocr_result.stdout.strip()
+        text = ocr_result.stdout.strip()
+        confidence = _tesseract_confidence(tmp_path)
+        return text, confidence
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
@@ -3104,28 +3183,19 @@ async def _process_zlr_background(item_id: str, content: bytes, filename: str, e
     text = ""
     page_count = 1
     ocr_used = False
+    ocr_confidence = None
 
     if content:
         try:
             if ext == "pdf":
-                text, page_count, ocr_used = extract_pdf_text(content)
+                text, page_count, ocr_used, ocr_confidence = extract_pdf_text(content)
             elif ext in ("docx", "doc"):
                 text = extract_docx_text(content)
             elif ext in ("txt", "rtf"):
                 text = content.decode("utf-8", errors="replace")
             elif ext in ("jpg", "jpeg", "png", "webp"):
-                with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
-                    tmp.write(content)
-                    tmp_path = tmp.name
-                try:
-                    import subprocess as sp
-                    ocr_result = sp.run(["tesseract", tmp_path, "stdout", "-l", "eng"],
-                                        capture_output=True, text=True, timeout=60)
-                    text = ocr_result.stdout.strip()
-                    ocr_used = True
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
+                text, ocr_confidence = ocr_image_bytes(content, ext)
+                ocr_used = True
             else:
                 text = content.decode("utf-8", errors="replace")
         except Exception as e:
@@ -3205,6 +3275,7 @@ FULL TEXT:
                 item_id, c.get("citation"), c.get("case_name"), c.get("taxonomy_category")
                 )
 
+    needs_review = ocr_used and (ocr_confidence is not None) and (ocr_confidence < 80)
     async with _db_pool.acquire() as conn:
         await conn.execute("""
             UPDATE zlr_entries SET
@@ -3213,7 +3284,8 @@ FULL TEXT:
                 subject_chains=$9::jsonb, taxonomy_category=$10, summary=$11,
                 raw_text=$12, word_count=$13, chunk_count=$14, ocr_used=$15,
                 jurisdiction=$16, authority_weight=$17,
-                zimlii_url=COALESCE($18, zimlii_url)
+                zimlii_url=COALESCE($18, zimlii_url),
+                ocr_confidence=$21, needs_review=$22
             WHERE id=$19 AND firm_id=$20
         """,
         parsed.get("case_name") or filename,
@@ -3223,8 +3295,10 @@ FULL TEXT:
         subject_chains_json, parsed.get("taxonomy_category", "General"),
         parsed.get("summary"), text, len(text.split()), len(new_chunks), ocr_used,
         jurisdiction, authority_weight, zimlii_url or parsed.get("zimlii_url"),
-        _uuid_mod.UUID(item_id), FIRM_ID
+        _uuid_mod.UUID(item_id), FIRM_ID, ocr_confidence, needs_review
         )
+    if needs_review:
+        print(f"[zlr] ⚠ {filename}: OCR confidence {ocr_confidence}% (below 80%) — flagged for manual review")
 
 @app.post("/api/zlr/upload", status_code=202)
 async def upload_zlr_document(
@@ -3312,7 +3386,7 @@ async def bulk_import_zlr(
         if ext in ("docx", "doc"):
             text = extract_docx_text(content)
         elif ext == "pdf":
-            text, _, _ = extract_pdf_text(content)
+            text, _, _, _ = extract_pdf_text(content)
         elif ext in ("txt",):
             text = content.decode("utf-8", errors="replace")
         else:
@@ -3668,14 +3742,15 @@ async def search_with_document(
     content = await file.read()
     filename = file.filename or "document"
     ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    ocr_confidence = None
 
     try:
         if ext == "pdf":
-            doc_text, _, _ = extract_pdf_text(content)
+            doc_text, _, _, ocr_confidence = extract_pdf_text(content)
         elif ext in ("docx", "doc"):
             doc_text = extract_docx_text(content)
         elif ext in ("jpg", "jpeg", "png", "webp"):
-            doc_text = ocr_image_bytes(content, ext)
+            doc_text, ocr_confidence = ocr_image_bytes(content, ext)
             if not doc_text:
                 raise HTTPException(
                     status_code=422,
@@ -3741,7 +3816,11 @@ async def search_with_document(
     return {
         "answer": answer,
         "results": all_results,
-        "attached_document": {"filename": filename, "truncated": truncated, "char_count": len(doc_text)},
+        "attached_document": {
+            "filename": filename, "truncated": truncated, "char_count": len(doc_text),
+            "ocr_confidence": ocr_confidence,
+            "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
+        },
         **grounding,
     }
 

@@ -1977,6 +1977,7 @@ async function renderMatterPanel(id) {
                 ${d.document_type ? `<span class="chip chip-gray">${d.document_type.replace(/_/g,' ')}</span>` : ''}
                 ${d.doc_date ? `<span class="chip chip-blue">${d.doc_date}</span>` : ''}
                 ${d.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
+                ${d.needs_review ? `<span class="chip chip-red" title="OCR confidence ${d.ocr_confidence}% — verify against the original document">⚠ Low OCR confidence</span>` : ''}
                 <span class="chip ${d.status==='complete'?'chip-green':d.status==='error'?'chip-red':'chip-gold'}">${d.status}</span>
               </div>
             </div>
@@ -2418,7 +2419,9 @@ function renderSearchResults(data, query) {
       ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
       : '';
     const attachedBadge = data.attached_document
-      ? `<div style="margin-bottom:0.5rem;font-size:0.75rem;color:var(--ink3)">📎 Analyzing: <strong>${escHtml(data.attached_document.filename)}</strong>${data.attached_document.truncated ? ' (document was long — analysis based on the first portion)' : ''}</div>`
+      ? `<div style="margin-bottom:0.5rem;font-size:0.75rem;color:var(--ink3)">📎 Analyzing: <strong>${escHtml(data.attached_document.filename)}</strong>${data.attached_document.truncated ? ' (document was long — analysis based on the first portion)' : ''}
+          ${data.attached_document.low_confidence ? `<br><span style="color:#a15c00">⚠ Low OCR confidence (${data.attached_document.ocr_confidence}%) — this photo may have been misread in places (e.g. digits/letters). Verify anything numeric or exact against the original before relying on it.</span>` : ''}
+        </div>`
       : '';
     html += `<div class="ai-answer">
       <div class="ai-answer-label">⚡ AI Analysis</div>
@@ -3087,6 +3090,7 @@ function renderLuItem(item) {
           <span class="chip chip-gray">${escHtml(item.source_name)}</span>
           ${item.doc_date ? `<span class="chip chip-blue">${item.doc_date}</span>` : ''}
           ${item.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
+          ${item.needs_review ? `<span class="chip chip-red" title="OCR confidence ${item.ocr_confidence}% — verify against the original document">⚠ Low OCR confidence</span>` : ''}
           <span class="chip ${item.status==='complete'?'chip-green':item.status==='error'?'chip-red':'chip-gold'}">${item.status}</span>
           ${item.source_url ? `<a href="${escHtml(item.source_url)}" target="_blank" class="chip chip-blue" style="text-decoration:none">View online ↗</a>` : ''}
         </div>
@@ -3597,6 +3601,7 @@ async function renderZlrRecent() {
             ${item.judgment_number && !item.citation ? `<span class="chip chip-gray">${escHtml(item.judgment_number)}</span>` : ''}
             ${item.taxonomy_category ? `<span class="chip chip-blue">${escHtml(item.taxonomy_category)}</span>` : ''}
             <span class="chip ${weightColor}">${weightBadge} ${escHtml(item.authority_weight || item.jurisdiction || item.source)}</span>
+            ${item.needs_review ? `<span class="chip chip-red" title="OCR confidence ${item.ocr_confidence}% — verify against the original document">⚠ Low OCR confidence</span>` : ''}
           </div>
           ${item.summary ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:3px;font-style:italic">${escHtml(item.summary.slice(0,120))}…</div>` : ''}
           ${item.zimlii_url ? `<a href="${escHtml(item.zimlii_url)}" target="_blank" style="font-size:0.7rem;color:var(--green)">View online ↗</a>` : ''}
