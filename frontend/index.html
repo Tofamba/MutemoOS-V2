@@ -478,8 +478,8 @@ select{cursor:pointer}
         </div>
       </div>
       <div class="form-group" style="margin-bottom:0.75rem">
-        <label style="font-size:0.8rem;color:var(--ink3)">Attach a document (optional) — get an opinion grounded in the document itself, e.g. "Is this lease agreement proper?"</label>
-        <input type="file" id="search-attach-file" accept=".pdf,.docx,.doc,.txt" onchange="updateSearchAttachLabel()"/>
+        <label style="font-size:0.8rem;color:var(--ink3)">Attach a document (optional) — get an opinion grounded in the document itself, e.g. "Is this lease agreement proper?" A clear phone photo of a paper document works too.</label>
+        <input type="file" id="search-attach-file" accept=".pdf,.docx,.doc,.txt,.jpg,.jpeg,.png,.webp" onchange="updateSearchAttachLabel()"/>
         <div id="search-attach-label" style="font-size:0.75rem;color:var(--ink3);margin-top:2px"></div>
       </div>
       <button class="btn btn-primary" onclick="doSearch()" id="search-btn" style="margin-top:0">
@@ -2408,22 +2408,24 @@ function renderSearchResults(data, query) {
 
   if (data.answer) {
     const sufficient = data.sources_sufficient !== false;
-    const groundingBadge = !sufficient
-      ? `<div style="margin-top:0.5rem;padding:0.4rem 0.6rem;background:#fff8e6;border:1px solid #e8c050;border-radius:4px;font-size:0.75rem;color:#7a6000">
-          ⚠ <strong>Partial sources</strong> — ${escHtml(data.grounding_note || 'Some claims are general principles not verified from retrieved sources.')}
-          ${data.source_gap ? `<br><em>Missing: ${escHtml(data.source_gap)}</em>` : ''}
+    const topWarning = !sufficient
+      ? `<div style="margin-bottom:0.6rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600">
+          ⚠️ <strong>NO FIRM PRECEDENTS OR LEGAL SOURCES FOUND</strong><br>
+          ${escHtml(data.grounding_note || 'This analysis is based on general legal knowledge only, not verified against firm records or Zimbabwean case law/legislation.')}
          </div>`
-      : (data.grounding_note
-          ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
-          : '');
+      : '';
+    const bottomNote = sufficient && data.grounding_note
+      ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
+      : '';
     const attachedBadge = data.attached_document
       ? `<div style="margin-bottom:0.5rem;font-size:0.75rem;color:var(--ink3)">📎 Analyzing: <strong>${escHtml(data.attached_document.filename)}</strong>${data.attached_document.truncated ? ' (document was long — analysis based on the first portion)' : ''}</div>`
       : '';
     html += `<div class="ai-answer">
       <div class="ai-answer-label">⚡ AI Analysis</div>
       ${attachedBadge}
+      ${topWarning}
       <div class="ai-answer-text">${escHtml(data.answer)}</div>
-      ${groundingBadge}
+      ${bottomNote}
     </div>`;
   }
 

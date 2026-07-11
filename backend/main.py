@@ -2669,6 +2669,31 @@ def extract_xlsx_text(content: bytes):
         print(f"[extract_xlsx_text] failed: {e}")
         return ""
 
+def ocr_image_bytes(content: bytes, ext: str) -> str:
+    """
+    OCR a photographed document (jpg/png/webp/etc). Same tesseract-based
+    approach already used for ZLR image uploads — factored out here so the
+    Search Vault document-upload feature can use it too. Real-world use in a
+    Zimbabwean practice means people will very often attach a phone photo
+    of a paper document, not a clean PDF/docx — without this, those uploads
+    silently produce garbage text (a raw UTF-8 decode of binary image bytes)
+    instead of an actual error or actual content.
+    """
+    import shutil
+    import subprocess as sp
+    if not shutil.which("tesseract"):
+        return ""
+    with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        ocr_result = sp.run(["tesseract", tmp_path, "stdout", "-l", "eng"],
+                            capture_output=True, text=True, timeout=60, check=False)
+        return ocr_result.stdout.strip()
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
 def extract_docx_text(content: bytes):
     if content[:4] == b'\xd0\xcf\x11\xe0':
         try:
@@ -3460,6 +3485,36 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
+def compute_grounding(results: list, legal_results: list, zlr_results: list,
+                       has_attached_doc: bool = False) -> dict:
+    """
+    Determine whether an AI answer is actually grounded in retrieved firm/
+    legal/case-law sources, or is unsupported general reasoning — and say so
+    explicitly. This was previously dead code: the frontend has had a
+    warning UI for this since it was built, but no backend endpoint ever
+    populated sources_sufficient/grounding_note/source_gap, so a
+    zero-source answer looked identical to a well-grounded one. For a legal
+    tool, that's a real risk — confident-sounding output with nothing behind
+    it needs to be unmistakable, not indistinguishable from a verified one.
+    """
+    total = len(results) + len(legal_results) + len(zlr_results)
+    if total == 0:
+        if has_attached_doc:
+            note = ("No firm precedents or case law were found to cross-reference this "
+                    "document. This analysis is based on the document's own content and "
+                    "general legal principles only — verify against ZimLII, applicable "
+                    "legislation, and firm records before relying on it.")
+        else:
+            note = ("No firm precedents, legal updates, or case law matched this query. "
+                    "This analysis reflects general legal knowledge only — verify against "
+                    "ZimLII, applicable legislation, and firm records before relying on it.")
+        return {"sources_sufficient": False, "grounding_note": note, "source_gap": "No matching sources in the vault"}
+    return {
+        "sources_sufficient": True,
+        "grounding_note": f"Grounded in {total} retrieved source(s) from the vault.",
+        "source_gap": None,
+    }
+
 @app.post("/api/search")
 async def search_documents(req: SearchRequest, request: Request):
     user = await get_current_user(request)
@@ -3507,7 +3562,8 @@ async def search_documents(req: SearchRequest, request: Request):
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
     answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3])
-    return {"answer": answer, "results": all_results}
+    grounding = compute_grounding(results, legal_results, zlr_results)
+    return {"answer": answer, "results": all_results, **grounding}
 
 # Cap on attached-document text sent to the model — generous enough for a
 # full lease agreement, contract, or affidavit (roughly 40k chars is well
@@ -3545,8 +3601,18 @@ async def search_with_document(
             doc_text, _, _ = extract_pdf_text(content)
         elif ext in ("docx", "doc"):
             doc_text = extract_docx_text(content)
+        elif ext in ("jpg", "jpeg", "png", "webp"):
+            doc_text = ocr_image_bytes(content, ext)
+            if not doc_text:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Could not read text from this image. Make sure the photo is clear, "
+                           "well-lit, and the document fills most of the frame."
+                )
         else:
             doc_text = content.decode("utf-8", errors="replace")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Could not read document: {e}")
 
@@ -3597,11 +3663,13 @@ async def search_with_document(
     answer = await asyncio.to_thread(
         synthesise_answer_sync, query, results[:5], legal_results[:3], doc_text, filename
     )
+    grounding = compute_grounding(results, legal_results, zlr_results, has_attached_doc=True)
 
     return {
         "answer": answer,
         "results": all_results,
         "attached_document": {"filename": filename, "truncated": truncated, "char_count": len(doc_text)},
+        **grounding,
     }
 
 def _semantic_search_firm(req, chunks: list) -> list:
