@@ -1619,6 +1619,16 @@ class AffidavitRequest(BaseModel):
     relief: Optional[str] = None
     precedent_context: Optional[dict] = None
 
+class DocumentRequest(BaseModel):
+    doc_type: str
+    plaintiff: Optional[str] = None
+    defendant: Optional[str] = None
+    court: Optional[str] = None
+    case_number: Optional[str] = None
+    facts: str
+    instructions: Optional[str] = None
+    precedent_context: Optional[dict] = None
+
 class SearchRequest(BaseModel):
     query: str
     matter_type: Optional[str] = None
@@ -3993,6 +4003,168 @@ Draft affidavits in proper Zimbabwe High Court form per SI 202/2021.
 - Commissioner of oaths block at end
 - Use [_____] for unknown specifics"""
 
+DOCUMENT_SYSTEM_BASE = """You are a legal drafting assistant for {FIRM_NAME}, Harare, drafting for the
+Zimbabwean legal system. Produce a complete, properly formatted document —
+not a template or outline. Use [_____] for any specific detail (dates,
+amounts, ID numbers) not supplied. Number paragraphs/clauses where that is
+standard practice for this document type. Do not add commentary before or
+after the document itself — output the document only."""
+
+# Per-type drafting guidance — the specifics that make a Zimbabwean legal
+# document actually usable rather than a generic template. Litigation types
+# get a full court caption; everything else gets letterhead-style framing.
+DOC_TYPE_GUIDANCE = {
+    "summons_matrimonial": """MATRIMONIAL SUMMONS (High Court, Matrimonial Causes Act [Chapter 5:13]):
+- Full caption: court, case number, Plaintiff/Defendant designations
+- Summons proper: command to enter appearance to defend within the prescribed period
+- Declaration: marriage particulars (date, place, type — civil/customary), breakdown allegation,
+  children of the marriage (names, ages, custody sought), matrimonial property, maintenance claim
+- Prayer: decree of divorce, custody, maintenance, property distribution, costs
+- Certificate/notice of appearance to defend format if applicable""",
+
+    "summons_civil": """CIVIL SUMMONS (High Court Rules, 2021):
+- Full caption: court, case number, Plaintiff/Defendant designations
+- Summons proper: command to enter appearance to defend within the prescribed period
+- Declaration: numbered paragraphs — jurisdiction, cause of action (contract/delict), material facts,
+  quantum/damages claimed with basis for calculation
+- Prayer: relief sought, interest, costs on the scale claimed""",
+
+    "court_application": """COURT APPLICATION (Notice of Motion + Draft Order, High Court Rules 2021):
+- Notice of Motion: caption, "TAKE NOTICE THAT" formula, relief sought, respondent's right to oppose
+  and time period, address for service
+- Draft Order: precise operative wording of the order sought, ready for a judge to grant as-is
+- Founding affidavit reference (draft the Notice of Motion and Draft Order; note that a founding
+  affidavit should accompany this but is a separate document)""",
+
+    "urgent_chamber": """URGENT CHAMBER APPLICATION (High Court Rules 2021, r59):
+- Certificate of Urgency: legal practitioner's certificate stating why the matter cannot wait
+  for the ordinary roll, irreparable harm if not heard urgently
+- Notice of Motion (urgent form): caption, relief sought, interim relief pending return date
+- Draft Order: interim relief + return date + final relief sought on return date
+- Emphasise the urgency test (self-created urgency must be addressed if relevant)""",
+
+    "notice_of_appeal": """NOTICE OF APPEAL (High Court/Supreme Court, Rules of the relevant court):
+- Caption showing court a quo, case number below, and the appellate court above
+- Grounds of appeal: numbered, each ground a distinct, specific error of law or fact
+  (avoid vague/generic grounds — Zimbabwean appellate courts require specificity)
+- Relief sought on appeal
+- Notice of set down / heads of argument filing timeline reference where relevant""",
+
+    "letter_of_demand": """LETTER OF DEMAND (formal pre-litigation demand):
+- Firm letterhead style (no court caption) — addressed directly to the debtor/wrongdoer
+- Clear statement of the claim/breach and its factual basis
+- Precise amount demanded (or specific performance required) with basis for the figure
+- Firm deadline for compliance (state exact date, not just "within X days")
+- Clear statement of consequences of non-compliance (legal proceedings, interest, costs)
+- Professional but firm tone — this is often the last step before litigation""",
+
+    "review": """APPLICATION FOR REVIEW (High Court Rules 2021, judicial review grounds):
+- Notice of Motion + Draft Order in review form
+- Grounds of review: gross irregularity, failure to apply mind, procedural unfairness,
+  irrationality/unreasonableness, ultra vires — be specific about which ground(s) apply and why
+- Relief: setting aside the decision, remittal for fresh determination, costs
+- Distinguish clearly from an appeal (review concerns the process, not the merits)""",
+
+    "heads_of_argument": """HEADS OF ARGUMENT (structured legal submission):
+- Introduction: brief statement of the issue(s) before the court
+- Factual background: concise, only facts relevant to the legal argument
+- Issues for determination: numbered
+- Argument: structured by issue, statutory/case authority cited for each proposition,
+  applied to the facts of this matter, addressing the strongest counter-argument
+- Conclusion and relief sought""",
+
+    "legal_opinion": """LEGAL OPINION (formal written opinion for a client):
+- Addressed to the client, headed "RE: [matter]" with a clear scope-of-opinion statement
+- Executive summary / short answer up front
+- Factual background as instructed
+- Legal analysis: statutory and case law basis, applied to these specific facts,
+  including genuine risks/uncertainties — do not overstate certainty
+- Conclusion and recommended course of action
+- Standard opinion caveats (based on facts as instructed, subject to further information)""",
+
+    "client_letter": """CLIENT LETTER (formal correspondence):
+- Firm letterhead style, clear subject line
+- Plain-language explanation (client may not be legally trained) while remaining precise
+- Clear statement of purpose, next steps, and any action required of the client with a deadline
+- Professional, warm but not informal tone""",
+
+    "agreement": """AGREEMENT / CONTRACT (general commercial agreement):
+- Parties clause with full legal names and addresses/registration details
+- Recitals (background/purpose)
+- Definitions clause for defined terms used throughout
+- Operative clauses: obligations of each party, payment terms, duration/termination,
+  breach and remedies, dispute resolution, governing law (Zimbabwe)
+- Signature blocks for all parties, witnesses if required""",
+
+    "joint_venture": """JOINT VENTURE / SHAREHOLDERS AGREEMENT (Companies and Other Business Entities Act [Chapter 24:31]):
+- Parties and recitals (purpose of the joint venture)
+- Shareholding structure, capital contributions, valuation basis
+- Governance: board composition, reserved matters requiring unanimous/special consent,
+  deadlock resolution mechanism
+- Transfer restrictions (pre-emption rights, tag-along/drag-along if relevant)
+- Exit mechanisms, dispute resolution, governing law""",
+
+    "agreement_of_sale": """AGREEMENT OF SALE — IMMOVEABLE PROPERTY (Deeds Registries Act [Chapter 20:05]):
+- Full description of the property matching the title deed (stand number, township, registration
+  details) — flag clearly that this must be verified against the actual title deed
+- Purchase price, payment terms (deposit, balance, timing)
+- Conditions precedent (bond approval, subdivision consent, etc. if relevant)
+- Transfer obligations: who bears transfer costs, rates clearance, timeline to transfer
+- Occupation/possession date, risk and benefit passing, breach and cancellation clauses""",
+
+    "acknowledgement_of_debt": """ACKNOWLEDGEMENT OF DEBT (liquid document, consent to judgment):
+- Clear acknowledgement of the specific amount owed and its basis
+- Repayment terms (schedule or lump sum, interest rate if applicable)
+- Consent to judgment clause (if instructed) — acceleration on default
+- Security/surety details if applicable
+- Signature by debtor, ideally with a competent witness — note this document's evidentiary
+  value depends on proper execution""",
+
+    "power_of_attorney_transfer": """POWER OF ATTORNEY TO PASS TRANSFER (Deeds Registries Act [Chapter 20:05], conveyancing):
+- Principal's full details, clear appointment of the conveyancer/attorney
+- Specific property description matching the title deed
+- Precise scope of authority (to sign all documents necessary to pass transfer of the specific
+  property to the specific purchaser)
+- Note this must be executed per Deeds Registry formalities (commissioning requirements)""",
+
+    "declaration_transferor": """DECLARATION BY TRANSFEROR (Deeds Registry seller's declaration):
+- Transferor's confirmation of the sale, property details matching title deed
+- Standard declarations required by the Deeds Registry: no other unregistered sale/prior
+  disposal, marital status and consent of spouse where relevant, citizenship/status declarations
+- Signature and commissioning block per Deeds Registry practice""",
+
+    "declaration_transferee": """DECLARATION BY TRANSFEREE (Deeds Registry buyer's declaration):
+- Transferee's confirmation of the purchase, property details matching title deed
+- Standard declarations: citizenship/residency status (relevant to land acquisition rules),
+  marital status, source of funds where applicable
+- Signature and commissioning block per Deeds Registry practice""",
+
+    "special_power_of_attorney": """SPECIAL POWER OF ATTORNEY (limited, transaction-specific):
+- Principal's details, clear and narrow statement of the specific act(s) authorised
+  (avoid broad/general authority language — specificity is the point of a "special" POA)
+- Explicit limitation to the named transaction/purpose only
+- Duration/expiry if applicable, revocation clause
+- Signature and commissioning block""",
+
+    "sale_of_business": """SALE OF BUSINESS AGREEMENT (going concern — assets, goodwill, employees):
+- Parties and description of the business being sold (as a going concern)
+- Assets included/excluded, goodwill, stock valuation basis
+- Employees: transfer of employment terms, any retrenchment provisions
+- Purchase price, payment/completion mechanics, warranties (title, no undisclosed liabilities)
+- Restraint of trade clause (reasonable in scope, area, and duration to be enforceable)""",
+
+    "memorandum_of_understanding": """MEMORANDUM OF UNDERSTANDING (pre-agreement):
+- Parties and purpose/intent of the arrangement
+- Clear statement of whether this MOU is binding or non-binding (state explicitly — this is
+  the single most important clause in an MOU and ambiguity here causes real disputes)
+- Key terms contemplated for the eventual full agreement
+- Exclusivity/confidentiality during the MOU period if relevant, term and termination""",
+
+    "freeform": """Draft the document based entirely on the facts and instructions provided. Infer the
+appropriate structure and formality from context. If the document type is ambiguous,
+choose the most standard Zimbabwean legal form that fits the stated purpose.""",
+}
+
 @app.post("/api/generate-affidavit")
 async def generate_affidavit(req: AffidavitRequest, request: Request):
     user = await get_current_user(request)
@@ -4028,6 +4200,103 @@ Draft the complete affidavit in proper Zimbabwe High Court form. Number all para
         return {"affidavit": msg.content[0].text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Affidavit generation failed: {e}")
+
+# Mirrors the frontend's DOC_TYPE_LABELS exactly — used to give the model a
+# readable document-type name in the prompt rather than the raw type key.
+DOC_TYPE_LABELS_BACKEND = {
+    "summons_matrimonial": "Matrimonial Summons",
+    "summons_civil": "Civil Summons",
+    "court_application": "Court Application (Notice of Motion & Draft Order)",
+    "urgent_chamber": "Urgent Chamber Application",
+    "notice_of_appeal": "Notice of Appeal",
+    "letter_of_demand": "Letter of Demand",
+    "review": "Application for Review",
+    "heads_of_argument": "Heads of Argument",
+    "legal_opinion": "Legal Opinion",
+    "client_letter": "Client Letter",
+    "agreement": "Agreement / Contract",
+    "joint_venture": "Joint Venture / Shareholders Agreement",
+    "agreement_of_sale": "Agreement of Sale (Immoveable Property)",
+    "acknowledgement_of_debt": "Acknowledgement of Debt",
+    "power_of_attorney_transfer": "Power of Attorney to Pass Transfer",
+    "declaration_transferor": "Declaration by Transferor",
+    "declaration_transferee": "Declaration by Transferee",
+    "special_power_of_attorney": "Special Power of Attorney",
+    "sale_of_business": "Sale of Business Agreement",
+    "memorandum_of_understanding": "Memorandum of Understanding",
+    "freeform": "legal document",
+}
+
+LITIGATION_DOC_TYPES = {
+    "summons_matrimonial", "summons_civil", "court_application",
+    "urgent_chamber", "notice_of_appeal", "review", "heads_of_argument",
+}
+
+@app.post("/api/generate-document")
+async def generate_document(req: DocumentRequest, request: Request):
+    """
+    General-purpose drafting endpoint backing the "Draft Document" feature —
+    covers 20 document types (litigation, conveyancing, commercial
+    agreements, correspondence) via a shared prompt structure with
+    per-type guidance, the same pattern as generate_affidavit but
+    generalized. This endpoint didn't exist at all until now — the
+    frontend's full Draft Document workflow (type picker, form, editor,
+    docx export) was built and wired up, but every submission would have
+    404'd.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+
+    guidance = DOC_TYPE_GUIDANCE.get(req.doc_type, DOC_TYPE_GUIDANCE["freeform"])
+    is_litigation = req.doc_type in LITIGATION_DOC_TYPES
+
+    precedent_block = ""
+    if req.precedent_context:
+        fname = req.precedent_context.get("filename", "precedent")
+        mname = req.precedent_context.get("matter_name", "")
+        text = str(req.precedent_context.get("text", ""))[:4000]
+        precedent_block = (
+            f"\n\nFIRM PRECEDENT ({fname} \u2014 {mname}) \u2014 match this document's language, "
+            f"structure, and drafting style where appropriate:\n---\n{text}\n---"
+        )
+
+    party_block = ""
+    if is_litigation:
+        party_block = f"""Court: {req.court or 'High Court of Zimbabwe'}
+Case/Matter Number: {req.case_number or '[CASE NUMBER]'}
+Plaintiff/Applicant: {req.plaintiff or '[PLAINTIFF/APPLICANT]'}
+Defendant/Respondent: {req.defendant or '[DEFENDANT/RESPONDENT]'}"""
+    else:
+        party_block = f"""First Party: {req.plaintiff or '[FIRST PARTY]'}
+Second Party: {req.defendant or '[SECOND PARTY]'}"""
+        if req.case_number:
+            party_block += f"\nReference/Matter Number: {req.case_number}"
+
+    prompt = f"""Draft a {DOC_TYPE_LABELS_BACKEND.get(req.doc_type, 'legal document')}.
+
+{party_block}
+
+Facts and background:
+{req.facts}
+
+{f"Additional instructions: {req.instructions}" if req.instructions else ""}
+{precedent_block}
+
+DOCUMENT-SPECIFIC REQUIREMENTS:
+{guidance}
+
+Draft the complete document now."""
+
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            system=DOCUMENT_SYSTEM_BASE.format(FIRM_NAME=FIRM_NAME),
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return {"document": msg.content[0].text, "doc_type": req.doc_type}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Document generation failed: {e}")
 
 # ── DOCX Export ───────────────────────────────────────────────────────────────
 
@@ -5340,6 +5609,42 @@ async def get_document_status(doc_id: str, request: Request):
     d["id"] = str(d["id"])
     return d
 
+
+@app.get("/api/documents/{doc_id}/text")
+async def get_document_text(doc_id: str, request: Request):
+    """
+    Returns the actual stored text of a document, reconstructed from its
+    chunks — used for loading a real precedent into the Draft Document
+    feature. Previously the frontend only had a metadata placeholder
+    ("Document from matter: X. Type: Y.") with no real content at all,
+    which defeated the point of "precedent-aware" drafting.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    async with _db_pool.acquire() as conn:
+        doc_row = await conn.fetchrow(
+            "SELECT filename FROM documents WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(doc_id), FIRM_ID
+        )
+        if not doc_row:
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunk_rows = await conn.fetch(
+            "SELECT text FROM chunks WHERE document_id=$1 AND chunk_source='firm' ORDER BY chunk_index",
+            _uuid_mod.UUID(doc_id)
+        )
+    if not chunk_rows:
+        raise HTTPException(status_code=404, detail="No indexed text available for this document.")
+    full_text = "\n\n".join(r["text"] for r in chunk_rows)
+    # Cap at a reasonable length for prompt context — long enough to capture
+    # real structure/language/clauses, short enough to not blow out the
+    # drafting prompt alongside facts/instructions.
+    MAX_PRECEDENT_CHARS = 4000
+    truncated = len(full_text) > MAX_PRECEDENT_CHARS
+    return {
+        "filename": doc_row["filename"],
+        "text": full_text[:MAX_PRECEDENT_CHARS],
+        "truncated": truncated,
+    }
 
 @app.get("/api/documents/{doc_id}/view-url")
 async def get_document_view_url(doc_id: str, request: Request):

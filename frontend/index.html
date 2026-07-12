@@ -3384,8 +3384,25 @@ async function loadDraftPrecedent() {
     if (!docs.length) return;
     const first = docs[0];
     const matter = matters.find(m => m.id === matterId);
+
+    // Load the document's actual stored text (reconstructed from its
+    // indexed chunks) rather than just a metadata description — a
+    // "precedent" with no real content to match language/style/structure
+    // against isn't actually useful to the drafting prompt.
+    let precedentText = `Document from matter: ${matter?.name || ''}. Type: ${first.document_type || 'document'}. Parties: ${first.parties || 'unknown'}.`;
+    try {
+      const textRes = await fetch(`${API}/api/documents/${first.id}/text`);
+      if (textRes.ok) {
+        const textData = await textRes.json();
+        precedentText = textData.text;
+      }
+    } catch(e) {
+      // Fall back to the metadata placeholder if real text isn't available
+      // (e.g. document predates indexing) — still better than failing outright.
+    }
+
     draftPrecedentContext = {
-      text: `Document from matter: ${matter?.name || ''}. Type: ${first.document_type || 'document'}. Parties: ${first.parties || 'unknown'}.`,
+      text: precedentText,
       filename: first.filename,
       matter_name: matter?.name || '',
     };
