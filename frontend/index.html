@@ -879,6 +879,43 @@ select{cursor:pointer}
           <div class="tip">Reminders cover events in the next 7 days, with anything today or tomorrow highlighted first. An .ics calendar file is attached so you can add events to your phone with one tap.</div>
         </div>
       </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon">📰</div>
+          <div><div class="card-title">Daily Vault Digest</div><div class="card-desc">Summary of new news, legislation &amp; judgments added each day</div></div>
+        </div>
+        <div class="card-body">
+          <div id="digest-status" class="status"></div>
+          <div class="form-group">
+            <label>Recipient Email</label>
+            <input type="email" id="digest-email" placeholder="e.g. a separate inbox for legal updates"/>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Send Time</label>
+              <select id="digest-hour">
+                <option value="5">7:00 AM (CAT)</option>
+                <option value="6" selected>8:00 AM (CAT)</option>
+                <option value="7">9:00 AM (CAT)</option>
+                <option value="8">10:00 AM (CAT)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Enabled</label>
+              <select id="digest-enabled">
+                <option value="false">Off</option>
+                <option value="true">On — daily digest</option>
+              </select>
+            </div>
+          </div>
+          <div class="actions-row" style="margin-top:0.25rem">
+            <button class="btn btn-primary" onclick="saveDigestSettings()" style="margin-top:0">💾 Save Settings</button>
+            <button class="btn btn-outline" onclick="sendTestDigest()">✉ Send Test Email</button>
+          </div>
+          <div class="tip">Covers news, new legislation, and new judgments added since the last digest. The default send time (8:00 AM CAT) is set to run after that morning's scraping is done, so it's a complete same-day summary. Sent Mon–Fri only.</div>
+        </div>
+      </div>
     </div>
 
     <div>
@@ -1743,7 +1780,7 @@ function showTab(tab) {
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
   if (tab === 'matters') renderMattersList();
-  if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); }
+  if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'draft') populateDraftPrecedentSelect();
@@ -3001,6 +3038,73 @@ async function sendTestReminder() {
 
 function showReminderStatus(msg, type) {
   const el = document.getElementById('reminder-status');
+  el.innerHTML = msg;
+  el.className = `status show ${type}`;
+  if (type === 'success') setTimeout(() => el.classList.remove('show'), 5000);
+}
+
+// ── Daily Vault Digest ───────────────────────────────────────────────────────
+async function loadDigestSettings() {
+  try {
+    const res = await fetch(`${API}/api/digest/settings`);
+    const s = await res.json();
+    document.getElementById('digest-email').value = s.recipient_email || '';
+    document.getElementById('digest-hour').value = String(s.send_hour_utc ?? 6);
+    document.getElementById('digest-enabled').value = s.enabled ? 'true' : 'false';
+  } catch(e) {}
+}
+
+async function saveDigestSettings() {
+  const email = document.getElementById('digest-email').value.trim();
+  const enabled = document.getElementById('digest-enabled').value === 'true';
+  const hour = parseInt(document.getElementById('digest-hour').value, 10);
+
+  if (enabled && !email) {
+    showDigestStatus('Enter a recipient email to enable the digest.', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API}/api/digest/settings`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ enabled, recipient_email: email || 'none@none.com', send_hour_utc: hour })
+    });
+    if (!res.ok) throw new Error('Failed to save');
+    showDigestStatus('✓ Digest settings saved.', 'success');
+  } catch(e) {
+    showDigestStatus('Could not save settings.', 'error');
+  }
+}
+
+async function sendTestDigest() {
+  const email = document.getElementById('digest-email').value.trim();
+  if (!email) { showDigestStatus('Enter and save a recipient email first.', 'error'); return; }
+
+  showDigestStatus('<span class="spinner"></span> Sending test email…', 'loading');
+  try {
+    // Save first so the test goes to the right address
+    await fetch(`${API}/api/digest/settings`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        enabled: document.getElementById('digest-enabled').value === 'true',
+        recipient_email: email,
+        send_hour_utc: parseInt(document.getElementById('digest-hour').value, 10),
+      })
+    });
+
+    const res = await fetch(`${API}/api/digest/test`, {method:'POST'});
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed'); }
+    const data = await res.json();
+    showDigestStatus(`✓ Test email sent to ${email} (${data.items_included} item${data.items_included!==1?'s':''} from the last 24h).`, 'success');
+  } catch(e) {
+    showDigestStatus(`Could not send: ${e.message}`, 'error');
+  }
+}
+
+function showDigestStatus(msg, type) {
+  const el = document.getElementById('digest-status');
   el.innerHTML = msg;
   el.className = `status show ${type}`;
   if (type === 'success') setTimeout(() => el.classList.remove('show'), 5000);

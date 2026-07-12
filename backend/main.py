@@ -298,8 +298,16 @@ async def run_migrations():
             enabled             BOOLEAN NOT NULL DEFAULT FALSE,
             recipient_email     TEXT,
             send_hour_utc       INT NOT NULL DEFAULT 5,
-            last_run_date       DATE
+            last_run_date       DATE,
+            digest_enabled          BOOLEAN NOT NULL DEFAULT FALSE,
+            digest_recipient_email  TEXT,
+            digest_send_hour_utc    INT NOT NULL DEFAULT 6,
+            digest_last_run_date    DATE
         );
+        ALTER TABLE reminder_settings ADD COLUMN IF NOT EXISTS digest_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE reminder_settings ADD COLUMN IF NOT EXISTS digest_recipient_email TEXT;
+        ALTER TABLE reminder_settings ADD COLUMN IF NOT EXISTS digest_send_hour_utc INT NOT NULL DEFAULT 6;
+        ALTER TABLE reminder_settings ADD COLUMN IF NOT EXISTS digest_last_run_date DATE;
 
         CREATE TABLE IF NOT EXISTS chunks (
             id              TEXT PRIMARY KEY,
@@ -1662,6 +1670,11 @@ class ReminderSettings(BaseModel):
     enabled: bool
     recipient_email: str
     send_hour_utc: int = 5
+
+class DigestSettings(BaseModel):
+    enabled: bool
+    recipient_email: str
+    send_hour_utc: int = 6
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
@@ -4970,6 +4983,75 @@ async def update_reminder_settings(settings: ReminderSettings, request: Request)
         """, FIRM_ID, settings.enabled, settings.recipient_email, settings.send_hour_utc)
     return {"saved": True}
 
+@app.get("/api/digest/settings")
+async def get_digest_settings(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "admin:settings")
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
+    if not row:
+        return {"enabled": False, "recipient_email": "", "send_hour_utc": 6}
+    return {
+        "enabled": row["digest_enabled"],
+        "recipient_email": row["digest_recipient_email"] or "",
+        "send_hour_utc": row["digest_send_hour_utc"],
+        "last_run_date": str(row["digest_last_run_date"]) if row["digest_last_run_date"] else None,
+    }
+
+@app.post("/api/digest/settings")
+async def update_digest_settings(settings: DigestSettings, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "admin:settings")
+    async with _db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO reminder_settings (firm_id, digest_enabled, digest_recipient_email, digest_send_hour_utc)
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT (firm_id) DO UPDATE SET
+                digest_enabled=$2, digest_recipient_email=$3, digest_send_hour_utc=$4
+        """, FIRM_ID, settings.enabled, settings.recipient_email, settings.send_hour_utc)
+    return {"saved": True}
+
+@app.post("/api/digest/test")
+async def test_digest(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "admin:settings")
+    if not is_email_configured():
+        raise HTTPException(status_code=503, detail="Email is not configured on this server.")
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
+    if not row or not row["digest_recipient_email"]:
+        raise HTTPException(status_code=400, detail="No digest recipient email configured.")
+
+    since = datetime.utcnow() - timedelta(hours=24)
+    async with _db_pool.acquire() as conn:
+        news_rows = await conn.fetch(
+            "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='news' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+            FIRM_ID, since
+        )
+        legislation_rows = await conn.fetch(
+            "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='legislation' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+            FIRM_ID, since
+        )
+        judgment_rows = await conn.fetch(
+            "SELECT * FROM zlr_entries WHERE firm_id=$1 AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+            FIRM_ID, since
+        )
+    news_items = [dict(r) for r in news_rows]
+    legislation_items = [dict(r) for r in legislation_rows]
+    judgment_items = [dict(r) for r in judgment_rows]
+
+    text_body, html_body = build_digest_email_body(news_items, legislation_items, judgment_items)
+    text_body = "[TEST EMAIL]\n\n" + text_body
+    html_body = '<p style="background:#fdf6e8;padding:8px;border-radius:4px;font-size:13px"><strong>This is a test email.</strong></p>' + html_body
+    total = len(news_items) + len(legislation_items) + len(judgment_items)
+    subject = f"[TEST] \u2696 Mutemo Desk \u2014 Daily vault digest ({total} item{'s' if total != 1 else ''})"
+
+    try:
+        await asyncio.to_thread(_send_via_resend_sync, row["digest_recipient_email"], subject, html_body, text_body)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to send: {e}")
+    return {"sent": True, "recipient": row["digest_recipient_email"], "items_included": total}
+
 @app.post("/api/reminders/test")
 async def test_reminder(request: Request):
     user = await get_current_user(request)
@@ -5009,6 +5091,126 @@ async def test_reminder(request: Request):
 
 # ── Reminder Scheduler ────────────────────────────────────────────────────────
 
+def build_digest_email_body(news_items: list, legislation_items: list, judgment_items: list) -> tuple:
+    """Returns (plain_text_body, html_body) for the daily legal-updates digest."""
+    total = len(news_items) + len(legislation_items) + len(judgment_items)
+    if total == 0:
+        text = "Good morning. No new news, legislation, or judgments were added in yesterday's scrape.\n\n\u2014 Mutemo Desk"
+        html = "<p>Good morning. No new news, legislation, or judgments were added in yesterday's scrape.</p><p style='color:#6b6b64'>\u2014 Mutemo Desk</p>"
+        return text, html
+
+    text_lines = [f"Good morning. Here's what was added to the vault today ({total} item(s)):\n"]
+    html_parts = ["<p>Good morning. Here's what was added to the vault today:</p>"]
+
+    def section(label: str, items: list, fmt_text_fn, fmt_html_fn):
+        if not items:
+            return
+        text_lines.append(f"{label.upper()}:")
+        for it in items:
+            text_lines.append(f"  \u2022 {fmt_text_fn(it)}")
+        text_lines.append("")
+        html_parts.append(f"<p style='font-weight:600;margin-bottom:4px'>{label}</p><ul style='margin-top:0'>")
+        for it in items:
+            html_parts.append(f"<li>{fmt_html_fn(it)}</li>")
+        html_parts.append("</ul>")
+
+    section(
+        "\U0001F4F0 News", news_items,
+        lambda it: f"{it.get('reference') or it.get('filename', 'Untitled')} \u2014 {it.get('source_url', '')}",
+        lambda it: (
+            f'<a href="{_escape_html(it.get("source_url",""))}" target="_blank">'
+            f'{_escape_html(it.get("reference") or it.get("filename","Untitled"))}</a>'
+            if it.get("source_url") else _escape_html(it.get("reference") or it.get("filename", "Untitled"))
+        ),
+    )
+    section(
+        "\U0001F4DC New Legislation", legislation_items,
+        lambda it: f"{it.get('reference') or it.get('filename', 'Untitled')} \u2014 {it.get('source_url', '')}",
+        lambda it: (
+            f'<a href="{_escape_html(it.get("source_url",""))}" target="_blank">'
+            f'{_escape_html(it.get("reference") or it.get("filename","Untitled"))}</a>'
+            if it.get("source_url") else _escape_html(it.get("reference") or it.get("filename", "Untitled"))
+        ),
+    )
+    section(
+        "\u2696 New Judgments", judgment_items,
+        lambda it: f"{it.get('case_name') or it.get('filename', 'Untitled')} ({it.get('citation','')}) \u2014 {it.get('zimlii_url', '')}",
+        lambda it: (
+            f'<a href="{_escape_html(it.get("zimlii_url",""))}" target="_blank">'
+            f'{_escape_html(it.get("case_name") or it.get("filename","Untitled"))}</a> '
+            f'({_escape_html(it.get("citation",""))})'
+            if it.get("zimlii_url") else
+            f'{_escape_html(it.get("case_name") or it.get("filename","Untitled"))} ({_escape_html(it.get("citation",""))})'
+        ),
+    )
+
+    text_lines.append("\u2014 Mutemo Desk")
+    html_parts.append("<p style='color:#6b6b64'>\u2014 Mutemo Desk</p>")
+    return "\n".join(text_lines), "".join(html_parts)
+
+
+async def _maybe_send_digest():
+    """
+    Daily digest of new news/legislation/judgments — mirrors _maybe_send_reminder's
+    pattern exactly. Default send hour (6 UTC) sits after ZimLII (04:00),
+    Veritas (04:30), and News (05:30) all complete on weekdays, so a single
+    daily digest naturally covers that whole morning's scrape.
+    """
+    if not _db_pool:
+        return
+    async with _db_pool.acquire() as conn:
+        settings = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
+    if not settings or not settings["digest_enabled"] or not settings["digest_recipient_email"]:
+        return
+
+    now_utc = datetime.utcnow()
+    if now_utc.hour != settings["digest_send_hour_utc"]:
+        return
+    today = now_utc.date()
+    if today.weekday() >= 5:
+        return
+    if settings.get("digest_last_run_date") == today:
+        return
+
+    # "Since last digest" — falls back to the last 24 hours on first run
+    since = datetime.combine(settings["digest_last_run_date"], datetime.min.time()) if settings.get("digest_last_run_date") else now_utc - timedelta(hours=24)
+
+    async with _db_pool.acquire() as conn:
+        news_rows = await conn.fetch(
+            "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='news' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+            FIRM_ID, since
+        )
+        legislation_rows = await conn.fetch(
+            "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='legislation' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+            FIRM_ID, since
+        )
+        judgment_rows = await conn.fetch(
+            "SELECT * FROM zlr_entries WHERE firm_id=$1 AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+            FIRM_ID, since
+        )
+
+    news_items = [dict(r) for r in news_rows]
+    legislation_items = [dict(r) for r in legislation_rows]
+    judgment_items = [dict(r) for r in judgment_rows]
+
+    text_body, html_body = build_digest_email_body(news_items, legislation_items, judgment_items)
+    total = len(news_items) + len(legislation_items) + len(judgment_items)
+    subject = f"\u2696 Mutemo Desk \u2014 Daily vault digest ({total} new item{'s' if total != 1 else ''})" if total else "\u2696 Mutemo Desk \u2014 Daily vault digest (nothing new today)"
+
+    try:
+        await asyncio.to_thread(_send_via_resend_sync, settings["digest_recipient_email"], subject, html_body, text_body)
+        print(f"[digest] Sent daily digest to {settings['digest_recipient_email']} ({total} items)")
+    except Exception as e:
+        print(f"[digest] Failed to send: {e}")
+        return  # don't mark as sent if it failed — retry next hour
+
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE reminder_settings SET digest_last_run_date=$1 WHERE firm_id=$2",
+            today, FIRM_ID
+        )
+
+
 async def reminder_scheduler_loop():
     """Runs every hour. Sends daily digest of upcoming deadlines if enabled."""
     await asyncio.sleep(30)  # brief startup delay
@@ -5017,6 +5219,10 @@ async def reminder_scheduler_loop():
             await _maybe_send_reminder()
         except Exception as e:
             print(f"[reminder] scheduler error: {e}")
+        try:
+            await _maybe_send_digest()
+        except Exception as e:
+            print(f"[digest] scheduler error: {e}")
         await asyncio.sleep(3600)
 
 async def _maybe_send_reminder():
