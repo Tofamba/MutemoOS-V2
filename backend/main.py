@@ -4038,6 +4038,15 @@ Review this contract now and call submit_contract_review with your findings."""
     verified_findings = []
     dropped_count = 0
     for f in review.get("findings", []):
+        if not isinstance(f, dict):
+            # Defensive guard — the tool schema requires each finding to be
+            # an object, and this hit production once already (a finding
+            # came back as a plain string instead), crashing the whole
+            # request. Skip anything malformed rather than 500 the entire
+            # review over one bad entry.
+            print(f"[contract-review] Skipping malformed finding (not an object): {f!r}")
+            dropped_count += 1
+            continue
         quote = f.get("quote")
         if not quote:
             f["verification"] = "unverifiable_absence_claim"
