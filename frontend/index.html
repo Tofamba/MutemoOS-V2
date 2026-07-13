@@ -320,6 +320,7 @@ select{cursor:pointer}
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
   <button class="nav-btn" id="nav-affidavit" onclick="showTab('affidavit')" data-role-hide="secretary">📄 Draft Affidavit</button>
   <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft Document</button>
+  <button class="nav-btn" id="nav-contract-review" onclick="showTab('contract-review')" data-role-hide="secretary">📋 Contract Review</button>
   <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge" id="cal-badge" style="display:none">0</span></button>
   <button class="nav-btn" id="nav-legalupdates" onclick="showTab('legalupdates')">⚖ Legal Updates</button>
   <button class="nav-btn" id="nav-zlr" onclick="showTab('zlr')">📚 Case Law Index</button>
@@ -1208,6 +1209,39 @@ select{cursor:pointer}
   </div>
 </div>
 
+<!-- ═══════════════ CONTRACT REVIEW TAB ═══════════════ -->
+<div id="tab-contract-review" style="display:none">
+  <div class="section-head">
+    <h2>📋 Contract Review</h2>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-icon">📋</div>
+      <div><div class="card-title">Upload a Contract</div><div class="card-desc">Structured review — missing clauses, risky terms, ambiguities, compliance concerns</div></div>
+    </div>
+    <div class="card-body">
+      <div id="cr-status" class="status"></div>
+      <div class="form-group">
+        <label>Contract document</label>
+        <input type="file" id="cr-file" accept=".pdf,.docx,.doc,.txt,.jpg,.jpeg,.png,.webp"/>
+        <div style="font-size:0.72rem;color:var(--ink3);margin-top:2px">A clear phone photo of a paper contract works too.</div>
+      </div>
+      <div class="form-group">
+        <label>Focus areas (optional)</label>
+        <input type="text" id="cr-focus" placeholder="e.g. Payment terms and termination rights specifically"/>
+      </div>
+      <button class="btn btn-primary" onclick="runContractReview()" id="cr-btn">📋 Review Contract</button>
+    </div>
+  </div>
+
+  <div id="cr-loading" style="display:none;text-align:center;padding:2rem;color:var(--ink3)">
+    <div class="spinner"></div> Reviewing contract and verifying findings against the document…
+  </div>
+
+  <div id="cr-results" style="margin-top:1rem"></div>
+</div>
+
 <!-- ═══════════════ ZLR INDEX TAB ═══════════════ -->
 <div id="tab-zlr" style="display:none">
   <div class="section-head">
@@ -1774,7 +1808,7 @@ function populateMatterSelects() {
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['vault','search','matters','affidavit','calendar','legalupdates','draft','zlr','users'].forEach(t => {
+  ['vault','search','matters','affidavit','calendar','legalupdates','draft','contract-review','zlr','users'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
@@ -3523,6 +3557,106 @@ function showDraftStatus(msg, type) {
 }
 
 document.getElementById('draft-editor')?.addEventListener('input', updateDraftWordCount);
+
+// ── Contract Review ───────────────────────────────────────────────────────────
+async function runContractReview() {
+  const fileInput = document.getElementById('cr-file');
+  const file = fileInput.files[0];
+  if (!file) { showCrStatus('Choose a contract file first.', 'error'); return; }
+
+  document.getElementById('cr-results').innerHTML = '';
+  document.getElementById('cr-loading').style.display = 'block';
+  document.getElementById('cr-btn').disabled = true;
+  showCrStatus('', '');
+
+  const formData = new FormData();
+  formData.append('file', file);
+  const focus = document.getElementById('cr-focus').value.trim();
+  if (focus) formData.append('focus_areas', focus);
+
+  try {
+    const res = await fetch(`${API}/api/contract-review`, { method: 'POST', body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Review failed');
+    }
+    const data = await res.json();
+    renderContractReview(data);
+  } catch(e) {
+    showCrStatus(`Review failed: ${e.message}`, 'error');
+  } finally {
+    document.getElementById('cr-loading').style.display = 'none';
+    document.getElementById('cr-btn').disabled = false;
+  }
+}
+
+const CR_CATEGORY_LABELS = {
+  missing_clause: '⚠ Missing Clause',
+  risky_term: '🔴 Risky Term',
+  non_standard: '🟡 Non-Standard',
+  ambiguity: '❓ Ambiguity',
+  compliance: '⚖ Compliance',
+};
+const CR_SEVERITY_COLOR = { high: 'chip-red', medium: 'chip-gold', low: 'chip-blue' };
+
+function renderContractReview(data) {
+  const container = document.getElementById('cr-results');
+  const doc = data.document || {};
+
+  let html = '';
+
+  if (doc.low_confidence) {
+    html += `<div style="margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600">
+      ⚠️ <strong>Low OCR confidence (${doc.ocr_confidence}%)</strong> — this document may have been misread in places.
+      Verify exact figures, dates, and names against the original before relying on this review.
+    </div>`;
+  }
+
+  html += `<div class="ai-answer">
+    <div class="ai-answer-label">📋 Overall Summary</div>
+    <div class="ai-answer-text">${escHtml(data.overall_summary || '')}</div>
+  </div>`;
+
+  if (data.dropped_unverified_count > 0) {
+    html += `<div style="margin:0.5rem 0;font-size:0.72rem;color:var(--ink3)">
+      ✓ ${data.dropped_unverified_count} finding(s) were checked against the document and removed because the
+      quoted text couldn't be verified — only findings confirmed against the actual contract are shown below.
+    </div>`;
+  }
+
+  if (!data.findings || !data.findings.length) {
+    html += `<div style="padding:1rem;color:var(--ink3);font-size:0.85rem">No issues flagged.</div>`;
+  } else {
+    html += '<div style="margin-top:0.75rem">';
+    for (const f of data.findings) {
+      const catLabel = CR_CATEGORY_LABELS[f.category] || f.category;
+      const sevClass = CR_SEVERITY_COLOR[f.severity] || 'chip-gray';
+      const verifBadge = f.verification === 'verified'
+        ? `<span class="chip chip-green" title="Quoted text confirmed present in the document">✓ Verified</span>`
+        : `<span class="chip chip-gray" title="This is a claim about something missing — can't be quote-verified the same way">Unverified (absence claim)</span>`;
+      html += `<div style="border:1px solid var(--line);border-radius:6px;padding:0.75rem;margin-bottom:0.6rem">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:4px">
+          <span class="chip ${sevClass}">${f.severity}</span>
+          <span class="chip chip-gray">${catLabel}</span>
+          ${verifBadge}
+        </div>
+        <div style="font-weight:600;font-size:0.88rem;margin-bottom:2px">${escHtml(f.title || '')}</div>
+        <div style="font-size:0.82rem;color:var(--ink2)">${escHtml(f.description || '')}</div>
+        ${f.quote ? `<div style="margin-top:6px;padding:6px 8px;background:var(--bg2);border-left:3px solid var(--gold);font-size:0.78rem;font-style:italic;color:var(--ink3)">"${escHtml(f.quote)}"</div>` : ''}
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  container.innerHTML = html;
+}
+
+function showCrStatus(msg, type) {
+  const el = document.getElementById('cr-status');
+  el.innerHTML = msg;
+  el.className = `status show ${type}`;
+  if (type === 'success') setTimeout(() => el.classList.remove('show'), 5000);
+}
 
 // ── Bulk Import ───────────────────────────────────────────────────────────────
 let bulkPendingFile = null;

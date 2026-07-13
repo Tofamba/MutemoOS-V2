@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from contextlib import asynccontextmanager
 import anthropic
+import difflib
 import subprocess
 import tempfile
 import os
@@ -3845,6 +3846,192 @@ async def search_with_document(
             "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
         },
         **grounding,
+    }
+
+# ── Contract Review ────────────────────────────────────────────────────────────
+# Two-stage design, same principle as the grounding check elsewhere in this
+# file: stage 1 (Sonnet) identifies findings; stage 2 independently verifies
+# each finding that claims specific text exists in the contract, by actually
+# checking that text against the real document — before anything is shown
+# to the user. This is a direct defence against exactly the failure mode in
+# Pulserate Investments (Pvt) Ltd v Andrew Zuze and Others [SC202/25], where
+# AI-generated fictitious citations in heads of argument were rejected by
+# the Supreme Court. Verification only covers claims about text that IS
+# present ("this clause says X") — it can't fully verify claims about
+# absence ("this is missing a termination clause"), since proving a
+# negative isn't the same kind of check. Those are flagged separately as
+# unverified-by-quote rather than silently treated the same as a verified one.
+
+CONTRACT_REVIEW_SYSTEM = """You are a contract review assistant for {FIRM_NAME}, Harare, reviewing
+documents under Zimbabwean law. Analyse the contract and identify genuine
+issues only — do not manufacture findings to pad out the list.
+
+Return ONLY valid JSON in this exact shape, no other text:
+{{
+  "overall_summary": "2-3 sentence plain-language summary of the contract's overall risk profile",
+  "findings": [
+    {{
+      "category": "missing_clause" | "risky_term" | "non_standard" | "ambiguity" | "compliance",
+      "severity": "high" | "medium" | "low",
+      "title": "short label, e.g. 'No termination for convenience clause'",
+      "description": "1-3 sentences explaining the issue and why it matters",
+      "quote": "the EXACT verbatim text from the contract this finding is based on, copied
+                character-for-character — or null if this finding is about something MISSING
+                from the contract (there is no text to quote for an absence)"
+    }}
+  ]
+}}
+
+Categories:
+- missing_clause: a standard clause this type of agreement would normally have, that isn't present
+- risky_term: a clause that IS present but exposes the client to unusual risk
+- non_standard: unusual wording/structure that deviates from normal market practice
+- ambiguity: language that is genuinely unclear or could be read multiple ways
+- compliance: potential conflict with Zimbabwean statutory requirements (e.g. Deeds Registries Act
+  formalities, Labour Act provisions, Companies and Other Business Entities Act requirements)
+
+Every "quote" must be copied EXACTLY from the contract text provided — do not paraphrase or
+reconstruct from memory. If you cannot find the exact text to quote, set quote to null and rely
+on the category/description alone."""
+
+def _normalize_for_match(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip().lower()
+
+def _verify_quote_in_text(quote: str, doc_text: str) -> bool:
+    """
+    Checks a finding's quoted text is actually present in the source
+    document — the core safeguard against a finding being fabricated
+    rather than genuinely drawn from the contract. Normalizes whitespace
+    (OCR'd/converted documents rarely preserve exact line breaks) before
+    checking, then falls back to a fuzzy check for minor formatting
+    differences (quote marks, hyphenation) before giving up.
+    """
+    if not quote or not quote.strip():
+        return False
+    norm_quote = _normalize_for_match(quote)
+    norm_doc = _normalize_for_match(doc_text)
+    if norm_quote in norm_doc:
+        return True
+    # Fuzzy fallback: slide a window through the doc roughly the length of
+    # the quote and check similarity — catches near-exact matches that
+    # differ only by punctuation/quote-mark style, without being so loose
+    # that it would pass a genuinely fabricated quote.
+    if len(norm_quote) < 15:
+        return False  # too short to fuzzy-match reliably — must be exact
+    window = len(norm_quote)
+    step = max(1, window // 4)
+    best_ratio = 0.0
+    for i in range(0, max(1, len(norm_doc) - window), step):
+        chunk = norm_doc[i:i + window + 20]
+        ratio = difflib.SequenceMatcher(None, norm_quote, chunk).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+        if best_ratio >= 0.92:
+            return True
+    return best_ratio >= 0.92
+
+@app.post("/api/contract-review")
+async def review_contract(
+    request: Request,
+    file: UploadFile = File(...),
+    focus_areas: Optional[str] = Form(None),
+):
+    """
+    Upload a contract and get a structured review: missing clauses, risky
+    terms, non-standard wording, ambiguities, and Zimbabwe-specific
+    compliance concerns — each finding independently verified against the
+    actual document text before being returned. Not stored, same as
+    Search Vault's document upload — this is a one-off analysis tool.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+
+    content = await file.read()
+    filename = file.filename or "contract"
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    ocr_confidence = None
+
+    try:
+        if ext == "pdf":
+            doc_text, _, _, ocr_confidence = extract_pdf_text(content)
+        elif ext in ("docx", "doc"):
+            doc_text = extract_docx_text(content)
+        elif ext in ("jpg", "jpeg", "png", "webp"):
+            doc_text, ocr_confidence = ocr_image_bytes(content, ext)
+            if not doc_text:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Could not read text from this image. Make sure the photo is clear, "
+                           "well-lit, and the document fills most of the frame."
+                )
+        else:
+            doc_text = content.decode("utf-8", errors="replace")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not read document: {e}")
+
+    if not doc_text or not doc_text.strip():
+        raise HTTPException(status_code=422, detail="No readable text found in the uploaded document.")
+
+    truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
+    review_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+
+    focus_line = f"\n\nPay particular attention to: {focus_areas}" if focus_areas else ""
+    prompt = f"""Contract to review ({filename}):
+---
+{review_text}
+---
+{focus_line}
+
+Review this contract now and return the JSON."""
+
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=4096,
+            system=CONTRACT_REVIEW_SYSTEM.format(FIRM_NAME=FIRM_NAME),
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = msg.content[0].text
+        m = re.search(r'\{[\s\S]*\}', raw)
+        review = json.loads(m.group(0)) if m else {"overall_summary": "", "findings": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Contract review failed: {e}")
+
+    # Stage 2 — verify each finding's quote against the real document text.
+    # unverified_absence findings (no quote — a "missing clause" claim)
+    # can't be checked this way; they're marked distinctly so the UI can
+    # show them with appropriately lower confidence, not silently equal
+    # to a verified quote-backed finding.
+    verified_findings = []
+    dropped_count = 0
+    for f in review.get("findings", []):
+        quote = f.get("quote")
+        if not quote:
+            f["verification"] = "unverifiable_absence_claim"
+            verified_findings.append(f)
+            continue
+        if _verify_quote_in_text(quote, doc_text):
+            f["verification"] = "verified"
+            verified_findings.append(f)
+        else:
+            # The model claimed this text exists in the contract, but it
+            # doesn't — this is exactly the fabrication risk the two-stage
+            # design exists to catch. Drop it rather than show something
+            # that could be a hallucinated citation-equivalent.
+            dropped_count += 1
+            print(f"[contract-review] Dropped unverified finding '{f.get('title')}' — quoted text not found in document")
+
+    return {
+        "overall_summary": review.get("overall_summary", ""),
+        "findings": verified_findings,
+        "dropped_unverified_count": dropped_count,
+        "document": {
+            "filename": filename, "truncated": truncated,
+            "ocr_confidence": ocr_confidence,
+            "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
+        },
     }
 
 def _semantic_search_firm(req, chunks: list) -> list:
