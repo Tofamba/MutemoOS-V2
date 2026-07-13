@@ -3864,23 +3864,8 @@ async def search_with_document(
 
 CONTRACT_REVIEW_SYSTEM = """You are a contract review assistant for {FIRM_NAME}, Harare, reviewing
 documents under Zimbabwean law. Analyse the contract and identify genuine
-issues only — do not manufacture findings to pad out the list.
-
-Return ONLY valid JSON in this exact shape, no other text:
-{{
-  "overall_summary": "2-3 sentence plain-language summary of the contract's overall risk profile",
-  "findings": [
-    {{
-      "category": "missing_clause" | "risky_term" | "non_standard" | "ambiguity" | "compliance",
-      "severity": "high" | "medium" | "low",
-      "title": "short label, e.g. 'No termination for convenience clause'",
-      "description": "1-3 sentences explaining the issue and why it matters",
-      "quote": "the EXACT verbatim text from the contract this finding is based on, copied
-                character-for-character — or null if this finding is about something MISSING
-                from the contract (there is no text to quote for an absence)"
-    }}
-  ]
-}}
+issues only — do not manufacture findings to pad out the list. Use the
+submit_contract_review tool to report your findings.
 
 Categories:
 - missing_clause: a standard clause this type of agreement would normally have, that isn't present
@@ -3891,8 +3876,52 @@ Categories:
   formalities, Labour Act provisions, Companies and Other Business Entities Act requirements)
 
 Every "quote" must be copied EXACTLY from the contract text provided — do not paraphrase or
-reconstruct from memory. If you cannot find the exact text to quote, set quote to null and rely
-on the category/description alone."""
+reconstruct from memory. If you cannot find the exact text to quote, omit the quote field and
+rely on the category/description alone (this applies to missing_clause findings by definition,
+since there's no text to quote for something that isn't there)."""
+
+# Structured tool schema instead of asking the model to hand-format free-text
+# JSON — contract text routinely contains quote marks (defined terms like
+# "Employee") and embedded line breaks within clauses, both of which broke
+# manual JSON parsing in production (a real "Expecting ',' delimiter" error
+# from a genuine employment contract upload). Anthropic's tool-use handles
+# the encoding reliably; this sidesteps the whole class of escaping bugs
+# rather than trying to patch the free-text JSON parsing after the fact.
+CONTRACT_REVIEW_TOOL = {
+    "name": "submit_contract_review",
+    "description": "Submit the structured contract review findings.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "overall_summary": {
+                "type": "string",
+                "description": "2-3 sentence plain-language summary of the contract's overall risk profile",
+            },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "category": {
+                            "type": "string",
+                            "enum": ["missing_clause", "risky_term", "non_standard", "ambiguity", "compliance"],
+                        },
+                        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "title": {"type": "string", "description": "Short label, e.g. 'No termination for convenience clause'"},
+                        "description": {"type": "string", "description": "1-3 sentences explaining the issue and why it matters"},
+                        "quote": {
+                            "type": "string",
+                            "description": "Exact verbatim text from the contract this finding is based on. "
+                                           "Omit entirely for missing_clause findings (nothing to quote for an absence).",
+                        },
+                    },
+                    "required": ["category", "severity", "title", "description"],
+                },
+            },
+        },
+        "required": ["overall_summary", "findings"],
+    },
+}
 
 def _normalize_for_match(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip().lower()
@@ -3903,6 +3932,7 @@ def _verify_quote_in_text(quote: str, doc_text: str) -> bool:
     document — the core safeguard against a finding being fabricated
     rather than genuinely drawn from the contract. Normalizes whitespace
     (OCR'd/converted documents rarely preserve exact line breaks) before
+
     checking, then falls back to a fuzzy check for minor formatting
     differences (quote marks, hyphenation) before giving up.
     """
@@ -3984,18 +4014,19 @@ async def review_contract(
 ---
 {focus_line}
 
-Review this contract now and return the JSON."""
+Review this contract now and call submit_contract_review with your findings."""
 
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=4096,
             system=CONTRACT_REVIEW_SYSTEM.format(FIRM_NAME=FIRM_NAME),
+            tools=[CONTRACT_REVIEW_TOOL],
+            tool_choice={"type": "tool", "name": "submit_contract_review"},
             messages=[{"role": "user", "content": prompt}]
         )
-        raw = msg.content[0].text
-        m = re.search(r'\{[\s\S]*\}', raw)
-        review = json.loads(m.group(0)) if m else {"overall_summary": "", "findings": []}
+        tool_use = next((b for b in msg.content if b.type == "tool_use"), None)
+        review = tool_use.input if tool_use else {"overall_summary": "", "findings": []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Contract review failed: {e}")
 
