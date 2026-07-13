@@ -1142,10 +1142,9 @@ select{cursor:pointer}
           <input type="text" id="draft-instructions" placeholder="e.g. Emphasise urgency · Include prayer for costs · Use formal tone"/>
         </div>
         <div class="form-group">
-          <label>Load precedent from vault (optional)</label>
-          <select id="draft-precedent-select" onchange="loadDraftPrecedent()">
-            <option value="">— No precedent —</option>
-          </select>
+          <label>Precedent from vault (optional)</label>
+          <button type="button" class="btn btn-sm btn-outline" onclick="findDraftPrecedents()">🔍 Find matching documents</button>
+          <div id="draft-precedent-suggestions" style="margin-top:6px"></div>
         </div>
       </div>
 
@@ -1783,7 +1782,6 @@ function showTab(tab) {
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
-  if (tab === 'draft') populateDraftPrecedentSelect();
   if (tab === 'zlr') renderZlrTab();
 }
 
@@ -3328,7 +3326,7 @@ function selectDocType(type) {
   document.getElementById('draft-step2').style.display = 'block';
   document.getElementById('draft-form-title').textContent = `Step 2 — ${DOC_TYPE_LABELS[type] || 'Document'} Details`;
   document.getElementById('draft-step2').scrollIntoView({behavior:'smooth', block:'nearest'});
-  populateDraftPrecedentSelect();
+  document.getElementById('draft-precedent-suggestions').innerHTML = '';
 
   // Adjust party/court fields based on whether this is a litigation document
   const isLitigation = LITIGATION_DOC_TYPES.has(type);
@@ -3364,57 +3362,51 @@ function resetDraftTab() {
   showDraftStatus('', '');
 }
 
-function populateDraftPrecedentSelect() {
-  const sel = document.getElementById('draft-precedent-select');
-  sel.innerHTML = '<option value="">— No precedent —</option>';
-  matters.forEach(m => {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.name + (m.number ? ` — ${m.number}` : '');
-    sel.appendChild(opt);
-  });
+async function findDraftPrecedents() {
+  const container = document.getElementById('draft-precedent-suggestions');
+  container.innerHTML = '<span style="font-size:0.75rem;color:var(--ink3)"><span class="spinner"></span> Searching the vault…</span>';
+  const facts = document.getElementById('draft-facts').value.trim();
+
+  try {
+    const res = await fetch(`${API}/api/documents/find-precedents?doc_type=${encodeURIComponent(currentDocType)}&facts=${encodeURIComponent(facts)}`);
+    if (!res.ok) throw new Error('Search failed');
+    const data = await res.json();
+    if (!data.candidates.length) {
+      container.innerHTML = '<span style="font-size:0.75rem;color:var(--ink3)">No matching documents found in the vault.</span>';
+      return;
+    }
+    container.innerHTML = data.candidates.map(c => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--line);border-radius:4px;margin-bottom:4px;font-size:0.78rem">
+        <div style="flex:1;min-width:0">
+          <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(c.filename)}</div>
+          <div style="color:var(--ink3);font-size:0.72rem">${escHtml(c.matter_name)} · ${escHtml(c.match_reason)}</div>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline" style="flex-shrink:0" onclick="selectSuggestedPrecedent('${c.id}','${escHtml(c.filename).replace(/'/g,"\\'")}','${escHtml(c.matter_name).replace(/'/g,"\\'")}')">Use this</button>
+      </div>
+    `).join('');
+  } catch(e) {
+    container.innerHTML = '<span style="font-size:0.75rem;color:var(--red)">Could not search for precedents.</span>';
+  }
 }
 
-async function loadDraftPrecedent() {
-  const matterId = document.getElementById('draft-precedent-select').value;
-  if (!matterId) { clearDraftPrecedent(); return; }
+async function selectSuggestedPrecedent(docId, filename, matterName) {
   try {
-    const res = await fetch(`${API}/api/matters/${matterId}/documents`);
-    const docs = await res.json();
-    if (!docs.length) return;
-    const first = docs[0];
-    const matter = matters.find(m => m.id === matterId);
-
-    // Load the document's actual stored text (reconstructed from its
-    // indexed chunks) rather than just a metadata description — a
-    // "precedent" with no real content to match language/style/structure
-    // against isn't actually useful to the drafting prompt.
-    let precedentText = `Document from matter: ${matter?.name || ''}. Type: ${first.document_type || 'document'}. Parties: ${first.parties || 'unknown'}.`;
-    try {
-      const textRes = await fetch(`${API}/api/documents/${first.id}/text`);
-      if (textRes.ok) {
-        const textData = await textRes.json();
-        precedentText = textData.text;
-      }
-    } catch(e) {
-      // Fall back to the metadata placeholder if real text isn't available
-      // (e.g. document predates indexing) — still better than failing outright.
-    }
-
-    draftPrecedentContext = {
-      text: precedentText,
-      filename: first.filename,
-      matter_name: matter?.name || '',
-    };
+    const res = await fetch(`${API}/api/documents/${docId}/text`);
+    if (!res.ok) throw new Error('Could not load document text');
+    const data = await res.json();
+    draftPrecedentContext = { text: data.text, filename, matter_name: matterName };
     document.getElementById('draft-precedent-banner').style.display = 'flex';
-    document.getElementById('draft-precedent-name').textContent = first.filename + ' — ' + (matter?.name || '');
-  } catch(e) {}
+    document.getElementById('draft-precedent-name').textContent = filename + ' — ' + matterName;
+    document.getElementById('draft-precedent-suggestions').innerHTML = '';
+  } catch(e) {
+    showDraftStatus('Could not load that document as a precedent.', 'error');
+  }
 }
 
 function clearDraftPrecedent() {
   draftPrecedentContext = null;
   document.getElementById('draft-precedent-banner').style.display = 'none';
-  document.getElementById('draft-precedent-select').value = '';
+  document.getElementById('draft-precedent-suggestions').innerHTML = '';
 }
 
 async function generateDocument() {

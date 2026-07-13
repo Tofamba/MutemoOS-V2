@@ -4201,6 +4201,115 @@ Draft the complete affidavit in proper Zimbabwe High Court form. Number all para
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Affidavit generation failed: {e}")
 
+# Upload-time classification uses its own taxonomy (affidavit, lease_agreement,
+# correspondence, contract, etc. — see classify_document_sync) which doesn't
+# line up 1:1 with the 20 drafting types (e.g. a demand letter gets classified
+# as generic "correspondence" at upload, never literally "letter_of_demand").
+# This maps each draft type to the upload classification(s) most likely to
+# actually be the same kind of document, for the exact-match half of
+# find_precedents below.
+DRAFT_TYPE_TO_UPLOAD_TYPES = {
+    "summons_matrimonial": ["summons", "declaration"],
+    "summons_civil": ["summons", "declaration"],
+    "court_application": ["notice_of_motion", "founding_affidavit"],
+    "urgent_chamber": ["notice_of_motion", "founding_affidavit"],
+    "notice_of_appeal": ["notice_of_motion", "court_order"],
+    "letter_of_demand": ["correspondence"],
+    "review": ["notice_of_motion", "founding_affidavit"],
+    "heads_of_argument": ["heads_of_argument"],
+    "legal_opinion": ["opinion"],
+    "client_letter": ["correspondence"],
+    "agreement": ["contract"],
+    "joint_venture": ["contract", "deed_of_settlement"],
+    "agreement_of_sale": ["contract", "lease_agreement"],
+    "acknowledgement_of_debt": ["deed_of_settlement", "contract"],
+    "power_of_attorney_transfer": ["power_of_attorney"],
+    "declaration_transferor": ["declaration", "power_of_attorney"],
+    "declaration_transferee": ["declaration", "power_of_attorney"],
+    "special_power_of_attorney": ["power_of_attorney"],
+    "sale_of_business": ["contract"],
+    "memorandum_of_understanding": ["contract", "correspondence"],
+    "freeform": [],
+}
+
+@app.get("/api/documents/find-precedents")
+async def find_precedents(doc_type: str, facts: str = "", request: Request = None):
+    """
+    Finds real, existing firm documents to use as drafting precedent —
+    replaces the old flow, which only let you manually pick a matter and
+    then silently grabbed whatever document in it happened to be most
+    recently uploaded, regardless of whether it was even the same kind of
+    document. Combines two signals:
+      1. Exact/mapped document_type match (from upload-time classification)
+      2. Semantic similarity search across all firm chunks, using the
+         document type label + the facts just entered as the query — this
+         is what catches good precedents even when classification labels
+         don't line up (e.g. a real demand letter filed as "correspondence").
+    Type-matches are ranked first (most reliable "same kind of document"),
+    semantic matches fill in after.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+
+    candidates = {}
+    mapped_types = DRAFT_TYPE_TO_UPLOAD_TYPES.get(doc_type, [])
+
+    async with _db_pool.acquire() as conn:
+        if mapped_types:
+            rows = await conn.fetch("""
+                SELECT d.id, d.filename, d.document_type, m.name as matter_name
+                FROM documents d JOIN matters m ON m.id = d.matter_id
+                WHERE d.firm_id=$1 AND d.document_type = ANY($2::text[]) AND d.status='complete'
+                ORDER BY d.uploaded_at DESC LIMIT 5
+            """, FIRM_ID, mapped_types)
+            for r in rows:
+                candidates[str(r["id"])] = {
+                    "id": str(r["id"]), "filename": r["filename"], "matter_name": r["matter_name"],
+                    "document_type": r["document_type"],
+                    "match_reason": f"same document type ({r['document_type'].replace('_',' ')})",
+                    "score": 1.0,
+                }
+
+        firm_chunk_rows = await conn.fetch(
+            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
+        )
+
+    firm_chunks = [dict(r) for r in firm_chunk_rows]
+    label = DOC_TYPE_LABELS_BACKEND.get(doc_type, doc_type)
+    query_text = f"{label}. {facts[:500]}" if facts else label
+    fake_req = SearchRequest(query=query_text, limit=8)
+
+    try:
+        semantic_results = await asyncio.to_thread(_semantic_search_firm, fake_req, firm_chunks)
+    except Exception:
+        semantic_results = []
+
+    doc_best_score = {}
+    for r in semantic_results:
+        did = r["document_id"]
+        if did not in doc_best_score or r["similarity"] > doc_best_score[did]:
+            doc_best_score[did] = r["similarity"]
+
+    new_doc_ids = [did for did in doc_best_score if did not in candidates]
+    if new_doc_ids:
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT d.id, d.filename, d.document_type, m.name as matter_name
+                FROM documents d JOIN matters m ON m.id = d.matter_id
+                WHERE d.id = ANY($1::uuid[]) AND d.firm_id=$2 AND d.status='complete'
+            """, [_uuid_mod.UUID(did) for did in new_doc_ids], FIRM_ID)
+        for r in rows:
+            did = str(r["id"])
+            candidates[did] = {
+                "id": did, "filename": r["filename"], "matter_name": r["matter_name"],
+                "document_type": r["document_type"],
+                "match_reason": f"similar content ({round(doc_best_score[did] * 100)}% match)",
+                "score": doc_best_score[did],
+            }
+
+    ranked = sorted(candidates.values(), key=lambda c: c["score"], reverse=True)
+    return {"candidates": ranked[:6]}
+
 # Mirrors the frontend's DOC_TYPE_LABELS exactly — used to give the model a
 # readable document-type name in the prompt rather than the raw type key.
 DOC_TYPE_LABELS_BACKEND = {
