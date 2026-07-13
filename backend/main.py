@@ -111,12 +111,14 @@ async def run_migrations():
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
             phone           TEXT NOT NULL,
+            email           TEXT,
             display_name    TEXT NOT NULL,
             role            TEXT NOT NULL CHECK (role IN ('partner','associate','secretary','admin')),
             is_active       BOOLEAN NOT NULL DEFAULT TRUE,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE (firm_id, phone)
         );
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
 
         CREATE TABLE IF NOT EXISTS sessions (
             token       TEXT PRIMARY KEY,
@@ -335,6 +337,7 @@ async def run_migrations():
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
             email       TEXT NOT NULL,
+            phone       TEXT,
             display_name TEXT NOT NULL,
             role        TEXT NOT NULL DEFAULT 'associate',
             invited_by  UUID REFERENCES users(id),
@@ -344,6 +347,8 @@ async def run_migrations():
             UNIQUE (firm_id, email)
         );
         CREATE INDEX IF NOT EXISTS idx_invites_firm ON invites(firm_id);
+        ALTER TABLE invites ADD COLUMN IF NOT EXISTS phone TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_firm_phone ON invites(firm_id, phone) WHERE phone IS NOT NULL AND accepted_at IS NULL;
 
         -- ── Legal Corner spec-correct schema additions ─────────────────────────────────
         -- Branding and feature flags on firms
@@ -601,30 +606,103 @@ def require_admin_token(request: Request):
             raise HTTPException(status_code=403, detail="Admin access required")
 
 # ── OTP Authentication ────────────────────────────────────────────────────────
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
-ALLOWED_PHONE_NUMBERS = set(
-    n.strip() for n in os.environ.get("MUTEMO_ALLOWED_PHONES", "").split(",") if n.strip()
-)
-AUTH_ENABLED = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER and ALLOWED_PHONE_NUMBERS)
+# Delivered via WhatsApp Business Cloud API (Meta), not SMS/Twilio — reuses
+# the same Meta WhatsApp Business setup already used for AlertEngine. This
+# uses a dedicated AUTHENTICATION-category template, which (unlike regular
+# utility/marketing templates) is NOT subject to the 24-hour conversation
+# window restriction that affected AlertEngine's other WhatsApp delivery —
+# authentication templates can be sent proactively any time, to anyone,
+# once approved by Meta. Uses the "Copy Code" button type since this is a
+# web app (one-tap/zero-tap autofill need native app integration).
+WHATSAPP_ACCESS_TOKEN     = os.environ.get("WHATSAPP_ACCESS_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID  = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
+WHATSAPP_OTP_TEMPLATE     = os.environ.get("WHATSAPP_OTP_TEMPLATE_NAME", "mutemo_login_otp")
+WHATSAPP_OTP_LANG         = os.environ.get("WHATSAPP_OTP_TEMPLATE_LANG", "en")
+# Inlined rather than calling is_email_configured() (defined later in this
+# file) — this line runs at import time, before that function exists yet.
+_EMAIL_OTP_CONFIGURED = bool(os.environ.get("RESEND_API_KEY") or os.environ.get("SMTP_HOST"))
+AUTH_ENABLED = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID) or _EMAIL_OTP_CONFIGURED
 
 OTP_TTL_SECONDS     = 300
 SESSION_TTL_SECONDS = 86400 * 7
 MAX_OTP_ATTEMPTS    = 5
 
-def _send_sms_otp(phone: str, code: str) -> bool:
+def _send_email_otp(email: str, code: str) -> bool:
+    """
+    Email OTP delivery via the same Resend integration already proven for
+    calendar invites and the daily digest — a same-day stopgap while Meta
+    Business Verification is pending for WhatsApp delivery (see
+    _send_otp_code below, which prefers WhatsApp automatically once it's
+    configured, no further code change needed to "switch over" later).
+    """
+    subject = "Your Mutemo Desk login code"
+    html_body = (
+        f"<p>Your Mutemo Desk login code is <strong>{code}</strong>. It expires in 5 minutes.</p>"
+        f"<p style='color:#6b6b64;font-size:13px'>If you didn't request this, you can safely ignore this email.</p>"
+    )
+    text_body = f"Your Mutemo Desk login code is {code}. It expires in 5 minutes."
     try:
-        from twilio.rest import Client as TwilioClient
-        tc = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        tc.messages.create(
-            body=f"Your Mutemo Desk login code is {code}. It expires in 5 minutes.",
-            from_=TWILIO_FROM_NUMBER,
-            to=phone,
-        )
+        _send_via_resend_sync(email, subject, html_body, text_body)
         return True
     except Exception as e:
-        print(f"[otp] Twilio send failed: {e}")
+        print(f"[otp] Email send failed: {e}")
+        return False
+
+def _send_otp_code(phone: str, email: Optional[str], code: str) -> bool:
+    """
+    Sends the OTP via whichever channel is actually configured. Prefers
+    WhatsApp (the eventual target, once Meta Business Verification
+    completes for the WhatsApp Business Account) but falls back to email
+    via Resend, which is already working today. Once WHATSAPP_ACCESS_TOKEN
+    and WHATSAPP_PHONE_NUMBER_ID are set on Railway, this automatically
+    starts sending via WhatsApp instead — no further code change needed.
+    """
+    if WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID:
+        if _send_whatsapp_otp(phone, code):
+            return True
+        print(f"[otp] WhatsApp send failed for {phone}, falling back to email")
+    if email and _EMAIL_OTP_CONFIGURED:
+        return _send_email_otp(email, code)
+    print(f"[otp] No delivery channel available for {phone} (no email on file and WhatsApp not configured)")
+    return False
+
+def _send_whatsapp_otp(phone: str, code: str) -> bool:
+    """
+    Sends the OTP via an approved Meta WhatsApp AUTHENTICATION template.
+    The template itself must already exist and be approved in Meta Business
+    Manager (category=AUTHENTICATION, a COPY_CODE button) — that's a
+    one-time setup step outside this code, not something this function can
+    do on its own.
+    """
+    try:
+        import httpx
+        resp = httpx.post(
+            f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages",
+            headers={"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}"},
+            json={
+                "messaging_product": "whatsapp",
+                "to": phone,
+                "type": "template",
+                "template": {
+                    "name": WHATSAPP_OTP_TEMPLATE,
+                    "language": {"code": WHATSAPP_OTP_LANG},
+                    "components": [
+                        {"type": "body", "parameters": [{"type": "text", "text": code}]},
+                        {
+                            "type": "button", "sub_type": "url", "index": "0",
+                            "parameters": [{"type": "text", "text": code}],
+                        },
+                    ],
+                },
+            },
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            print(f"[otp] WhatsApp send failed {resp.status_code}: {resp.text[:300]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[otp] WhatsApp send failed: {e}")
         return False
 
 class OTPRequestBody(BaseModel):
@@ -639,8 +717,24 @@ async def request_otp(req: OTPRequestBody):
     if not AUTH_ENABLED:
         raise HTTPException(status_code=503, detail="OTP login is not configured on this server.")
     phone = req.phone.strip()
-    if phone not in ALLOWED_PHONE_NUMBERS:
+
+    # Single source of truth for "who can log in" is now the invites/users
+    # tables (managed entirely through the Invite New User screen) — not a
+    # separate, manually-maintained env var list that's easy to forget to
+    # update. Deliberately still return a generic {"sent": true} response
+    # regardless of whether the number is actually recognized, so the
+    # response itself doesn't leak which phone numbers are valid.
+    async with _db_pool.acquire() as conn:
+        known_row = await conn.fetchrow(
+            """SELECT email FROM users WHERE firm_id=$1 AND phone=$2 AND is_active=TRUE
+               UNION
+               SELECT email FROM invites WHERE firm_id=$1 AND phone=$2 AND accepted_at IS NULL
+               LIMIT 1""",
+            FIRM_ID, phone
+        )
+    if not known_row:
         return {"sent": True, "message": "If this number is registered, a code has been sent."}
+    known_email = known_row["email"]
 
     code = f"{secrets.randbelow(1000000):06d}"
     expires = datetime.utcnow() + timedelta(seconds=OTP_TTL_SECONDS)
@@ -651,9 +745,9 @@ async def request_otp(req: OTPRequestBody):
             ON CONFLICT (phone) DO UPDATE SET code=$2, attempts=0, expires_at=$3
         """, phone, code, expires)
 
-    sent = await asyncio.to_thread(_send_sms_otp, phone, code)
+    sent = await asyncio.to_thread(_send_otp_code, phone, known_email, code)
     if not sent:
-        raise HTTPException(status_code=500, detail="Failed to send SMS. Please try again.")
+        raise HTTPException(status_code=500, detail="Failed to send login code. Please try again.")
     return {"sent": True, "message": "If this number is registered, a code has been sent."}
 
 @app.post("/api/auth/verify-otp")
@@ -680,19 +774,42 @@ async def verify_otp(req: OTPVerifyBody, response: Response):
         if not hmac.compare_digest(entry["code"], req.code.strip()):
             raise HTTPException(status_code=401, detail="Incorrect code.")
 
-        # Success — look up or create user
+        # Success — look up existing user, or provision from a matching invite
         await conn.execute("DELETE FROM otp_store WHERE phone=$1", phone)
         user = await conn.fetchrow(
             "SELECT * FROM users WHERE firm_id=$1 AND phone=$2 AND is_active=TRUE",
             FIRM_ID, phone
         )
         if not user:
-            # Auto-create user as secretary (admin can promote later)
+            # Previously this auto-created a brand-new account for ANY phone
+            # number that completed OTP, regardless of whether anyone
+            # actually invited them — meaning the only real gate was
+            # whichever email Cloudflare Access allows through, and anyone
+            # who got that far could self-provision a MutemoOS account.
+            # Now, account creation requires a matching, not-yet-accepted
+            # invite for this exact phone number — set by an admin when
+            # they invite someone, not just anyone who knows/receives a code.
+            invite = await conn.fetchrow(
+                "SELECT * FROM invites WHERE firm_id=$1 AND phone=$2 AND accepted_at IS NULL",
+                FIRM_ID, phone
+            )
+            if not invite:
+                raise HTTPException(
+                    status_code=403,
+                    detail="This phone number has not been invited to MutemoOS. Contact your administrator."
+                )
             user = await conn.fetchrow("""
-                INSERT INTO users (firm_id, phone, display_name, role)
-                VALUES ($1, $2, $3, 'secretary')
+                INSERT INTO users (firm_id, phone, email, display_name, role)
+                VALUES ($1, $2, $3, $4, $5)
                 RETURNING *
-            """, FIRM_ID, phone, phone)
+            """, FIRM_ID, phone, invite["email"], invite["display_name"], invite["role"])
+            await conn.execute("UPDATE invites SET accepted_at=NOW() WHERE id=$1", invite["id"])
+            if invite["organisation_role"]:
+                await conn.execute("""
+                    INSERT INTO organisation_roles (firm_id, user_id, role)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (firm_id, user_id) DO UPDATE SET role=$3
+                """, FIRM_ID, user["id"], invite["organisation_role"])
 
         token = secrets.token_urlsafe(32)
         expires = datetime.utcnow() + timedelta(seconds=SESSION_TTL_SECONDS)
@@ -792,10 +909,10 @@ async def list_users(request: Request):
 
 @app.patch("/api/users/{user_id}")
 async def update_user(user_id: str, body: dict, request: Request):
-    """Admin only: update a user's role or display_name."""
+    """Admin only: update a user's role, display_name, email, or phone."""
     user = await get_current_user(request)
     _check_permission(user, "admin:users")
-    allowed_fields = {"role", "display_name", "is_active"}
+    allowed_fields = {"role", "display_name", "is_active", "email", "phone"}
     updates = {k: v for k, v in body.items() if k in allowed_fields}
     if not updates:
         raise HTTPException(status_code=400, detail="No valid fields to update")
@@ -916,6 +1033,7 @@ async def _send_invite_email(email: str, display_name: str, invited_by_name: str
 
 class InviteRequest(BaseModel):
     email: str
+    phone: str
     display_name: str
     role: str = "associate"
     organisation_role: Optional[str] = None  # ops_manager | panel_lawyer
@@ -931,6 +1049,10 @@ async def invite_user(req: InviteRequest, request: Request):
     if req.organisation_role and req.organisation_role not in ("ops_manager", "panel_lawyer"):
         raise HTTPException(status_code=400, detail="Invalid organisation_role")
 
+    phone = req.phone.strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="Phone number is required — this is what gates account creation.")
+
     try:
         cf_rule_id = await _add_email_to_cloudflare_access(req.email)
     except Exception as e:
@@ -941,15 +1063,15 @@ async def invite_user(req: InviteRequest, request: Request):
         try:
             row = await conn.fetchrow("""
                 INSERT INTO invites
-                    (firm_id, email, display_name, role, invited_by, cf_rule_id,
+                    (firm_id, email, phone, display_name, role, invited_by, cf_rule_id,
                      organisation_role)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (firm_id, email) DO UPDATE SET
-                    display_name=$3, role=$4, sent_at=NOW(), cf_rule_id=$6,
-                    organisation_role=$7
+                    phone=$3, display_name=$4, role=$5, sent_at=NOW(), cf_rule_id=$7,
+                    organisation_role=$8, accepted_at=NULL
                 RETURNING *
             """,
-            FIRM_ID, req.email, req.display_name, req.role,
+            FIRM_ID, req.email, phone, req.display_name, req.role,
             _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
             str(cf_rule_id) if cf_rule_id else None,
             req.organisation_role
@@ -1647,7 +1769,7 @@ class Attendee(BaseModel):
     email: str
     name: Optional[str] = None
 
-class InviteRequest(BaseModel):
+class CalendarInviteRequest(BaseModel):
     attendees: List[Attendee]
     invite_message: Optional[str] = None
 
@@ -4768,7 +4890,7 @@ async def add_calendar_event(event: CalendarEvent, background_tasks: BackgroundT
     return result
 
 @app.post("/api/calendar/{event_id}/invite")
-async def invite_to_calendar_event(event_id: str, req: InviteRequest, background_tasks: BackgroundTasks, request: Request):
+async def invite_to_calendar_event(event_id: str, req: CalendarInviteRequest, background_tasks: BackgroundTasks, request: Request):
     """
     Add one or more attendees to an existing event and send them a calendar
     invite. Covers the "just got off the phone, want to loop in another

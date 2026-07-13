@@ -1509,6 +1509,11 @@ select{cursor:pointer}
             <input type="email" id="invite-email" placeholder="e.g. tmoyo@sawyerandmkushi.co.zw"/>
           </div>
           <div class="form-group">
+            <label>Phone Number *</label>
+            <input type="tel" id="invite-phone" placeholder="e.g. +263771234567"/>
+            <div style="font-size:0.72rem;color:var(--ink3);margin-top:2px">This is what actually gates their access — only this exact number can log in and create their account.</div>
+          </div>
+          <div class="form-group">
             <label>Role</label>
             <select id="invite-role">
               <option value="associate">Associate (can draft documents)</option>
@@ -4278,19 +4283,38 @@ async function loadUsers() {
       <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--gold2)">
         <div>
           <strong>${u.display_name}</strong>
-          <span style="font-size:0.75rem;color:var(--ink3);margin-left:6px">${u.phone || u.email || ''}</span><br/>
+          <span style="font-size:0.75rem;color:var(--ink3);margin-left:6px">${u.phone || ''}${u.email ? ' · ' + u.email : ' · no email on file'}</span><br/>
           <span style="font-size:0.75rem;color:var(--green)">${ROLE_LABELS[u.role] || u.role}</span>
           ${!u.is_active ? '<span style="font-size:0.7rem;color:var(--red);margin-left:6px">Inactive</span>' : ''}
         </div>
-        <select style="font-size:0.75rem;padding:2px 6px" onchange="updateUserRole('${u.id}', this.value)">
-          <option value="partner" ${u.role==='partner'?'selected':''}>Partner</option>
-          <option value="associate" ${u.role==='associate'?'selected':''}>Associate</option>
-          <option value="secretary" ${u.role==='secretary'?'selected':''}>Secretary</option>
-          <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
-        </select>
+        <div style="display:flex;align-items:center;gap:6px">
+          <button class="btn btn-sm" style="background:none;color:var(--ink3)" title="Edit email/phone" onclick="editUserContact('${u.id}', '${(u.email||'').replace(/'/g,"\\'")}', '${(u.phone||'').replace(/'/g,"\\'")}')">✏️</button>
+          <select style="font-size:0.75rem;padding:2px 6px" onchange="updateUserRole('${u.id}', this.value)">
+            <option value="partner" ${u.role==='partner'?'selected':''}>Partner</option>
+            <option value="associate" ${u.role==='associate'?'selected':''}>Associate</option>
+            <option value="secretary" ${u.role==='secretary'?'selected':''}>Secretary</option>
+            <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+          </select>
+        </div>
       </div>
     `).join('');
   } catch(e) { el.innerHTML = '<em>Error loading users.</em>'; }
+}
+
+async function editUserContact(userId, currentEmail, currentPhone) {
+  const email = prompt('Email address (needed for login codes if WhatsApp isn\'t set up yet):', currentEmail);
+  if (email === null) return;
+  const phone = prompt('Phone number (this is what actually gates their login):', currentPhone);
+  if (phone === null) return;
+  try {
+    const res = await fetch(`${API}/api/users/${userId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ email: email.trim(), phone: phone.trim() })
+    });
+    if (!res.ok) throw new Error('Failed');
+    await loadUsers();
+  } catch(e) { alert('Could not update user details.'); }
 }
 
 async function updateUserRole(userId, newRole) {
@@ -4331,19 +4355,21 @@ async function loadInvites() {
 async function sendInvite() {
   const name = document.getElementById('invite-name').value.trim();
   const email = document.getElementById('invite-email').value.trim();
+  const phone = document.getElementById('invite-phone').value.trim();
   const role = document.getElementById('invite-role').value;
-  if (!name || !email) { showInviteStatus('Name and email are required.', 'error'); return; }
+  if (!name || !email || !phone) { showInviteStatus('Name, email, and phone number are all required.', 'error'); return; }
   showInviteStatus('Sending invite…', '');
   try {
     const res = await fetch(`${API}/api/admin/invite`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({email, display_name: name, role})
+      body: JSON.stringify({email, phone, display_name: name, role})
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Failed');
     document.getElementById('invite-name').value = '';
     document.getElementById('invite-email').value = '';
+    document.getElementById('invite-phone').value = '';
     const cfMsg = data.cloudflare_updated ? ' Access granted.' : ' (Cloudflare update pending)';
     const emailMsg = data.email_sent ? ' Welcome email sent.' : ' Email delivery failed.';
     showInviteStatus(`✓ ${name} invited.${cfMsg}${emailMsg}`, 'success');
