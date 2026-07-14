@@ -4323,12 +4323,13 @@ referencing its actual clauses/wording where relevant:
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            # Document-attached analysis was hitting this ceiling mid-sentence
-            # in production — a genuine review of an uploaded affidavit/contract
-            # against 19 grounded sources routinely needs more room than 900
-            # tokens gives it. Raised well above what's been demonstrated
-            # necessary in real use rather than guessing at a smaller number.
-            max_tokens=3000 if attached_doc_text else 1200,
+            # 900, then 3000, both still cut off mid-sentence in production —
+            # this level of thorough, multi-section document analysis
+            # (headed sections, tables, extensive verbatim quoting) genuinely
+            # needs significant headroom. Going well above what's been
+            # demonstrated necessary so far rather than incrementally
+            # guessing again.
+            max_tokens=8000 if attached_doc_text else 1500,
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 
 Query: {query}
@@ -4341,7 +4342,20 @@ Sources:
 
 Professional, direct{', using clear headed sections for a thorough document review' if attached_doc_text else ', max 4 paragraphs'}. Clearly distinguish the attached document's own content from firm precedent and from public legal sources. Finish every section you start — do not begin a point and leave it incomplete."""}]
         )
-        return msg.content[0].text
+        answer_text = msg.content[0].text
+        if msg.stop_reason == "max_tokens":
+            # This has hit production twice already at lower limits (900,
+            # then 3000) — rather than assume a fixed number will never be
+            # too small again, detect it directly and say so, instead of
+            # silently handing over an analysis that stops mid-sentence as
+            # if it were complete.
+            answer_text += (
+                "\n\n---\n**⚠ This analysis was cut off before completing "
+                "— it ran out of space rather than reaching a natural end. "
+                "Treat the final section as incomplete and re-run the query "
+                "for the rest, or ask a narrower follow-up question.**"
+            )
+        return answer_text
     except Exception:
         total = len(results) + len(legal_results or [])
         return f"Found {total} relevant excerpt(s). Review the sources below."
