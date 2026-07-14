@@ -4323,7 +4323,12 @@ referencing its actual clauses/wording where relevant:
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=900 if attached_doc_text else 600,
+            # Document-attached analysis was hitting this ceiling mid-sentence
+            # in production — a genuine review of an uploaded affidavit/contract
+            # against 19 grounded sources routinely needs more room than 900
+            # tokens gives it. Raised well above what's been demonstrated
+            # necessary in real use rather than guessing at a smaller number.
+            max_tokens=3000 if attached_doc_text else 1200,
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 
 Query: {query}
@@ -4334,7 +4339,7 @@ Sources:
 
 {instructions}
 
-Professional, direct, max {6 if attached_doc_text else 4} paragraphs. Clearly distinguish the attached document's own content from firm precedent and from public legal sources."""}]
+Professional, direct{', using clear headed sections for a thorough document review' if attached_doc_text else ', max 4 paragraphs'}. Clearly distinguish the attached document's own content from firm precedent and from public legal sources. Finish every section you start — do not begin a point and leave it incomplete."""}]
         )
         return msg.content[0].text
     except Exception:
