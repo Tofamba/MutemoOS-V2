@@ -150,8 +150,12 @@ async def run_migrations():
             document_count  INT NOT NULL DEFAULT 0,
             last_activity   TIMESTAMPTZ,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            created_by      UUID REFERENCES users(id)
+            created_by      UUID REFERENCES users(id),
+            next_deadline       DATE,
+            next_deadline_note  TEXT
         );
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_deadline DATE;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_deadline_note TEXT;
         CREATE INDEX IF NOT EXISTS idx_matters_firm ON matters(firm_id);
         CREATE INDEX IF NOT EXISTS idx_matters_status ON matters(firm_id, status);
 
@@ -1716,6 +1720,8 @@ class MatterCreate(BaseModel):
     status: Optional[str] = "Active"
     client_name: Optional[str] = None
     custom_status: Optional[str] = None
+    next_deadline: Optional[str] = None
+    next_deadline_note: Optional[str] = None
 
 class MatterUpdate(BaseModel):
     name: Optional[str] = None
@@ -1725,6 +1731,8 @@ class MatterUpdate(BaseModel):
     status: Optional[str] = None
     client_name: Optional[str] = None
     custom_status: Optional[str] = None
+    next_deadline: Optional[str] = None       # ISO date string, e.g. "2026-08-15"
+    next_deadline_note: Optional[str] = None
 
 class ProgressNote(BaseModel):
     text: str
@@ -1819,6 +1827,8 @@ def _row_to_matter(row) -> dict:
     for k in ("created_at", "last_activity"):
         if d.get(k):
             d[k] = d[k].isoformat()
+    if d.get("next_deadline"):
+        d["next_deadline"] = d["next_deadline"].isoformat()
     return d
 
 def _row_to_doc(row) -> dict:
@@ -2034,18 +2044,81 @@ async def list_matters(request: Request):
         matters.append(m)
     return matters
 
+def _name_tokens(s: str) -> set:
+    return {w for w in re.split(r'[\s,.]+', (s or "").lower()) if len(w) >= 3}
+
+def _name_similarity(a: str, b: str) -> float:
+    score = difflib.SequenceMatcher(None, (a or "").lower().strip(), (b or "").lower().strip()).ratio()
+    # A shared significant word (surname, distinctive party/company name) is a
+    # stronger, more reliable signal than raw character similarity for this
+    # purpose — "D. Ngorima" vs "Deliwe Ngorima" share "ngorima" outright,
+    # which matters more than their overall string similarity ratio.
+    if _name_tokens(a) & _name_tokens(b):
+        score = max(score, 0.8)
+    return score
+
+@app.get("/api/matters/check-conflict")
+async def check_matter_conflict(name: str = "", client_name: str = "", request: Request = None):
+    """
+    Checks a proposed new matter's name/client against every existing matter
+    — including closed ones, since a conflict doesn't expire just because a
+    matter did — using fuzzy + shared-word name matching, so near-variations
+    ("D. Ngorima" vs "Deliwe Ngorima") or a shared opposing party aren't
+    missed by a plain exact-match search. This surfaces a warning; it does
+    not block matter creation — the actual judgment call belongs to whoever
+    is opening the matter, this just makes sure they don't miss something
+    worth checking first.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+
+    query_terms = [t.strip() for t in [name, client_name] if t and t.strip()]
+    if not query_terms:
+        return {"matches": []}
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, name, client_name, number, status FROM matters WHERE firm_id=$1", FIRM_ID
+        )
+
+    matches = {}
+    for row in rows:
+        candidates = [c for c in [row["name"], row["client_name"]] if c]
+        best_score = 0.0
+        for qt in query_terms:
+            for ec in candidates:
+                best_score = max(best_score, _name_similarity(qt, ec))
+        if best_score >= 0.55:
+            mid = str(row["id"])
+            if mid not in matches or matches[mid]["score"] < best_score:
+                matches[mid] = {
+                    "id": mid, "name": row["name"], "client_name": row["client_name"],
+                    "number": row["number"], "status": row["status"],
+                    "score": round(best_score, 2),
+                }
+
+    ranked = sorted(matches.values(), key=lambda m: m["score"], reverse=True)
+    return {"matches": ranked[:8]}
+
 @app.post("/api/matters")
 async def create_matter(matter: MatterCreate, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "matter:create")
     mid = _uuid_mod.uuid4()
     now = datetime.utcnow()
+    parsed_deadline = None
+    if matter.next_deadline:
+        try:
+            parsed_deadline = date.fromisoformat(matter.next_deadline)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="next_deadline must be in YYYY-MM-DD format")
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO matters (id, firm_id, name, number, internal_ref, external_ref,
                                  client_name, matter_type, status, custom_status,
-                                 last_activity, created_at, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                                 last_activity, created_at, created_by,
+                                 next_deadline, next_deadline_note)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             RETURNING *
         """,
         mid, FIRM_ID,
@@ -2054,7 +2127,8 @@ async def create_matter(matter: MatterCreate, request: Request):
         matter.client_name, matter.matter_type,
         matter.status or "Active", matter.custom_status,
         now, now,
-        _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+        _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+        parsed_deadline, matter.next_deadline_note
         )
     m = _row_to_matter(row)
     m["progress_notes"] = []
@@ -2083,6 +2157,15 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
     fields = {k: v for k, v in update.dict().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if "next_deadline" in fields:
+        # asyncpg is strict about type matching for DATE columns — a raw
+        # Python str isn't reliably accepted the way it might be with a
+        # text-based driver. Parse explicitly rather than risk an
+        # intermittent DataError depending on asyncpg/codec version.
+        try:
+            fields["next_deadline"] = date.fromisoformat(fields["next_deadline"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="next_deadline must be in YYYY-MM-DD format")
     fields["last_activity"] = datetime.utcnow()
     set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
     values = list(fields.values())
@@ -6061,6 +6144,31 @@ async def _maybe_send_reminder():
         """, FIRM_ID, today, today + timedelta(days=30))
 
     events = [_row_to_event(r) for r in rows]
+
+    # Matter-level critical deadlines, converted into the same event shape
+    # so they reuse the existing rendering logic in build_reminder_email_body
+    # rather than needing a parallel display path. These are the deadlines
+    # set directly on a matter (e.g. a jurisdictional time limit, an appeal
+    # window) — distinct from calendar events, and easy to miss if they only
+    # lived on the matter list without also surfacing here.
+    async with _db_pool.acquire() as conn:
+        deadline_rows = await conn.fetch("""
+            SELECT id, name, next_deadline, next_deadline_note FROM matters
+            WHERE firm_id=$1 AND next_deadline >= $2 AND next_deadline <= $3
+              AND status != 'Closed'
+            ORDER BY next_deadline ASC
+        """, FIRM_ID, today, today + timedelta(days=30))
+    for r in deadline_rows:
+        events.append({
+            "event_type": "deadline",
+            "title": r["next_deadline_note"] or f"Matter deadline: {r['name']}",
+            "date": str(r["next_deadline"]),
+            "matter_name": r["name"],
+            "time": None,
+            "court": None,
+        })
+    events.sort(key=lambda e: (e.get("date") or "", e.get("time") or ""))
+
     if not events:
         async with _db_pool.acquire() as conn:
             await conn.execute(

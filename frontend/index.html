@@ -535,7 +535,7 @@ select{cursor:pointer}
       </div>
       <div class="form-group">
         <label>Matter Name / Description *</label>
-        <input type="text" id="nm-name" placeholder="e.g. Moyo v Dube — Stand 245 Borrowdale"/>
+        <input type="text" id="nm-name" placeholder="e.g. Moyo v Dube — Stand 245 Borrowdale" oninput="debouncedConflictCheck()"/>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -549,7 +549,18 @@ select{cursor:pointer}
       </div>
       <div class="form-group">
         <label>Client Name</label>
-        <input type="text" id="nm-client" placeholder="e.g. John Moyo"/>
+        <input type="text" id="nm-client" placeholder="e.g. John Moyo" oninput="debouncedConflictCheck()"/>
+      </div>
+      <div id="nm-conflict-warning" style="display:none;margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600"></div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Next Critical Deadline (optional)</label>
+          <input type="date" id="nm-deadline"/>
+        </div>
+        <div class="form-group">
+          <label>Deadline Note</label>
+          <input type="text" id="nm-deadline-note" placeholder="e.g. 60-day rehearing deadline"/>
+        </div>
       </div>
       <div class="form-row">
         <div class="form-group">
@@ -1741,13 +1752,40 @@ function openNewMatterModal() {
 
 function closeNewMatterModal() {
   document.getElementById('new-matter-modal').style.display = 'none';
-  ['nm-name','nm-internal-ref','nm-external-ref','nm-client'].forEach(id => {
+  ['nm-name','nm-internal-ref','nm-external-ref','nm-client','nm-deadline','nm-deadline-note'].forEach(id => {
     document.getElementById(id).value = '';
   });
   document.getElementById('nm-type').value = '';
   document.getElementById('nm-status').value = 'Active';
   document.getElementById('nm-status-msg').className = 'status';
   document.getElementById('nm-status-msg').textContent = '';
+  document.getElementById('nm-conflict-warning').style.display = 'none';
+}
+
+let _conflictCheckTimer = null;
+function debouncedConflictCheck() {
+  clearTimeout(_conflictCheckTimer);
+  _conflictCheckTimer = setTimeout(runConflictCheck, 500);
+}
+
+async function runConflictCheck() {
+  const name = document.getElementById('nm-name').value.trim();
+  const clientName = document.getElementById('nm-client').value.trim();
+  const banner = document.getElementById('nm-conflict-warning');
+  if (!name && !clientName) { banner.style.display = 'none'; return; }
+
+  try {
+    const params = new URLSearchParams({ name, client_name: clientName });
+    const res = await fetch(`${API}/api/matters/check-conflict?${params}`);
+    if (!res.ok) { banner.style.display = 'none'; return; }
+    const data = await res.json();
+    if (!data.matches || !data.matches.length) { banner.style.display = 'none'; return; }
+
+    banner.style.display = 'block';
+    banner.innerHTML = `⚠ <strong>Check for a possible conflict of interest</strong> — this name is similar to ${data.matches.length} existing matter(s):<br/>` +
+      data.matches.map(m => `&nbsp;&nbsp;• ${escHtml(m.name)}${m.client_name ? ' — ' + escHtml(m.client_name) : ''} <span style="color:var(--ink3)">(${escHtml(m.status)})</span>`).join('<br/>') +
+      `<br/><span style="font-size:0.72rem;color:var(--ink3)">This is a similarity check, not a determination — please confirm there's no actual conflict before proceeding.</span>`;
+  } catch(e) { banner.style.display = 'none'; }
 }
 
 async function submitNewMatter() {
@@ -1772,6 +1810,8 @@ async function submitNewMatter() {
         client_name: document.getElementById('nm-client').value.trim() || null,
         status: document.getElementById('nm-status').value || 'Active',
         matter_type: document.getElementById('nm-type').value || null,
+        next_deadline: document.getElementById('nm-deadline').value || null,
+        next_deadline_note: document.getElementById('nm-deadline-note').value.trim() || null,
       })
     });
     const m = await res.json();
@@ -1872,6 +1912,21 @@ const STATUS_COLORS = {
   'Closed': 'chip-red',
 };
 
+function deadlineChipHtml(m) {
+  if (!m.next_deadline) return '';
+  const today = new Date(); today.setHours(0,0,0,0);
+  const deadline = new Date(m.next_deadline + 'T00:00:00');
+  const daysUntil = Math.round((deadline - today) / 86400000);
+  let color, label;
+  if (daysUntil < 0)      { color = 'chip-red';  label = `⚠ Overdue ${Math.abs(daysUntil)}d`; }
+  else if (daysUntil === 0) { color = 'chip-red';  label = '⚠ Due today'; }
+  else if (daysUntil <= 7)  { color = 'chip-red';  label = `⏰ ${daysUntil}d left`; }
+  else if (daysUntil <= 21) { color = 'chip-gold'; label = `⏰ ${daysUntil}d left`; }
+  else                      { color = 'chip-blue'; label = `${m.next_deadline}`; }
+  const title = m.next_deadline_note ? escHtml(m.next_deadline_note) : 'Critical deadline';
+  return `<span class="chip ${color}" title="${title}">${label}</span>`;
+}
+
 function renderMattersList(filtered = null) {
   const el = document.getElementById('matters-list');
   const countEl = document.getElementById('matters-count');
@@ -1935,6 +1990,7 @@ function renderMattersList(filtered = null) {
             ${extRef ? `<span class="chip chip-blue" title="External reference">${escHtml(extRef)}</span>` : ''}
             ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
             <span class="chip ${statusColor}">${escHtml(status)}</span>
+            ${deadlineChipHtml(m)}
             <span style="font-size:0.7rem;color:var(--ink3)">${m.document_count || 0} doc${m.document_count !== 1 ? 's' : ''}</span>
             ${(m.progress_notes||[]).length ? `<span style="font-size:0.7rem;color:var(--ink3)">${m.progress_notes.length} note${m.progress_notes.length !== 1 ? 's' : ''}</span>` : ''}
             ${lastActivity ? `<span style="font-size:0.7rem;color:var(--ink3)">· ${lastActivity}</span>` : ''}
