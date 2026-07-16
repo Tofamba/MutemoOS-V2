@@ -4480,6 +4480,67 @@ DOC_TYPE_GUIDANCE = {
 - Transfer obligations: who bears transfer costs, rates clearance, timeline to transfer
 - Occupation/possession date, risk and benefit passing, breach and cancellation clauses""",
 
+    "sale_of_vehicle_or_equipment": """SALE OF VEHICLE OR EQUIPMENT — MOVABLE PROPERTY (not the Deeds Registries Act — a different regime entirely):
+
+Applies across a wide range — from a single vehicle to heavy industrial/mining equipment (lathes,
+milling machines, conveyor systems, mining plant). Adapt which considerations below actually apply
+based on what is being sold; not everything applies to every transaction.
+
+Common to all:
+- Establish whether the Seller is selling as principal (already the owner) or as an agent/dealer selling
+  on behalf of a third party disposing of the item — a common arrangement for vehicle dealerships in
+  particular. If selling as agent: the contract should say so, and should not simply name the dealer as
+  "the Seller" without disclosing this, since a covenant to "convey ownership" or "execute all documents
+  necessary to finalise transfer" may be a promise the dealer cannot keep alone — for a vehicle, CVR
+  registration transfer requires the registered owner's own signature/authority, not merely whoever
+  collected the purchase price. Where the Seller is acting as agent, either the actual registered owner
+  should be a party (or provide a power of attorney), or the dealer should expressly warrant it has that
+  owner's authority to sell and that the owner will cooperate with the registration transfer
+- Full description of the item — for a vehicle: make, model, registration number, engine number, and
+  chassis/VIN number, matching the registration book (logbook) exactly; for equipment: make, model,
+  and serial number, matching the equipment's own identification plate/documentation. For multiple
+  items (e.g. a set of factory machinery), a schedule listing each item individually is preferable to a
+  single lump description. Flag clearly that these details must be verified against the actual
+  registration book or identification markings, not just what the parties have stated — note also that
+  for a vehicle, the chassis number and VIN are normally the same value for modern vehicles; if a
+  contract lists them as two different numbers, that is worth querying rather than assuming correct
+- Seller's warranty of title: that the Seller is the lawful and sole owner, and that the item is free of any
+  lien, encumbrance, hire-purchase agreement, equipment finance/leasing arrangement, or other
+  third-party claim
+- Purchase price and payment terms (cash on signature is typical for smaller items; for higher-value
+  industrial equipment, consider staged payment tied to delivery/installation/commissioning milestones
+  rather than full payment upfront)
+- Sold "voetstoots" (as-is) — no warranty as to mechanical/operational condition or fitness for
+  purpose, unless specific representations are made and recorded. For equipment represented as
+  operational/functional, consider whether a testing or commissioning period with a defined
+  acceptance mechanism is more appropriate than a bare as-is sale
+- Breach and cancellation clauses proportionate to the value of the transaction
+
+Additional, for a vehicle specifically:
+- Confirmation that a Central Vehicle Registry (CVR) search/clearance and police clearance
+  (confirming it is not reported stolen) have been or will be obtained before transfer
+- Transfer of registration into the Purchaser's name at CVR/Vehicle Registration Department — who is
+  responsible for effecting this, the timeline, and who bears the transfer fee
+- Roadworthy certificate: note whether one exists or is required (mandatory for public service
+  vehicles/commercial use in some cases; not always required for a private sale — flag as something
+  to confirm rather than assume)
+
+Additional, for larger/industrial/mining equipment specifically:
+- Decommissioning, rigging, and removal from the Seller's premises — who arranges and pays for
+  this, and what access to the site the Purchaser (or their contractors) requires
+- Delivery, transport, reinstallation, and commissioning at the new site — who is responsible, and
+  whether risk passes on removal from the Seller's site, on delivery, or only on successful
+  commissioning (these can be materially different points in time for heavy equipment)
+- Whether existing technical documentation, service/maintenance manuals, spare parts inventory,
+  and any manufacturer warranty registration transfer with the equipment
+- Safety and regulatory compliance — certification relevant to the specific equipment (e.g. pressure
+  vessel/boiler inspection certificates for factory machinery, Ministry of Mines/Environmental
+  Management Act compliance for mining equipment) — flag as something to confirm applies and is
+  current, not something to assume
+- If the equipment is being sold in situ or as part of broader business assets, consider whether VAT
+  applies (this is more likely to arise here than in a private individual vehicle sale) and who bears
+  responsibility for any site/environmental conditions left behind after removal""",
+
     "acknowledgement_of_debt": """ACKNOWLEDGEMENT OF DEBT (liquid document, consent to judgment):
 - Clear acknowledgement of the specific amount owed and its basis
 - Repayment terms (schedule or lump sum, interest rate if applicable)
@@ -4590,6 +4651,7 @@ DRAFT_TYPE_TO_UPLOAD_TYPES = {
     "agreement": ["contract"],
     "joint_venture": ["contract", "deed_of_settlement"],
     "agreement_of_sale": ["contract", "lease_agreement"],
+    "sale_of_vehicle_or_equipment": ["contract"],
     "acknowledgement_of_debt": ["deed_of_settlement", "contract"],
     "power_of_attorney_transfer": ["power_of_attorney"],
     "declaration_transferor": ["declaration", "power_of_attorney"],
@@ -4694,6 +4756,7 @@ DOC_TYPE_LABELS_BACKEND = {
     "agreement": "Agreement / Contract",
     "joint_venture": "Joint Venture / Shareholders Agreement",
     "agreement_of_sale": "Agreement of Sale (Immoveable Property)",
+    "sale_of_vehicle_or_equipment": "Agreement of Sale (Vehicle or Equipment)",
     "acknowledgement_of_debt": "Acknowledgement of Debt",
     "power_of_attorney_transfer": "Power of Attorney to Pass Transfer",
     "declaration_transferor": "Declaration by Transferor",
