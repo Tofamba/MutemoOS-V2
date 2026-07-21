@@ -1683,13 +1683,20 @@ async function requestLoginOtp() {
       body: JSON.stringify({ phone })
     });
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Failed to send code'); }
+    const data = await res.json();
 
     loginPhone = phone;
-    document.getElementById('login-phone-display').textContent = phone;
+    // Show where the code actually went — this used to always say "your
+    // phone" regardless of channel, which was actively wrong whenever
+    // WhatsApp wasn't configured and it silently went to email instead.
+    const destinationText = data.channel === 'whatsapp' ? `WhatsApp (${phone})`
+                           : data.channel === 'email' ? 'your email'
+                           : phone;
+    document.getElementById('login-phone-display').textContent = destinationText;
     document.getElementById('login-step-phone').style.display = 'none';
     document.getElementById('login-step-code').style.display = 'block';
     document.getElementById('login-code').focus();
-    showLoginStatus('Code sent. Check your phone.', 'success');
+    showLoginStatus(`Code sent via ${data.channel === 'whatsapp' ? 'WhatsApp' : 'email'}.`, 'success');
   } catch(e) {
     showLoginStatus(e.message, 'error');
   } finally {

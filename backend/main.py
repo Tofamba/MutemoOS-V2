@@ -652,7 +652,7 @@ def _send_email_otp(email: str, code: str) -> bool:
         print(f"[otp] Email send failed: {e}")
         return False
 
-def _send_otp_code(phone: str, email: Optional[str], code: str) -> bool:
+def _send_otp_code(phone: str, email: Optional[str], code: str) -> Optional[str]:
     """
     Sends the OTP via whichever channel is actually configured. Prefers
     WhatsApp (the eventual target, once Meta Business Verification
@@ -660,15 +660,22 @@ def _send_otp_code(phone: str, email: Optional[str], code: str) -> bool:
     via Resend, which is already working today. Once WHATSAPP_ACCESS_TOKEN
     and WHATSAPP_PHONE_NUMBER_ID are set on Railway, this automatically
     starts sending via WhatsApp instead — no further code change needed.
+
+    Returns the channel actually used ("whatsapp" / "email"), or None if
+    nothing could be sent — this was previously just True/False, which is
+    why the login screen kept saying "code sent to your phone" even when
+    it had actually gone to email: the frontend had no way to know which
+    channel was really used.
     """
     if WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID:
         if _send_whatsapp_otp(phone, code):
-            return True
+            return "whatsapp"
         print(f"[otp] WhatsApp send failed for {phone}, falling back to email")
     if email and _EMAIL_OTP_CONFIGURED:
-        return _send_email_otp(email, code)
+        if _send_email_otp(email, code):
+            return "email"
     print(f"[otp] No delivery channel available for {phone} (no email on file and WhatsApp not configured)")
-    return False
+    return None
 
 def _send_whatsapp_otp(phone: str, code: str) -> bool:
     """
@@ -749,10 +756,18 @@ async def request_otp(req: OTPRequestBody):
             ON CONFLICT (phone) DO UPDATE SET code=$2, attempts=0, expires_at=$3
         """, phone, code, expires)
 
-    sent = await asyncio.to_thread(_send_otp_code, phone, known_email, code)
-    if not sent:
+    channel = await asyncio.to_thread(_send_otp_code, phone, known_email, code)
+    if not channel:
         raise HTTPException(status_code=500, detail="Failed to send login code. Please try again.")
-    return {"sent": True, "message": "If this number is registered, a code has been sent."}
+    # Channel is only returned for numbers we've already confirmed are known
+    # (we returned early above for unknown ones with the same generic
+    # message every time) — so this doesn't create a new way to probe
+    # whether an arbitrary number is registered.
+    return {
+        "sent": True,
+        "channel": channel,
+        "message": f"A code has been sent via {channel}.",
+    }
 
 @app.post("/api/auth/verify-otp")
 async def verify_otp(req: OTPVerifyBody, response: Response):
