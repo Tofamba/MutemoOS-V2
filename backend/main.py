@@ -911,6 +911,19 @@ async def session_auth_middleware(request, call_next):
             if row:
                 return await call_next(request)
 
+    # A valid X-Admin-Token is also sufficient — this is how the
+    # mutemo-legal-feed pusher authenticates its machine-to-machine calls
+    # to /api/legal-updates/upload and /api/zlr/upload (it has no session
+    # cookie at all, and never will, since it isn't a logged-in user).
+    # This was a real, live regression: once AUTH_ENABLED actually started
+    # being enforced (following the invite-gating/OTP fixes), this
+    # middleware had no exemption for that header at all, meaning the
+    # daily scraper's pushes would have started silently failing with 401
+    # the moment auth was properly turned on.
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if ADMIN_TOKEN and admin_token_header == ADMIN_TOKEN:
+        return await call_next(request)
+
     return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
 # ── User management endpoints ─────────────────────────────────────────────────
@@ -1110,6 +1123,168 @@ async def invite_user(req: InviteRequest, request: Request):
         "cloudflare_updated": cf_rule_id is not None,
         "email_sent": email_sent,
     }
+
+class BootstrapAdminRequest(BaseModel):
+    phone: str
+    email: str
+    display_name: str
+
+@app.post("/api/admin/bootstrap")
+async def bootstrap_admin(req: BootstrapAdminRequest, request: Request):
+    """
+    One-time, self-disabling admin provisioning for a freshly deployed
+    instance. Closes a real gap found this week: a brand-new instance has
+    no supported way to create its first admin — the only path was
+    manual SQL directly against Postgres (which is exactly how Lenard had
+    to bootstrap his own account on this very instance). This is not an
+    authentication feature — the OTP/invite system works fine once a user
+    exists. It's a bootstrap *lifecycle* problem: how does a freshly
+    deployed instance go from "deployed software" to "owned and usable
+    firm system."
+
+    Deliberately stricter than require_admin_token() elsewhere in this
+    file, which silently allows access if MUTEMO_ADMIN_TOKEN isn't
+    configured — too permissive for an operation this sensitive. Here,
+    a missing/unset token means bootstrap is refused outright, not
+    silently allowed.
+
+    Self-disabling by construction: refuses unconditionally the moment
+    any admin already exists for this firm, regardless of whether the
+    token is valid — a provisioning credential for a one-time gap, not a
+    standing backdoor.
+    """
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="Bootstrap is not available - MUTEMO_ADMIN_TOKEN is not configured on this server.")
+    token = request.headers.get("X-Admin-Token", "")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    async with _db_pool.acquire() as conn:
+        existing_admin = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE firm_id=$1 AND role='admin' AND is_active=TRUE)",
+            FIRM_ID
+        )
+    if existing_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="An admin already exists for this firm — bootstrap is no longer available. Use the normal invite flow instead."
+        )
+
+    phone = req.phone.strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="Phone number is required — this is what gates account creation.")
+
+    # Reuses the exact same invites-table + normal phone/OTP login path as
+    # every other user, rather than creating a parallel account-creation
+    # mechanism — the first admin ends up going through the same tested,
+    # audited path as everyone who comes after them.
+    try:
+        cf_rule_id = await _add_email_to_cloudflare_access(req.email)
+    except Exception as e:
+        print(f"[bootstrap] CF access error (non-fatal): {e}")
+        cf_rule_id = None
+
+    async with _db_pool.acquire() as conn:
+        try:
+            await conn.execute("""
+                INSERT INTO invites (firm_id, email, phone, display_name, role, cf_rule_id, sent_at)
+                VALUES ($1, $2, $3, $4, 'admin', $5, NOW())
+                ON CONFLICT (firm_id, email) DO UPDATE SET
+                    phone=$3, display_name=$4, role='admin', cf_rule_id=$5, sent_at=NOW(), accepted_at=NULL
+            """, FIRM_ID, req.email, phone, req.display_name, str(cf_rule_id) if cf_rule_id else None)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Could not create bootstrap admin invite: {e}")
+
+    email_sent = await _send_invite_email(req.email, req.display_name, "Mutemo Desk setup")
+
+    return {
+        "bootstrapped": True,
+        "message": f"Admin invite created for {phone}. Log in normally via the phone/OTP login screen to complete setup.",
+        "cloudflare_updated": cf_rule_id is not None,
+        "email_sent": email_sent,
+    }
+
+@app.get("/api/admin/export-legal-corpus")
+async def export_legal_corpus(request: Request, source: str = "legal", limit: int = 50, offset: int = 0):
+    """
+    Exports this firm's already-scraped/uploaded legal content — legislation
+    and news (source='legal') or ZLR judgments (source='zlr') — in a form
+    ready to be replayed into a brand-new firm's instance via the normal
+    /api/legal-updates/upload or /api/zlr/upload endpoints. Built so a new
+    firm doesn't have to start Search Vault from zero and wait weeks for
+    the daily scraper to slowly catch up.
+
+    Deliberately only ever touches legal_updates/zlr_entries — the genuinely
+    shared, non-firm-specific legal corpus. Never exports anything from
+    documents/matters, which stay private to this firm regardless.
+    """
+    require_admin_token(request)
+    if source not in ("legal", "zlr"):
+        raise HTTPException(status_code=400, detail="source must be 'legal' or 'zlr'")
+
+    if source == "legal":
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM legal_updates WHERE firm_id=$1 AND status='complete'
+                ORDER BY uploaded_at ASC LIMIT $2 OFFSET $3
+            """, FIRM_ID, limit, offset)
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM legal_updates WHERE firm_id=$1 AND status='complete'", FIRM_ID
+            )
+
+        items = []
+        for r in rows:
+            async with _db_pool.acquire() as conn:
+                chunk_rows = await conn.fetch(
+                    "SELECT text FROM chunks WHERE document_id=$1 AND chunk_source='legal' ORDER BY chunk_index",
+                    r["id"]
+                )
+            full_text = "\n\n".join(c["text"] for c in chunk_rows)
+            if not full_text.strip():
+                continue  # nothing to replay for this item — skip rather than push an empty document
+            items.append({
+                "title": r["reference"] or r["filename"],
+                "source_type": r["source_type"],
+                "source_name": r["source_name"],
+                "reference": r["reference"],
+                "document_type": r["document_type"],
+                "matter_type": r["matter_type"],
+                "doc_date": str(r["doc_date"]) if r["doc_date"] else None,
+                "court": r["court"],
+                "source_url": r["source_url"],
+                "text": full_text,
+            })
+        return {"source": "legal", "total": total, "limit": limit, "offset": offset, "items": items}
+
+    else:  # zlr
+        async with _db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT * FROM zlr_entries
+                WHERE firm_id=$1 AND raw_text IS NOT NULL AND raw_text != ''
+                ORDER BY uploaded_at ASC LIMIT $2 OFFSET $3
+            """, FIRM_ID, limit, offset)
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM zlr_entries WHERE firm_id=$1 AND raw_text IS NOT NULL AND raw_text != ''",
+                FIRM_ID
+            )
+
+        items = [{
+            "case_name": r["case_name"],
+            "citation": r["citation"],
+            "judgment_number": r["judgment_number"],
+            "court": r["court"],
+            "judge": r["judge"],
+            "case_type": r["case_type"],
+            "hearing_date": r["hearing_date"],
+            "judgment_date": r["judgment_date"],
+            "taxonomy_category": r["taxonomy_category"],
+            "summary": r["summary"],
+            "jurisdiction": r["jurisdiction"],
+            "authority_weight": r["authority_weight"],
+            "zimlii_url": r["zimlii_url"],
+            "text": r["raw_text"],
+        } for r in rows]
+        return {"source": "zlr", "total": total, "limit": limit, "offset": offset, "items": items}
 
 @app.get("/api/admin/invites")
 async def list_invites(request: Request):
@@ -2801,8 +2976,12 @@ async def upload_legal_update(
     request: Request = None,
 ):
     if request:
-        user = await get_current_user(request)
-        _check_permission(user, "legal:upload")
+        admin_token_header = request.headers.get("X-Admin-Token", "")
+        if not (ADMIN_TOKEN and admin_token_header == ADMIN_TOKEN):
+            # Not a valid admin-token call (the pusher's normal path) — fall
+            # back to requiring a genuine logged-in user, same as before.
+            user = await get_current_user(request)
+            _check_permission(user, "legal:upload")
 
     # Items without a PDF (e.g. scraped news articles) arrive with no file —
     # `file` is optional precisely for that case. Prefer the real article/
@@ -3562,8 +3741,10 @@ async def upload_zlr_document(
     request: Request = None,
 ):
     if request:
-        user = await get_current_user(request)
-        _check_permission(user, "legal:upload")
+        admin_token_header = request.headers.get("X-Admin-Token", "")
+        if not (ADMIN_TOKEN and admin_token_header == ADMIN_TOKEN):
+            user = await get_current_user(request)
+            _check_permission(user, "legal:upload")
 
     # `file` is optional — the feed service pushes metadata-only when a PDF
     # couldn't be downloaded (e.g. ZimLII Cloudflare blocking the download).
