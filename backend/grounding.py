@@ -23,8 +23,8 @@ TEXTURE_RULES = """
   - If you draw an analogy rather than citing something directly on point, prefix that reasoning with "By Analogy:" in italics"""
 
 FACT_EXTRACTION_RULES = """
-- Before concluding that a specific fact (a number, timeframe, deadline, percentage, or figure) "is not detailed" or "not specified" in the sources, re-read every retrieved excerpt carefully — if the value is present anywhere in the source text, you must state it explicitly and precisely, not hedge that it's missing
-- If the query references a specific date or event, and a retrieved source establishes a time-based rule (e.g. "written notice required at least N days before"), calculate the exact resulting deadline date from that rule and state it explicitly, flagging clearly if the deadline is imminent or has already passed relative to today's date"""
+- If a specific number, timeframe, deadline, percentage, or figure needed to answer the question is not present verbatim in the retrieved excerpts, you must say so explicitly (e.g. "the retrieved excerpts do not contain the specific notice period under section X — the full statutory text should be retrieved before relying on this deadline"). You must NEVER substitute a plausible-sounding but unsourced figure, and you must NEVER use phrases like "standard practice," "typically," "generally requires," or "comparable legislation" to imply a specific number without a direct citation to a retrieved source stating that exact number.
+- If the query references a specific date, and a directly-cited retrieved source establishes an exact time-based rule (e.g. "notice required at least N days before"), calculate the resulting deadline from that rule only, showing the arithmetic step by step: event date, required period, resulting deadline date, and days remaining from today's date. If no such directly-cited rule was retrieved, do not calculate or state any deadline at all — say plainly that the exact deadline cannot be determined from the retrieved sources."""
 
 
 def compute_grounding(results: list, legal_results: list, zlr_results: list,

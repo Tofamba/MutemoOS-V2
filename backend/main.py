@@ -31,6 +31,7 @@ import time
 import hmac
 from datetime import datetime, timedelta, date
 from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES
+from backend.deadline_engine import try_compute_deadline
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
 try:
@@ -4122,13 +4123,15 @@ async def search_documents(req: SearchRequest, request: Request):
                 "summary": r.get("summary"),
             })
 
+    deadline_info = try_compute_deadline(req.query, legal_results, zlr_results)
+
     all_results = results + legal_results + zlr_results
     for r in all_results:
         r["display_label"] = display_label(r)
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
-    answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3])
+    answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3], deadline_info=deadline_info)
     grounding = compute_grounding(results, legal_results, zlr_results)
     answer = apply_confidence_safeguard(answer, grounding)
 
@@ -4582,7 +4585,8 @@ def _semantic_search_legal(req, chunks: list) -> list:
 
 def synthesise_answer_sync(query: str, results: list, legal_results: list, zlr_results: list,
                             attached_doc_text: Optional[str] = None,
-                            attached_doc_name: Optional[str] = None) -> str:
+                            attached_doc_name: Optional[str] = None,
+                            deadline_info: Optional[dict] = None) -> str:
     if not results and not legal_results and not zlr_results and not attached_doc_text:
         return None
     context = format_context(results, legal_results, zlr_results)
@@ -4597,6 +4601,18 @@ referencing its actual clauses/wording where relevant:
 ---
 {attached_doc_text}
 ---"""
+
+    deadline_block = ""
+    if deadline_info:
+        deadline_block = f"""
+PRE-CALCULATED DEADLINE (computed deterministically — state this exactly, do not recalculate):
+Event date: {deadline_info['event_date']}
+Notice period required: {deadline_info['notice_period_days']} days (per {deadline_info['source_reference']})
+Calculated deadline: {deadline_info['deadline']}
+Status: {deadline_info['status']}
+"""
+    else:
+        deadline_block = "\nNo notice-period figure with an exact day count was found in the retrieved sources — do not state or calculate any specific deadline; say plainly that this cannot be determined from the retrieved sources.\n"
 
     if attached_doc_text:
         instructions = """Answer the question about the attached document directly and specifically:
@@ -4626,6 +4642,7 @@ Today's date: {datetime.utcnow().strftime('%Y-%m-%d')}
 
 Query: {query}
 {attached_block}
+{deadline_block}
 
 Sources:
 {context if context else '(no additional firm/legal sources retrieved)'}
