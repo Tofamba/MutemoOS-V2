@@ -30,7 +30,7 @@ import secrets
 import time
 import hmac
 from datetime import datetime, timedelta, date
-from grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard
+from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
 try:
