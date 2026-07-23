@@ -104,6 +104,31 @@ def format_context(results: list, legal_results: list, zlr_results: list) -> str
     return "\n\n---\n\n".join(context_parts)
 
 
+def display_label(r: dict) -> str:
+    """Human-facing label for a retrieved source."""
+    result_source = r.get("result_source")
+
+    if result_source == "firm":
+        return "Firm Precedent"
+
+    if result_source == "zlr":
+        return "Zimbabwe Case Law"
+
+    if result_source == "legal":
+        source_type = r.get("source_type")
+
+        if source_type == "legislation":
+            return "Constitution / Legislation"
+        if source_type == "news":
+            return "Current News"
+        if source_type == "press_statement":
+            return "Legal Feed — Press Statement"
+
+        return "Legal Feed"
+
+    return "Unknown Source"
+
+
 def apply_confidence_safeguard(answer_text: str, grounding: dict) -> str:
     """Prepend a hard warning when an under-grounded answer still reads as assertive."""
     if not answer_text or grounding.get("sources_sufficient", True):

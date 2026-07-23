@@ -30,7 +30,7 @@ import secrets
 import time
 import hmac
 from datetime import datetime, timedelta, date
-from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard
+from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
 try:
@@ -4117,6 +4117,8 @@ async def search_documents(req: SearchRequest, request: Request):
             })
 
     all_results = results + legal_results + zlr_results
+    for r in all_results:
+        r["display_label"] = display_label(r)
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
