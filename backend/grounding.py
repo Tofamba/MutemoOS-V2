@@ -91,7 +91,7 @@ def format_context(results: list, legal_results: list, zlr_results: list) -> str
     """Build the source context block injected into the synthesis prompt."""
     context_parts = []
     for r in (results or [])[:5]:
-        context_parts.append(f"[FIRM PRECEDENT — {r.get('document_id','')}]\n{r['text']}")
+        context_parts.append(f"[FIRM PRECEDENT — {r.get('filename', 'Unknown Document')}]\n{r['text']}")
     for r in (legal_results or [])[:3]:
         ref = r.get("reference") or r.get("source_name") or "Legal Source"
         if r.get("source_type") in CONTEXT_SOURCE_TYPES:

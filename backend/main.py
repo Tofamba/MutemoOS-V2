@@ -4082,7 +4082,13 @@ async def search_documents(req: SearchRequest, request: Request):
     # Load chunks from DB for keyword fallback
     async with _db_pool.acquire() as conn:
         firm_chunk_rows = await conn.fetch(
-            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
+            """
+            SELECT c.*, d.filename AS document_filename
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='firm'
+            """,
+            FIRM_ID
         )
         legal_chunk_rows = await conn.fetch(
             "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
@@ -4517,6 +4523,7 @@ def _semantic_search_firm(req, chunks: list) -> list:
                     "matter_id": chunk.get("matter_id"),
                     "page_number": chunk.get("page_number"),
                     "chunk_index": chunk.get("chunk_index"),
+                    "filename": chunk.get("document_filename") or "Unknown Document",
                 })
                 if len(results) >= req.limit:
                     break
@@ -4537,6 +4544,7 @@ def _semantic_search_firm(req, chunks: list) -> list:
                 "similarity": round(score, 3),
                 "document_id": str(chunk["document_id"]),
                 "matter_id": chunk.get("matter_id"),
+                "filename": chunk.get("document_filename") or "Unknown Document",
             })
     return results
 
