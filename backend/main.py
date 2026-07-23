@@ -30,6 +30,7 @@ import secrets
 import time
 import hmac
 from datetime import datetime, timedelta, date
+from grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
 try:
@@ -431,6 +432,22 @@ async def run_migrations():
 
         -- Migrate invites: add organisation_role column (spec-correct name, no FK)
         ALTER TABLE invites ADD COLUMN IF NOT EXISTS organisation_role TEXT;
+
+        -- Search/audit trail (source-quality grounding rollout)
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id     UUID NOT NULL REFERENCES firms(id),
+            user_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+            actor_name  TEXT NOT NULL,
+            actor_role  TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id   UUID,
+            details     JSONB,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_firm ON audit_logs(firm_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id);
         """)
 
         # Seed Nyari's firm if not present
@@ -4057,36 +4074,6 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-def compute_grounding(results: list, legal_results: list, zlr_results: list,
-                       has_attached_doc: bool = False) -> dict:
-    """
-    Determine whether an AI answer is actually grounded in retrieved firm/
-    legal/case-law sources, or is unsupported general reasoning — and say so
-    explicitly. This was previously dead code: the frontend has had a
-    warning UI for this since it was built, but no backend endpoint ever
-    populated sources_sufficient/grounding_note/source_gap, so a
-    zero-source answer looked identical to a well-grounded one. For a legal
-    tool, that's a real risk — confident-sounding output with nothing behind
-    it needs to be unmistakable, not indistinguishable from a verified one.
-    """
-    total = len(results) + len(legal_results) + len(zlr_results)
-    if total == 0:
-        if has_attached_doc:
-            note = ("No firm precedents or case law were found to cross-reference this "
-                    "document. This analysis is based on the document's own content and "
-                    "general legal principles only — verify against ZimLII, applicable "
-                    "legislation, and firm records before relying on it.")
-        else:
-            note = ("No firm precedents, legal updates, or case law matched this query. "
-                    "This analysis reflects general legal knowledge only — verify against "
-                    "ZimLII, applicable legislation, and firm records before relying on it.")
-        return {"sources_sufficient": False, "grounding_note": note, "source_gap": "No matching sources in the vault"}
-    return {
-        "sources_sufficient": True,
-        "grounding_note": f"Grounded in {total} retrieved source(s) from the vault.",
-        "source_gap": None,
-    }
-
 @app.post("/api/search")
 async def search_documents(req: SearchRequest, request: Request):
     user = await get_current_user(request)
@@ -4133,8 +4120,28 @@ async def search_documents(req: SearchRequest, request: Request):
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
-    answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3])
+    answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3])
     grounding = compute_grounding(results, legal_results, zlr_results)
+    answer = apply_confidence_safeguard(answer, grounding)
+
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO audit_logs (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details)
+            VALUES ($1, $2, $3, $4, 'SEARCH', 'QUERY', NULL, $5)
+            """,
+            FIRM_ID,
+            _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+            user.get("display_name", "Unknown"),
+            user.get("role", "unknown"),
+            json.dumps({
+                "query": req.query,
+                "max_similarity_score": grounding["max_similarity_score"],
+                "sources_sufficient": grounding["sources_sufficient"],
+                "source_tier_breakdown": grounding["source_tier_breakdown"],
+            }),
+        )
+
     return {"answer": answer, "results": all_results, **grounding}
 
 # Cap on attached-document text sent to the model — generous enough for a
@@ -4234,9 +4241,10 @@ async def search_with_document(
 
     all_results = results + legal_results + zlr_results
     answer = await asyncio.to_thread(
-        synthesise_answer_sync, query, results[:5], legal_results[:3], doc_text, filename
+        synthesise_answer_sync, query, results[:5], legal_results[:3], zlr_results[:3], doc_text, filename
     )
     grounding = compute_grounding(results, legal_results, zlr_results, has_attached_doc=True)
+    answer = apply_confidence_safeguard(answer, grounding)
 
     return {
         "answer": answer,
@@ -4562,18 +4570,12 @@ def _semantic_search_legal(req, chunks: list) -> list:
         print(f"[search] legal semantic search failed: {e}")
     return results
 
-def synthesise_answer_sync(query: str, results: list, legal_results: list,
+def synthesise_answer_sync(query: str, results: list, legal_results: list, zlr_results: list,
                             attached_doc_text: Optional[str] = None,
                             attached_doc_name: Optional[str] = None) -> str:
-    if not results and not legal_results and not attached_doc_text:
+    if not results and not legal_results and not zlr_results and not attached_doc_text:
         return None
-    context_parts = []
-    for r in results[:5]:
-        context_parts.append(f"[FIRM PRECEDENT — {r.get('document_id','')}]\n{r['text']}")
-    for r in (legal_results or [])[:3]:
-        ref = r.get("reference") or r.get("source_name") or "Legal Source"
-        context_parts.append(f"[{ref}]\n{r['text']}")
-    context = "\n\n---\n\n".join(context_parts)
+    context = format_context(results, legal_results, zlr_results)
 
     attached_block = ""
     if attached_doc_text:
@@ -4591,13 +4593,13 @@ referencing its actual clauses/wording where relevant:
 - Ground your analysis in the document's actual wording — reference specific clauses, dates, or terms where relevant
 - Where firm precedent or legal sources below are relevant, cross-reference them explicitly (e.g. "this clause is consistent with/departs from [reference]")
 - If the document appears to have a legal defect, gap, or unusual provision, flag it clearly
-- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection"""
+- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection""" + TEXTURE_RULES
     else:
         instructions = """Answer directly and practically:
 - If firm precedents are present, identify patterns and note them by document ID
 - If legislation or case law is present, summarise the relevant legal position and cite by reference
 - Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents"""
+- For drafting queries, suggest specific language from the firm precedents""" + TEXTURE_RULES
 
     try:
         msg = client.messages.create(
