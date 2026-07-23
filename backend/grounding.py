@@ -22,6 +22,10 @@ TEXTURE_RULES = """
   - Any use of BACKGROUND CONTEXT (news, press statements) must be prefixed with "Background Context from [Source]:" and italicized — never given the same weight as an authoritative citation
   - If you draw an analogy rather than citing something directly on point, prefix that reasoning with "By Analogy:" in italics"""
 
+FACT_EXTRACTION_RULES = """
+- Before concluding that a specific fact (a number, timeframe, deadline, percentage, or figure) "is not detailed" or "not specified" in the sources, re-read every retrieved excerpt carefully — if the value is present anywhere in the source text, you must state it explicitly and precisely, not hedge that it's missing
+- If the query references a specific date or event, and a retrieved source establishes a time-based rule (e.g. "written notice required at least N days before"), calculate the exact resulting deadline date from that rule and state it explicitly, flagging clearly if the deadline is imminent or has already passed relative to today's date"""
+
 
 def compute_grounding(results: list, legal_results: list, zlr_results: list,
                        has_attached_doc: bool = False) -> dict:
