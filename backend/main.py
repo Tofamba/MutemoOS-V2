@@ -30,7 +30,7 @@ import secrets
 import time
 import hmac
 from datetime import datetime, timedelta, date
-from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES
+from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES
 from backend.deadline_engine import try_compute_deadline
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
@@ -4619,13 +4619,13 @@ Status: {deadline_info['status']}
 - Ground your analysis in the document's actual wording — reference specific clauses, dates, or terms where relevant
 - Where firm precedent or legal sources below are relevant, cross-reference them explicitly (e.g. "this clause is consistent with/departs from [reference]")
 - If the document appears to have a legal defect, gap, or unusual provision, flag it clearly
-- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection""" + TEXTURE_RULES + FACT_EXTRACTION_RULES
+- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES
     else:
         instructions = """Answer directly and practically:
 - If firm precedents are present, identify patterns and note them by document ID
 - If legislation or case law is present, summarise the relevant legal position and cite by reference
 - Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents""" + TEXTURE_RULES + FACT_EXTRACTION_RULES
+- For drafting queries, suggest specific language from the firm precedents""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES
 
     try:
         msg = client.messages.create(

@@ -221,6 +221,12 @@ select{cursor:pointer}
 .ai-answer{background:linear-gradient(135deg,#fdf0e8,#fef4ec);border:1px solid #e8c0a0;border-radius:var(--radius);padding:1rem 1.25rem;margin-bottom:1.25rem}
 .ai-answer-label{font-size:0.68rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--green);margin-bottom:0.5rem}
 .ai-answer-text{font-size:0.84rem;line-height:1.7;color:var(--ink2);white-space:pre-wrap}
+.conclusion-block { margin: 0.75rem 0; padding: 0.5rem 0.75rem; border-left: 3px solid var(--ink3); border-radius: 4px; }
+.conclusion-badge { display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.03em; padding: 0.15rem 0.5rem; border-radius: 3px; margin-bottom: 0.3rem; }
+.badge-grounded { border-left-color: #1a7f37; } .badge-grounded .conclusion-badge { background: #dafbe1; color: #1a7f37; }
+.badge-verify { border-left-color: #a15c00; } .badge-verify .conclusion-badge { background: #fff4d6; color: #a15c00; }
+.badge-analogy { border-left-color: #6639ba; } .badge-analogy .conclusion-badge { background: #ede4ff; color: #6639ba; }
+.badge-judgment { border-left-color: #333; } .badge-judgment .conclusion-badge { background: #eee; color: #333; }
 
 /* ── Calendar ── */
 .cal-event{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);padding:0.85rem 1rem;margin-bottom:0.6rem;display:flex;align-items:center;gap:12px}
@@ -2564,10 +2570,11 @@ function renderSearchResults(data, query) {
         </div>`
       : '';
     html += `<div class="ai-answer">
-      <div class="ai-answer-label">⚡ AI Analysis</div>
+     <div class="ai-answer-label">⚡ First-Pass Legal Analysis</div>
+<div class="ai-answer-disclaimer">This analysis is a first-pass research aid based on retrieved authorities. Counsel remains responsible for verifying the law, applying professional judgment, and determining the final course of action.</div>
       ${attachedBadge}
       ${topWarning}
-      <div class="ai-answer-text">${escHtml(data.answer)}</div>
+      <div class="ai-answer-text">${renderAnswerHtml(data.answer)}</div>
       ${bottomNote}
     </div>`;
   }
@@ -3217,6 +3224,68 @@ function showDigestStatus(msg, type) {
 function escHtml(str) {
   if (!str) return '';
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function renderAnswerHtml(rawAnswer) {
+  if (!rawAnswer) return '';
+
+  const CANONICAL_MARKERS = [
+    { prefix: 'Requires verification:', badgeClass: 'badge-verify', badgeText: 'REQUIRES VERIFICATION' },
+    { prefix: 'Lawyer judgment required:', badgeClass: 'badge-judgment', badgeText: 'LAWYER JUDGMENT REQUIRED' },
+    { prefix: 'By analogy:', badgeClass: 'badge-analogy', badgeText: 'ANALOGICAL AUTHORITY' },
+  ];
+
+  const VERIFICATION_FALLBACKS = [
+    /the retrieved (?:sources|excerpts|material) do(?:es)? not (?:establish|contain|specify)/i,
+    /the exact (?:provision|text|section) was not retrieved/i,
+    /cannot be determined from the retrieved sources/i,
+    /the available authorities do not (?:establish|specify)/i,
+  ];
+
+  const paragraphs = rawAnswer.split(/\n\s*\n/);
+
+  const rendered = paragraphs.map(para => {
+    const trimmed = para.trim();
+    if (!trimmed) return '';
+
+    for (const marker of CANONICAL_MARKERS) {
+      if (trimmed.startsWith(marker.prefix)) {
+        const rest = trimmed.slice(marker.prefix.length).trim();
+        return `<div class="conclusion-block ${marker.badgeClass}">
+          <span class="conclusion-badge">${marker.badgeText}</span>
+          <p>${formatInline(rest)}</p>
+        </div>`;
+      }
+    }
+
+    for (const pattern of VERIFICATION_FALLBACKS) {
+      if (pattern.test(trimmed)) {
+        return `<div class="conclusion-block badge-verify">
+          <span class="conclusion-badge">REQUIRES VERIFICATION</span>
+          <p>${formatInline(trimmed)}</p>
+        </div>`;
+      }
+    }
+
+    if (trimmed.startsWith('>')) {
+      const quoteText = trimmed.split('\n').map(l => l.replace(/^>\s?/, '')).join(' ');
+      return `<div class="conclusion-block badge-grounded">
+        <span class="conclusion-badge">DIRECTLY GROUNDED</span>
+        <blockquote>${formatInline(quoteText)}</blockquote>
+      </div>`;
+    }
+
+    return `<p>${formatInline(trimmed)}</p>`;
+  });
+
+  return rendered.join('\n');
+}
+
+function formatInline(text) {
+  let escaped = escHtml(text);
+  escaped = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  escaped = escaped.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  return escaped;
 }
 
 // ── Legal Updates ─────────────────────────────────────────────────────────────

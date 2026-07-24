@@ -26,6 +26,9 @@ FACT_EXTRACTION_RULES = """
 - If a specific number, timeframe, deadline, percentage, or figure needed to answer the question is not present verbatim in the retrieved excerpts, you must say so explicitly (e.g. "the retrieved excerpts do not contain the specific notice period under section X — the full statutory text should be retrieved before relying on this deadline"). You must NEVER substitute a plausible-sounding but unsourced figure, and you must NEVER use phrases like "standard practice," "typically," "generally requires," or "comparable legislation" to imply a specific number without a direct citation to a retrieved source stating that exact number.
 - If the query references a specific date, and a directly-cited retrieved source establishes an exact time-based rule (e.g. "notice required at least N days before"), calculate the resulting deadline from that rule only, showing the arithmetic step by step: event date, required period, resulting deadline date, and days remaining from today's date. If no such directly-cited rule was retrieved, do not calculate or state any deadline at all — say plainly that the exact deadline cannot be determined from the retrieved sources."""
 
+LAWYER_JUDGMENT_RULES = """
+- Where a conclusion depends on litigation strategy, tactical or forum choices, timing/urgency judgment calls, settlement or appeal decisions, or facts that cannot be resolved from the retrieved authorities, begin that point with the exact line "Lawyer judgment required:" followed by a clear statement of what depends on counsel's professional assessment rather than on the retrieved law alone."""
+
 
 def compute_grounding(results: list, legal_results: list, zlr_results: list,
                        has_attached_doc: bool = False) -> dict:
