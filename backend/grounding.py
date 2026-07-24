@@ -29,6 +29,9 @@ FACT_EXTRACTION_RULES = """
 LAWYER_JUDGMENT_RULES = """
 - Where a conclusion depends on litigation strategy, tactical or forum choices, timing/urgency judgment calls, settlement or appeal decisions, or facts that cannot be resolved from the retrieved authorities, you MUST start a new paragraph (a blank line before it) that begins with the exact line "Lawyer judgment required:" on its own, followed by a clear statement of what depends on counsel's professional assessment rather than on the retrieved law alone. Never embed this marker mid-paragraph — it must always open its own paragraph, exactly like the "Requires verification:" and "By analogy:" markers."""
 
+STATUTORY_MECHANISM_PRECISION = """
+- When discussing statutory powers that create legal consequences in stages (e.g. a power that first makes conduct unlawful, followed by a separate power that acts on that unlawfulness), always name the SPECIFIC mechanism precisely rather than using a general term for multiple distinct provisions. For example, under MOPA: distinguish a "condition" imposed under s.8(6) from a "prohibition notice," "direction," or "order" under s.8 — these have different legal consequences — and distinguish either of those (which may render a gathering unlawful) from the SEPARATE question of whether s.13 dispersal/force is then permitted. Never use a general word like "banned" or "prohibited" to refer to more than one of these distinct mechanisms in the same answer without specifying which one applies."""
+
 
 def compute_grounding(results: list, legal_results: list, zlr_results: list,
                        has_attached_doc: bool = False) -> dict:
