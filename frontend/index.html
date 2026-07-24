@@ -3234,7 +3234,6 @@ function renderAnswerHtml(rawAnswer) {
     { prefix: 'Lawyer judgment required:', badgeClass: 'badge-judgment', badgeText: 'LAWYER JUDGMENT REQUIRED' },
     { prefix: 'By analogy:', badgeClass: 'badge-analogy', badgeText: 'ANALOGICAL AUTHORITY' },
   ];
-
   const VERIFICATION_FALLBACKS = [
     /the retrieved (?:sources|excerpts|material) do(?:es)? not (?:establish|contain|specify)/i,
     /the exact (?:provision|text|section) was not retrieved/i,
@@ -3242,40 +3241,64 @@ function renderAnswerHtml(rawAnswer) {
     /the available authorities do not (?:establish|specify)/i,
   ];
 
-  const paragraphs = rawAnswer.split(/\n\s*\n/);
+  function splitOnMidParagraphMarker(text) {
+    for (const marker of CANONICAL_MARKERS) {
+      const idx = text.indexOf(marker.prefix);
+      if (idx > 0) {
+        return { before: text.slice(0, idx).trim(), marker, rest: text.slice(idx + marker.prefix.length).trim() };
+      }
+    }
+    return null;
+  }
 
-  const rendered = paragraphs.map(para => {
+  const paragraphs = rawAnswer.split(/\n\s*\n/);
+  const rendered = [];
+
+  paragraphs.forEach(para => {
     const trimmed = para.trim();
-    if (!trimmed) return '';
+    if (!trimmed) return;
 
     for (const marker of CANONICAL_MARKERS) {
       if (trimmed.startsWith(marker.prefix)) {
         const rest = trimmed.slice(marker.prefix.length).trim();
-        return `<div class="conclusion-block ${marker.badgeClass}">
+        rendered.push(`<div class="conclusion-block ${marker.badgeClass}">
           <span class="conclusion-badge">${marker.badgeText}</span>
           <p>${formatInline(rest)}</p>
-        </div>`;
+        </div>`);
+        return;
       }
     }
 
     for (const pattern of VERIFICATION_FALLBACKS) {
       if (pattern.test(trimmed)) {
-        return `<div class="conclusion-block badge-verify">
+        rendered.push(`<div class="conclusion-block badge-verify">
           <span class="conclusion-badge">REQUIRES VERIFICATION</span>
           <p>${formatInline(trimmed)}</p>
-        </div>`;
+        </div>`);
+        return;
       }
     }
 
     if (trimmed.startsWith('>')) {
       const quoteText = trimmed.split('\n').map(l => l.replace(/^>\s?/, '')).join(' ');
-      return `<div class="conclusion-block badge-grounded">
+      rendered.push(`<div class="conclusion-block badge-grounded">
         <span class="conclusion-badge">DIRECTLY GROUNDED</span>
         <blockquote>${formatInline(quoteText)}</blockquote>
-      </div>`;
+      </div>`);
+      return;
     }
 
-    return `<p>${formatInline(trimmed)}</p>`;
+    const split = splitOnMidParagraphMarker(trimmed);
+    if (split) {
+      rendered.push(`<p>${formatInline(split.before)}</p>`);
+      rendered.push(`<div class="conclusion-block ${split.marker.badgeClass}">
+        <span class="conclusion-badge">${split.marker.badgeText}</span>
+        <p>${formatInline(split.rest)}</p>
+      </div>`);
+      return;
+    }
+
+    rendered.push(`<p>${formatInline(trimmed)}</p>`);
   });
 
   return rendered.join('\n');
