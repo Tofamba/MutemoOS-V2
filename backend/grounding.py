@@ -32,7 +32,15 @@ BANNED_ASSERTIVE_TERMS = ["strong", "clear", "fatal", "void", "certain", "direct
 TEXTURE_RULES = """
   - Any direct quote or citation from a FIRM PRECEDENT, ZLR CASE LAW, or LEGAL UPDATE source must be presented as a markdown blockquote (> ...) with the source reference bolded
   - Any use of BACKGROUND CONTEXT (news, press statements) must be prefixed with "Background Context from [Source]:" and italicized — never given the same weight as an authoritative citation
-  - If you draw an analogy rather than citing something directly on point, prefix that reasoning with "By Analogy:" in italics"""
+  - If you draw an analogy rather than citing something directly on point, prefix that reasoning with "By Analogy:" in italics
+  - When quoting a source directly in a blockquote (> ...), the blockquote must contain ONLY the exact verbatim text from the source — nothing else. Any framing phrase such as "Section 8(4) states:" or "Section 13(2) provides that..." must be written as ordinary prose BEFORE the blockquote, never inside it.
+    Correct:
+    Section 8(4) states:
+
+    > discussions shall be held on the contents of the convening notice...
+
+    Incorrect:
+    > Section 8(4) states: "discussions shall be held...\""""
 
 FACT_EXTRACTION_RULES = """
 - If a specific number, timeframe, deadline, percentage, or figure needed to answer the question is not present verbatim in the retrieved excerpts, you must say so explicitly (e.g. "the retrieved excerpts do not contain the specific notice period under section X — the full statutory text should be retrieved before relying on this deadline"). You must NEVER substitute a plausible-sounding but unsourced figure, and you must NEVER use phrases like "standard practice," "typically," "generally requires," or "comparable legislation" to imply a specific number without a direct citation to a retrieved source stating that exact number.
