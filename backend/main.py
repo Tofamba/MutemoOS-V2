@@ -4138,13 +4138,14 @@ async def search_documents(req: SearchRequest, request: Request):
         context_for_agent = format_context(results, legal_results, zlr_results)
         research_map = await asyncio.to_thread(run_legal_research_agent, req.query, context_for_agent)
 
+    synthesis_context = format_context(results[:5], legal_results[:3], zlr_results[:3])
+
     answer = await asyncio.to_thread(
         synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3],
         deadline_info=deadline_info, research_map=research_map
     )
 
-    retrieved_context_for_qc = format_context(results, legal_results, zlr_results)
-    answer, qc_log = verify_citations(answer, retrieved_context_for_qc)
+    answer, qc_log = verify_citations(answer, synthesis_context)
 
     answer = apply_confidence_safeguard(answer, grounding)
 

@@ -196,11 +196,25 @@ def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
             if normalized_quote and normalized_quote in normalized_context:
                 new_paragraphs.append(para)
             else:
-                logger.warning(
-                    "[citation_qc] MISMATCH\nQUOTE: %r\nCONTEXT_EXCERPT: %r",
-                    normalized_quote[:500],
-                    normalized_context[:3000],
-                )
+                match_index = normalized_context.find(normalized_quote)
+
+                if match_index == -1:
+                    quote_tokens = normalized_quote.split()
+                    first_ten = quote_tokens[:10]
+                    context_tokens_set = set(normalized_context.split())
+                    token_matches = [(t, t in context_tokens_set) for t in first_ten]
+
+                    logger.warning(
+                        "[citation_qc] MISMATCH\n"
+                        "QUOTE_LENGTH: %s\n"
+                        "CONTEXT_LENGTH: %s\n"
+                        "FIRST_10_TOKENS_AND_MATCH: %r\n"
+                        "FULL_QUOTE: %r",
+                        len(normalized_quote),
+                        len(normalized_context),
+                        token_matches,
+                        normalized_quote,
+                    )
                 qc_log.append({
                     "original_label": "DIRECTLY_GROUNDED",
                     "qc_status": "citation_unmatched",
@@ -208,9 +222,9 @@ def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
                     "quote_excerpt": normalized_quote[:200],
                 })
                 new_paragraphs.append(
-                    f'Requires verification:\n\n{stripped}\n\nQC note: This statement was presented as a direct quotation, '
-                    f'but the quoted text could not be automatically matched to the retrieved context provided to the model. '
-                    f'Verify against the original source before relying on it.'
+                    f'Requires verification: The following statement was presented as a direct quotation, but could not be '
+                    f'automatically matched to the retrieved context provided to the model — verify against the original '
+                    f'source before relying on it.\n\nQuoted text under review: "{quote_text}"'
                 )
         else:
             new_paragraphs.append(para)
