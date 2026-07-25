@@ -30,7 +30,7 @@ import secrets
 import time
 import hmac
 from datetime import datetime, timedelta, date
-from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION
+from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, verify_citations, run_legal_research_agent
 from backend.deadline_engine import try_compute_deadline
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
@@ -4131,9 +4131,28 @@ async def search_documents(req: SearchRequest, request: Request):
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
 
-    answer = await asyncio.to_thread(synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3], deadline_info=deadline_info)
     grounding = compute_grounding(results, legal_results, zlr_results)
+
+    research_map = None
+    if not grounding["sources_sufficient"]:
+        context_for_agent = format_context(results, legal_results, zlr_results)
+        research_map = await asyncio.to_thread(run_legal_research_agent, req.query, context_for_agent)
+
+    answer = await asyncio.to_thread(
+        synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3],
+        deadline_info=deadline_info, research_map=research_map
+    )
+
+    retrieved_context_for_qc = format_context(results, legal_results, zlr_results)
+    answer, qc_log = verify_citations(answer, retrieved_context_for_qc)
+
     answer = apply_confidence_safeguard(answer, grounding)
+
+    research_agent_status = (
+        "success" if research_map and "error" not in research_map
+        else "failed" if research_map
+        else "not_triggered"
+    )
 
     async with _db_pool.acquire() as conn:
         await conn.execute(
@@ -4150,6 +4169,9 @@ async def search_documents(req: SearchRequest, request: Request):
                 "max_similarity_score": grounding["max_similarity_score"],
                 "sources_sufficient": grounding["sources_sufficient"],
                 "source_tier_breakdown": grounding["source_tier_breakdown"],
+                "research_agent_status": research_agent_status,
+                "research_agent_gaps": research_map.get("gaps", []) if research_map else [],
+                "qc_downgrades": qc_log,
             }),
         )
 
@@ -4586,7 +4608,8 @@ def _semantic_search_legal(req, chunks: list) -> list:
 def synthesise_answer_sync(query: str, results: list, legal_results: list, zlr_results: list,
                             attached_doc_text: Optional[str] = None,
                             attached_doc_name: Optional[str] = None,
-                            deadline_info: Optional[dict] = None) -> str:
+                            deadline_info: Optional[dict] = None,
+                            research_map: Optional[dict] = None) -> str:
     if not results and not legal_results and not zlr_results and not attached_doc_text:
         return None
     context = format_context(results, legal_results, zlr_results)
@@ -4613,6 +4636,17 @@ Status: {deadline_info['status']}
 """
     else:
         deadline_block = "\nNo notice-period figure with an exact day count was found in the retrieved sources — do not state or calculate any specific deadline; say plainly that this cannot be determined from the retrieved sources.\n"
+
+    research_map_block = ""
+    if research_map and research_map.get("gaps"):
+        gap_lines = "\n".join(
+            f"- {g['issue']}: missing {g['missing_authority']} ({g['reason']})"
+            for g in research_map["gaps"]
+        )
+        research_map_block = f"""
+RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT legal authority — never cite it as a source; use it only to state precisely what the retrieved sources do not establish):
+{gap_lines}
+"""
 
     if attached_doc_text:
         instructions = """Answer the question about the attached document directly and specifically:
@@ -4643,6 +4677,7 @@ Today's date: {datetime.utcnow().strftime('%Y-%m-%d')}
 Query: {query}
 {attached_block}
 {deadline_block}
+{research_map_block}
 
 Sources:
 {context if context else '(no additional firm/legal sources retrieved)'}

@@ -10,6 +10,18 @@ so a confident-sounding answer built only on background context is never
 indistinguishable from one backed by real authority.
 """
 
+import json
+import logging
+import re
+
+import anthropic
+
+logger = logging.getLogger(__name__)
+
+# Separate Anthropic client instance — grounding.py is imported by main.py,
+# so importing main's `client` back here would be circular.
+ai_client = anthropic.Anthropic()
+
 AUTHORITY_FLOOR = 0.6
 
 # legal_results source_types that count as background context, not legal authority.
@@ -153,3 +165,91 @@ def apply_confidence_safeguard(answer_text: str, grounding: dict) -> str:
         )
         return f"{warning}\n\n{answer_text}"
     return answer_text
+
+
+def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
+    """
+    Deterministic QC pass. Verifies blockquoted text (the existing
+    TEXTURE_RULES convention for DIRECTLY GROUNDED quotations) against
+    the EXACT retrieved context sent to synthesis — never the whole
+    database — so a "verified" result specifically means "the model
+    could have seen this," not "this text exists somewhere."
+
+    A failed match does NOT mean the quote was fabricated — it only
+    means the quote could not be automatically confirmed against the
+    exact context provided. The original quote is preserved alongside
+    the downgrade note so a lawyer can inspect both.
+    """
+    paragraphs = re.split(r'\n\s*\n', answer_text)
+    normalized_context = ' '.join(retrieved_context.split())
+    qc_log = []
+    new_paragraphs = []
+
+    for para in paragraphs:
+        stripped = para.strip()
+        if stripped.startswith('>'):
+            quote_text = ' '.join(
+                line.lstrip('>').strip() for line in stripped.split('\n')
+            ).strip()
+            normalized_quote = ' '.join(quote_text.split())
+
+            if normalized_quote and normalized_quote in normalized_context:
+                new_paragraphs.append(para)
+            else:
+                qc_log.append({
+                    "original_label": "DIRECTLY_GROUNDED",
+                    "qc_status": "citation_unmatched",
+                    "qc_reason": "Quoted text could not be automatically matched to the retrieved context provided to the model.",
+                    "quote_excerpt": normalized_quote[:200],
+                })
+                new_paragraphs.append(
+                    f'Requires verification:\n\n{stripped}\n\nQC note: This statement was presented as a direct quotation, '
+                    f'but the quoted text could not be automatically matched to the retrieved context provided to the model. '
+                    f'Verify against the original source before relying on it.'
+                )
+        else:
+            new_paragraphs.append(para)
+
+    return '\n\n'.join(new_paragraphs), qc_log
+
+
+def run_legal_research_agent(query: str, context: str) -> dict:
+    """
+    Haiku-based structured gap-analysis pass. NOT a second legal opinion —
+    a research completeness map. Only invoked when compute_grounding
+    already found the retrieval insufficient.
+    """
+    prompt = f"""You are a legal research completeness analyst. You do not answer the client's question or give legal advice.
+Analyze ONLY whether the retrieved sources below are sufficient to answer the query, and identify specific gaps.
+
+Do not infer missing statutory text from general legal knowledge, similar legislation, or the query itself. Only report what the retrieved material does or does not establish — never fill a gap with a value you believe is likely correct.
+
+Query: {query}
+
+Retrieved sources:
+{context}
+
+Respond ONLY with valid JSON, no other text, in this exact structure:
+{{
+  "research_sufficient": true or false,
+  "gaps": [
+    {{
+      "issue": "short description of the legal issue",
+      "missing_authority": "what specific provision/text is missing — describe the GAP, never state what you believe the missing value is",
+      "reason": "why the retrieved excerpts don't resolve this",
+      "priority": "high" | "medium" | "low"
+    }}
+  ]
+}}"""
+    try:
+        resp = ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = resp.content[0].text.strip()
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip())
+        return json.loads(raw)
+    except Exception as e:
+        logger.error(f"[research_agent] failed: {e}")
+        return {"research_sufficient": None, "gaps": [], "error": str(e)}
