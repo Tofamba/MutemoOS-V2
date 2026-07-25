@@ -196,6 +196,11 @@ def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
             if normalized_quote and normalized_quote in normalized_context:
                 new_paragraphs.append(para)
             else:
+                logger.warning(
+                    "[citation_qc] MISMATCH\nQUOTE: %r\nCONTEXT_EXCERPT: %r",
+                    normalized_quote[:500],
+                    normalized_context[:3000],
+                )
                 qc_log.append({
                     "original_label": "DIRECTLY_GROUNDED",
                     "qc_status": "citation_unmatched",
