@@ -2556,8 +2556,23 @@ function pollDocumentSearchJob(jobId, query, myToken) {
         const data = await res.json();
         if (myToken !== _searchPollToken) return resolve();
 
+        // TEMP diagnostic logging — remove once the stale-frontend vs.
+        // result-shape-mismatch question is settled.
+        console.log('[search_job_poll] payload:', JSON.stringify(data));
+
         if (data.status === 'complete') {
-          renderSearchResults(data.result, query);
+          const result = data.result;
+          if (!result) {
+            console.warn('[search_job_poll] status=complete but data.result is missing:', data);
+            document.getElementById('search-results').innerHTML = `<div class="status show error">Search job completed without a result.</div>`;
+            return resolve();
+          }
+          if (!Array.isArray(result.results)) {
+            console.warn('[search_job_poll] result.results is not an array:', result);
+            document.getElementById('search-results').innerHTML = `<div class="status show error">Search result is missing the expected results array — please refresh the page and try again.</div>`;
+            return resolve();
+          }
+          renderSearchResults(result, query);
           return resolve();
         }
         if (data.status === 'failed') {

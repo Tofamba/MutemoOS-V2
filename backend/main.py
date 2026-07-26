@@ -4309,6 +4309,11 @@ async def _run_document_search_job(
             **grounding,
         }
 
+        # TEMP diagnostic logging — remove once the stale-frontend vs.
+        # result-shape-mismatch question is settled.
+        print(f"[search_job:{job_id}] RESULT_SHAPE keys={list(result.keys())} "
+              f"results_type={type(all_results).__name__} results_len={len(all_results)}")
+
         _search_jobs[job_id]["result"] = result
         _search_jobs[job_id]["status"] = JobStatus.COMPLETE
         print(f"[search_job:{job_id}] COMPLETE")
@@ -4390,6 +4395,12 @@ async def get_search_job_status(job_id: str, request: Request):
 
     if job["firm_id"] != str(user.get("firm_id") or FIRM_ID):
         raise HTTPException(status_code=403, detail="Not authorized")
+
+    # TEMP diagnostic logging — remove once the stale-frontend vs.
+    # result-shape-mismatch question is settled.
+    result_keys = list(job["result"].keys()) if job["result"] else None
+    print(f"[search_job:{job_id}] STATUS_POLL_RESPONSE status={job['status']} "
+          f"has_result={job['result'] is not None} result_keys={result_keys}")
 
     return {
         "job_id": job_id,
