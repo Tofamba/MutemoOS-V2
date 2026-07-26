@@ -3301,7 +3301,9 @@ function renderAnswerHtml(rawAnswer) {
     rendered.push(`<p>${formatInline(trimmed)}</p>`);
   });
 
-  return rendered.join('\n');
+  return rendered.join('\n')
+    .replace(/>\s+</g, '><')   // collapse whitespace between HTML tags
+    .replace(/\n\s*/g, ' ');    // collapse remaining newlines/indentation to single spaces
 }
 
 function formatInline(text) {
