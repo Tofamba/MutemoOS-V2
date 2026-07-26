@@ -30,6 +30,7 @@ import secrets
 import time
 import hmac
 from datetime import datetime, timedelta, date
+from enum import Enum
 from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, verify_citations, run_legal_research_agent
 from backend.deadline_engine import try_compute_deadline
 
@@ -4184,7 +4185,139 @@ async def search_documents(req: SearchRequest, request: Request):
 # still bounding cost/latency for anything unusually long.
 MAX_ATTACHED_DOC_CHARS = 40_000
 
-@app.post("/api/search/document")
+# ── Document search: fire-and-poll job pattern ─────────────────────────────────
+# The full pipeline (OCR, multi-source retrieval, Sonnet synthesis with
+# max_tokens=8000) can run long enough to exceed Cloudflare's edge timeout
+# when held behind one synchronous request. The endpoint now returns a
+# job_id immediately and the pipeline runs in a background asyncio task;
+# the frontend polls /api/search/document/status/{job_id} for the result.
+# In-process dict is an MVP job store — fine for a single instance, not a
+# durable queue.
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+_search_jobs: dict[str, dict] = {}
+_SEARCH_JOB_MAX_AGE = timedelta(minutes=30)
+
+async def _run_document_search_job(
+    job_id: str,
+    content: bytes,
+    filename: str,
+    query: str,
+    user: dict,
+    matter_id: Optional[str],
+    include_legal_updates: bool,
+    limit: int,
+):
+    _search_jobs[job_id]["status"] = JobStatus.RUNNING
+    print(f"[search_job:{job_id}] STARTED")
+    try:
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+        ocr_confidence = None
+
+        try:
+            if ext == "pdf":
+                doc_text, _, _, ocr_confidence = extract_pdf_text(content)
+            elif ext in ("docx", "doc"):
+                doc_text = extract_docx_text(content)
+            elif ext in ("jpg", "jpeg", "png", "webp"):
+                doc_text, ocr_confidence = ocr_image_bytes(content, ext)
+                if not doc_text:
+                    raise ValueError(
+                        "Could not read text from this image. Make sure the photo is clear, "
+                        "well-lit, and the document fills most of the frame."
+                    )
+            else:
+                doc_text = content.decode("utf-8", errors="replace")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Could not read document: {e}")
+
+        if not doc_text or not doc_text.strip():
+            raise ValueError("No readable text found in the uploaded document.")
+
+        print(f"[search_job:{job_id}] OCR_COMPLETE")
+
+        truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
+        if truncated:
+            doc_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+
+        req = SearchRequest(
+            query=query, matter_id=matter_id, limit=limit,
+            include_legal_updates=include_legal_updates,
+        )
+
+        async with _db_pool.acquire() as conn:
+            firm_chunk_rows = await conn.fetch(
+                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
+            )
+            legal_chunk_rows = await conn.fetch(
+                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
+            )
+            zlr_chunk_rows = await conn.fetch(
+                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='zlr'", FIRM_ID
+            )
+        firm_chunks = [dict(r) for r in firm_chunk_rows]
+        legal_chunks = [dict(r) for r in legal_chunk_rows]
+        zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
+
+        results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
+        legal_results = []
+        if include_legal_updates:
+            legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
+        zlr_results = []
+        if zlr_chunks_list:
+            raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, query, None, 3)
+            for r in raw_zlr:
+                zlr_results.append({
+                    "result_source": "zlr", "chunk_id": r.get("item_id"),
+                    "text": r.get("relevant_excerpt", ""), "similarity": r.get("similarity", 0),
+                    "document_id": r.get("item_id"),
+                    "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
+                    "citation": r.get("citation"), "taxonomy_category": r.get("taxonomy_category"),
+                    "summary": r.get("summary"),
+                })
+
+        all_results = results + legal_results + zlr_results
+        print(f"[search_job:{job_id}] RETRIEVAL_COMPLETE")
+
+        # This endpoint's existing pipeline does not call run_legal_research_agent —
+        # that only exists on /api/search today. Logged as skipped rather than
+        # silently omitted so the lifecycle trace is honest about what ran.
+        print(f"[search_job:{job_id}] RESEARCH_AGENT_SKIPPED")
+
+        answer = await asyncio.to_thread(
+            synthesise_answer_sync, query, results[:5], legal_results[:3], zlr_results[:3], doc_text, filename
+        )
+        print(f"[search_job:{job_id}] SYNTHESIS_COMPLETE")
+
+        grounding = compute_grounding(results, legal_results, zlr_results, has_attached_doc=True)
+        answer = apply_confidence_safeguard(answer, grounding)
+
+        result = {
+            "answer": answer,
+            "results": all_results,
+            "attached_document": {
+                "filename": filename, "truncated": truncated, "char_count": len(doc_text),
+                "ocr_confidence": ocr_confidence,
+                "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
+            },
+            **grounding,
+        }
+
+        _search_jobs[job_id]["result"] = result
+        _search_jobs[job_id]["status"] = JobStatus.COMPLETE
+        print(f"[search_job:{job_id}] COMPLETE")
+    except Exception as e:
+        print(f"[search_job:{job_id}] FAILED: {e}")
+        _search_jobs[job_id]["error"] = str(e)
+        _search_jobs[job_id]["status"] = JobStatus.FAILED
+
+@app.post("/api/search/document", status_code=202)
 async def search_with_document(
     request: Request,
     file: UploadFile = File(...),
@@ -4201,94 +4334,68 @@ async def search_with_document(
     document's own text and the firm's existing indexed knowledge (firm
     precedent, legal updates, ZLR judgments), same as a normal Search Vault
     query.
+
+    Runs as a fire-and-poll background job rather than a single synchronous
+    request/response — the pipeline can run long enough to trip Cloudflare's
+    524 edge timeout. This returns a job_id immediately; poll
+    /api/search/document/status/{job_id} for progress and the eventual result.
     """
     user = await get_current_user(request)
     _check_permission(user, "search")
 
+    now = datetime.utcnow()
+    for jid, job in list(_search_jobs.items()):
+        if now - datetime.fromisoformat(job["created_at"]) > _SEARCH_JOB_MAX_AGE:
+            del _search_jobs[jid]
+
     content = await file.read()
     filename = file.filename or "document"
-    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-    ocr_confidence = None
 
-    try:
-        if ext == "pdf":
-            doc_text, _, _, ocr_confidence = extract_pdf_text(content)
-        elif ext in ("docx", "doc"):
-            doc_text = extract_docx_text(content)
-        elif ext in ("jpg", "jpeg", "png", "webp"):
-            doc_text, ocr_confidence = ocr_image_bytes(content, ext)
-            if not doc_text:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Could not read text from this image. Make sure the photo is clear, "
-                           "well-lit, and the document fills most of the frame."
-                )
-        else:
-            doc_text = content.decode("utf-8", errors="replace")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Could not read document: {e}")
+    job_id = str(_uuid_mod.uuid4())
 
-    if not doc_text or not doc_text.strip():
-        raise HTTPException(status_code=422, detail="No readable text found in the uploaded document.")
+    # Capture only the minimum authenticated user context required by the
+    # pipeline — not the Request or UploadFile objects, which are tied to
+    # this request/response cycle and must not be relied on after it ends.
+    job_user = {
+        "id": user.get("id"),
+        "firm_id": user.get("firm_id"),
+        "display_name": user.get("display_name"),
+        "role": user.get("role"),
+    }
 
-    truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
-    if truncated:
-        doc_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+    _search_jobs[job_id] = {
+        "status": JobStatus.PENDING,
+        "result": None,
+        "error": None,
+        "firm_id": str(user.get("firm_id") or FIRM_ID),
+        "created_at": now.isoformat(),
+    }
 
-    req = SearchRequest(
-        query=query, matter_id=matter_id, limit=limit,
-        include_legal_updates=include_legal_updates,
+    asyncio.create_task(
+        _run_document_search_job(
+            job_id, content, filename, query, job_user, matter_id, include_legal_updates, limit,
+        )
     )
 
-    async with _db_pool.acquire() as conn:
-        firm_chunk_rows = await conn.fetch(
-            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
-        )
-        legal_chunk_rows = await conn.fetch(
-            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
-        )
-        zlr_chunk_rows = await conn.fetch(
-            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='zlr'", FIRM_ID
-        )
-    firm_chunks = [dict(r) for r in firm_chunk_rows]
-    legal_chunks = [dict(r) for r in legal_chunk_rows]
-    zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
+    return {"job_id": job_id, "status": "pending"}
 
-    results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
-    legal_results = []
-    if include_legal_updates:
-        legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
-    zlr_results = []
-    if zlr_chunks_list:
-        raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, query, None, 3)
-        for r in raw_zlr:
-            zlr_results.append({
-                "result_source": "zlr", "chunk_id": r.get("item_id"),
-                "text": r.get("relevant_excerpt", ""), "similarity": r.get("similarity", 0),
-                "document_id": r.get("item_id"),
-                "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
-                "citation": r.get("citation"), "taxonomy_category": r.get("taxonomy_category"),
-                "summary": r.get("summary"),
-            })
+@app.get("/api/search/document/status/{job_id}")
+async def get_search_job_status(job_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "search")
 
-    all_results = results + legal_results + zlr_results
-    answer = await asyncio.to_thread(
-        synthesise_answer_sync, query, results[:5], legal_results[:3], zlr_results[:3], doc_text, filename
-    )
-    grounding = compute_grounding(results, legal_results, zlr_results, has_attached_doc=True)
-    answer = apply_confidence_safeguard(answer, grounding)
+    job = _search_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["firm_id"] != str(user.get("firm_id") or FIRM_ID):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     return {
-        "answer": answer,
-        "results": all_results,
-        "attached_document": {
-            "filename": filename, "truncated": truncated, "char_count": len(doc_text),
-            "ocr_confidence": ocr_confidence,
-            "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
-        },
-        **grounding,
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job["result"],
+        "error": job["error"],
     }
 
 # ── Contract Review ────────────────────────────────────────────────────────────

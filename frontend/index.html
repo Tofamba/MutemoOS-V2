@@ -2479,6 +2479,8 @@ function updateSearchAttachLabel() {
   label.textContent = file ? `📎 ${file.name} will be attached to this search.` : '';
 }
 
+let _searchPollToken = 0;
+
 async function doSearch() {
   const query = document.getElementById('search-query').value.trim();
   if (!query) return;
@@ -2488,19 +2490,27 @@ async function doSearch() {
   document.getElementById('search-loading').style.display = 'block';
   document.getElementById('search-btn').disabled = true;
 
+  // Superseding the token stops any poll loop still running from a
+  // previous submission (see pollDocumentSearchJob) so only one drives the UI.
+  const myToken = ++_searchPollToken;
   const attachedFile = document.getElementById('search-attach-file').files[0];
 
   try {
-    let res;
     if (attachedFile) {
       const formData = new FormData();
       formData.append('file', attachedFile);
       formData.append('query', query);
       formData.append('include_legal_updates', 'true');
       formData.append('limit', '8');
-      res = await fetch(`${API}/api/search/document`, { method: 'POST', body: formData });
+      const res = await fetch(`${API}/api/search/document`, { method: 'POST', body: formData });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Search failed');
+      }
+      const { job_id } = await res.json();
+      await pollDocumentSearchJob(job_id, query, myToken);
     } else {
-      res = await fetch(`${API}/api/search`, {
+      const res = await fetch(`${API}/api/search`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
@@ -2510,19 +2520,60 @@ async function doSearch() {
           limit: 8,
         })
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Search failed');
+      }
+      const data = await res.json();
+      if (myToken === _searchPollToken) renderSearchResults(data, query);
     }
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || 'Search failed');
-    }
-    const data = await res.json();
-    renderSearchResults(data, query);
   } catch(e) {
-    document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}. Is the server running?</div>`;
+    if (myToken === _searchPollToken) {
+      document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}. Is the server running?</div>`;
+    }
   } finally {
-    document.getElementById('search-loading').style.display = 'none';
-    document.getElementById('search-btn').disabled = false;
+    if (myToken === _searchPollToken) {
+      document.getElementById('search-loading').style.display = 'none';
+      document.getElementById('search-btn').disabled = false;
+    }
   }
+}
+
+// Polls /api/search/document/status/{jobId} every ~2s until the background
+// job (see backend/main.py _run_document_search_job) completes or fails.
+// myToken lets a later doSearch() call silently stop an in-flight poll
+// instead of it fighting the new submission for the results panel.
+function pollDocumentSearchJob(jobId, query, myToken) {
+  return new Promise((resolve) => {
+    async function poll() {
+      if (myToken !== _searchPollToken) return resolve();
+      try {
+        const res = await fetch(`${API}/api/search/document/status/${jobId}`);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || 'Could not check search status');
+        }
+        const data = await res.json();
+        if (myToken !== _searchPollToken) return resolve();
+
+        if (data.status === 'complete') {
+          renderSearchResults(data.result, query);
+          return resolve();
+        }
+        if (data.status === 'failed') {
+          document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${escHtml(data.error || 'Unknown error')}.</div>`;
+          return resolve();
+        }
+        setTimeout(poll, 2000);
+      } catch (e) {
+        if (myToken === _searchPollToken) {
+          document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}. Is the server running?</div>`;
+        }
+        resolve();
+      }
+    }
+    poll();
+  });
 }
 
 function printSearchResults() {
