@@ -3351,7 +3351,7 @@ def index_chunks_in_chroma(chunks: list, collection_type: str = "firm"):
         embeddings = embed_texts(texts)
         metadatas = [{
             "document_id": c["document_id"],
-            "matter_id": c.get("matter_id", "zlr"),
+            "matter_id": c.get("matter_id") or "zlr",
             "chunk_index": c["chunk_index"],
             "page_number": c.get("page_number") or 0,
         } for c in chunks]
