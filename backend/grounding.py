@@ -66,6 +66,70 @@ ADVERSARIAL_ANALYSIS_RULES = """
 - For any conclusion that is genuinely contestable (i.e., a reasonable opposing counsel could argue the other way — not for settled procedural facts or uncontroversial statutory readings), after stating your position, add a new paragraph starting with the exact line "Counterargument:" followed by the strongest reasonable opposing reading or argument, genuinely steelmanned — not a weak strawman. Then, in a separate following paragraph, start with the exact line "Assessment:" followed by your own reasoned view on which position is stronger and why.
 - Do NOT apply this to every point — only to conclusions where genuine legal disagreement is plausible. A rough guide: 1-3 genuinely contestable points per analysis, not every clause or every sentence. Overuse dilutes its value."""
 
+# Superseded by IRAC_STRUCTURE_RULES below, which absorbs both the Bill
+# comparison table and adversarial-analysis behaviour into one structure.
+# Left defined (unused) rather than deleted in case either is needed again
+# independently of the full IRAC format.
+IRAC_STRUCTURE_RULES = """
+- Structure your analysis around each distinct legal issue raised by the query, in this exact sequence for every issue, using these exact section markers on their own line:
+
+Issue:
+[one-sentence statement of the specific legal question]
+
+Relevant provisions:
+[the specific statutory/constitutional provisions bearing on this issue. If this concerns a Bill or amendment, present this as a markdown table: | Current Provision | Proposed Change | with only these two columns containing direct quotes/citations of retrieved text.]
+
+Retrieved authorities:
+[case law or other authority bearing on this issue, cited per the existing citation rules]
+
+Analysis:
+[your reasoned application of the provisions and authorities to the issue]
+
+Counterarguments:
+[Only if this issue is genuinely contestable — a reasonable opposing counsel could argue the other way. Within this section: "Counterargument: [steelmanned opposing position]" followed by "Assessment: [your reasoned view on which position is stronger]." If the issue is not genuinely contestable, write "Counterarguments: Not applicable — this point is not genuinely contestable." rather than inventing a weak opposing argument.]
+
+Practical risk:
+[the practical consequence or risk for the client if this issue is resolved unfavorably]
+
+Confidence:
+[state exactly one of: High, Moderate, or Low, followed by a one-sentence reason]
+
+- Do not omit any section for a given issue, but keep sections concise — this structure is meant to make the analysis scannable, not to pad length.
+- Confine each issue's markers to that issue before starting the next issue's "Issue:" marker."""
+
+
+def enforce_confidence_consistency(answer_text: str) -> tuple:
+    """
+    Deterministic backstop for the self-reported Confidence: field in each
+    IRAC issue block. A model stating "Confidence: High" while its own
+    Analysis/Retrieved authorities text for that same issue contains a
+    "Requires verification:" marker is self-contradictory — this
+    downgrades the stated confidence rather than trusting the self-report
+    uncritically, consistent with apply_confidence_safeguard's design.
+    """
+    issue_blocks = re.split(r'(?=\nIssue:)', answer_text)
+    qc_log = []
+    result_blocks = []
+
+    for block in issue_blocks:
+        confidence_match = re.search(r'Confidence:\s*(High|Moderate|Low)', block)
+        has_verification_gap = 'Requires verification:' in block
+
+        if confidence_match and confidence_match.group(1) == 'High' and has_verification_gap:
+            downgraded = block.replace(
+                confidence_match.group(0),
+                'Confidence: Moderate [automatically downgraded from High — this issue contains an unresolved "Requires verification" point]'
+            )
+            qc_log.append({
+                "qc_status": "confidence_downgraded",
+                "qc_reason": "Self-reported High confidence downgraded to Moderate because this issue's own analysis contains a verification gap.",
+            })
+            result_blocks.append(downgraded)
+        else:
+            result_blocks.append(block)
+
+    return ''.join(result_blocks), qc_log
+
 
 def compute_grounding(results: list, legal_results: list, zlr_results: list,
                        has_attached_doc: bool = False) -> dict:

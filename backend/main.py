@@ -31,7 +31,7 @@ import time
 import hmac
 from datetime import datetime, timedelta, date
 from enum import Enum
-from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, BILL_COMPARISON_RULES, ADVERSARIAL_ANALYSIS_RULES, verify_citations, verify_inline_case_citations, run_legal_research_agent
+from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent
 from backend.deadline_engine import try_compute_deadline
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
@@ -4184,6 +4184,9 @@ async def search_documents(req: SearchRequest, request: Request):
     answer, inline_qc_log = verify_inline_case_citations(answer, synthesis_context)
     qc_log = qc_log + inline_qc_log
 
+    answer, confidence_qc_log = enforce_confidence_consistency(answer)
+    qc_log = qc_log + confidence_qc_log
+
     answer = apply_confidence_safeguard(answer, grounding)
 
     research_agent_status = (
@@ -4808,13 +4811,13 @@ RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT
 - Ground your analysis in the document's actual wording — reference specific clauses, dates, or terms where relevant
 - Where firm precedent or legal sources below are relevant, cross-reference them explicitly (e.g. "this clause is consistent with/departs from [reference]")
 - If the document appears to have a legal defect, gap, or unusual provision, flag it clearly
-- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + BILL_COMPARISON_RULES + ADVERSARIAL_ANALYSIS_RULES
+- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
     else:
         instructions = """Answer directly and practically:
 - If firm precedents are present, identify patterns and note them by document ID
 - If legislation or case law is present, summarise the relevant legal position and cite by reference
 - Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + BILL_COMPARISON_RULES + ADVERSARIAL_ANALYSIS_RULES
+- For drafting queries, suggest specific language from the firm precedents""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
 
     try:
         msg = client.messages.create(

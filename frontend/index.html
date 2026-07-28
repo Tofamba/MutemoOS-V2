@@ -3313,6 +3313,7 @@ function renderAnswerHtml(rawAnswer) {
     /cannot be determined from the retrieved sources/i,
     /the available authorities do not (?:establish|specify)/i,
   ];
+  const STRUCTURAL_MARKERS = ['Issue:', 'Relevant provisions:', 'Retrieved authorities:', 'Practical risk:'];
 
   function splitOnMidParagraphMarker(text) {
     for (const marker of CANONICAL_MARKERS) {
@@ -3331,6 +3332,12 @@ function renderAnswerHtml(rawAnswer) {
     const trimmed = para.trim();
     if (!trimmed) return;
 
+    const confidenceBadge = renderConfidenceBadge(trimmed);
+    if (confidenceBadge) {
+      rendered.push(confidenceBadge);
+      return;
+    }
+
     for (const marker of CANONICAL_MARKERS) {
       if (trimmed.startsWith(marker.prefix)) {
         const rest = trimmed.slice(marker.prefix.length).trim();
@@ -3338,6 +3345,14 @@ function renderAnswerHtml(rawAnswer) {
           <span class="conclusion-badge">${marker.badgeText}</span>
           <p>${formatInline(rest)}</p>
         </div>`);
+        return;
+      }
+    }
+
+    for (const structMarker of STRUCTURAL_MARKERS) {
+      if (trimmed.startsWith(structMarker)) {
+        const rest = trimmed.slice(structMarker.length).trim();
+        rendered.push(`<p><strong>${structMarker}</strong> ${formatInline(rest)}</p>`);
         return;
       }
     }
@@ -3384,6 +3399,14 @@ function formatInline(text) {
   escaped = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   escaped = escaped.replace(/\*(.+?)\*/g, '<em>$1</em>');
   return escaped;
+}
+
+function renderConfidenceBadge(text) {
+  const match = text.match(/^Confidence:\s*(High|Moderate|Low)/);
+  if (!match) return null;
+  const level = match[1];
+  const badgeClass = level === 'High' ? 'badge-grounded' : level === 'Moderate' ? 'badge-verify' : 'badge-judgment';
+  return `<div class="conclusion-block ${badgeClass}"><span class="conclusion-badge">CONFIDENCE: ${level.toUpperCase()}</span><p>${formatInline(text.replace(match[0], '').trim())}</p></div>`;
 }
 
 // ── Legal Updates ─────────────────────────────────────────────────────────────
