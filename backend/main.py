@@ -2141,6 +2141,40 @@ async def reindex_semantic_search(request: Request):
     if zlr_chunks_list:
         await asyncio.to_thread(index_chunks_in_chroma, zlr_chunks_list, "zlr")
     return {"reindexed": len(chunks), "firm": len(firm_chunks), "legal": len(legal_chunks), "zlr": len(zlr_chunks_list)}
+
+@app.post("/api/admin/reset-chromadb")
+async def admin_reset_chromadb(request: Request):
+    """
+    Drop and recreate all ChromaDB collections (firm/legal/zlr), then
+    rebuild them from Postgres via reconcile_chroma_index(). For use when
+    the vector index is suspected corrupt or out of sync in a way the
+    normal startup reconcile check won't catch on its own.
+    """
+    require_admin_token(request)
+    global _chroma_client, _firm_collection, _legal_collection, _zlr_collection
+
+    get_chroma_collections()  # ensure _chroma_client is initialized
+
+    collection_names = ["firm_precedents", "legal_updates", "zlr_index"]
+    deleted = []
+    for name in collection_names:
+        _chroma_client.delete_collection(name)
+        deleted.append(name)
+
+    _firm_collection = _chroma_client.get_or_create_collection(
+        "firm_precedents", metadata={"hnsw:space": "cosine"}
+    )
+    _legal_collection = _chroma_client.get_or_create_collection(
+        "legal_updates", metadata={"hnsw:space": "cosine"}
+    )
+    _zlr_collection = _chroma_client.get_or_create_collection(
+        "zlr_index", metadata={"hnsw:space": "cosine"}
+    )
+
+    await reconcile_chroma_index()
+
+    return {"status": "success", "deleted_collections": deleted}
+
 @app.post("/api/admin/reindex-from-db")
 async def reindex_from_db(request: Request):
     """
