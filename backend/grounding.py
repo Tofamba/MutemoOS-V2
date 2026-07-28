@@ -52,6 +52,16 @@ LAWYER_JUDGMENT_RULES = """
 STATUTORY_MECHANISM_PRECISION = """
 - When discussing statutory powers that create legal consequences in stages (e.g. a power that first makes conduct unlawful, followed by a separate power that acts on that unlawfulness), always name the SPECIFIC mechanism precisely rather than using a general term for multiple distinct provisions. For example, under MOPA: distinguish a "condition" imposed under s.8(6) from a "prohibition notice," "direction," or "order" under s.8 — these have different legal consequences — and distinguish either of those (which may render a gathering unlawful) from the SEPARATE question of whether s.13 dispersal/force is then permitted. Never use a general word like "banned" or "prohibited" to refer to more than one of these distinct mechanisms in the same answer without specifying which one applies."""
 
+BILL_COMPARISON_RULES = """
+- If this query concerns a Bill, proposed amendment, or draft legislation, begin your analysis of each substantive change with a compact summary in this exact format before the narrative discussion:
+
+  | Current Provision | Proposed Change | Effect | Constitutional/Legal Issue |
+  |---|---|---|---|
+  | [what the law currently says/does — cite directly if quoting] | [what the Bill changes it to] | [practical consequence] | [any constitutional or legal concern, or "None identified" if none] |
+
+  Only the first two columns ("Current Provision" and "Proposed Change") should ever contain direct quotations or paraphrases of retrieved text — cite these normally per the existing citation rules. The "Effect" and "Constitutional/Legal Issue" columns are your own analysis and inference; if either column states an inference rather than a directly grounded fact, prefix that cell's content with "Analysis:" so it's visually distinguishable from the quoted/grounded columns.
+  After the table, provide the fuller narrative discussion as usual."""
+
 
 def compute_grounding(results: list, legal_results: list, zlr_results: list,
                        has_attached_doc: bool = False) -> dict:

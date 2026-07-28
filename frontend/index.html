@@ -2621,9 +2621,13 @@ function renderSearchResults(data, query) {
 
   if (data.answer) {
     const sufficient = data.sources_sufficient !== false;
+    const totalFound = (data.source_tier_breakdown?.authority || 0) + (data.source_tier_breakdown?.context || 0);
+    const warningHeadline = totalFound === 0
+      ? "NO FIRM PRECEDENTS OR LEGAL SOURCES FOUND"
+      : "SOURCES FOUND BELOW CONFIDENCE THRESHOLD";
     const topWarning = !sufficient
       ? `<div style="margin-bottom:0.6rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600">
-          ⚠️ <strong>NO FIRM PRECEDENTS OR LEGAL SOURCES FOUND</strong><br>
+          ⚠️ <strong>${warningHeadline}</strong><br>
           ${escHtml(data.grounding_note || 'This analysis is based on general legal knowledge only, not verified against firm records or Zimbabwean case law/legislation.')}
          </div>`
       : '';
