@@ -227,6 +227,7 @@ select{cursor:pointer}
 .badge-verify { border-left-color: #a15c00; } .badge-verify .conclusion-badge { background: #fff4d6; color: #a15c00; }
 .badge-analogy { border-left-color: #6639ba; } .badge-analogy .conclusion-badge { background: #ede4ff; color: #6639ba; }
 .badge-judgment { border-left-color: #333; } .badge-judgment .conclusion-badge { background: #eee; color: #333; }
+.badge-adversarial { border-left-color: #0b5566; } .badge-adversarial .conclusion-badge { background: #d6f0f5; color: #0b5566; }
 
 /* ── Calendar ── */
 .cal-event{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);padding:0.85rem 1rem;margin-bottom:0.6rem;display:flex;align-items:center;gap:12px}
@@ -3303,6 +3304,8 @@ function renderAnswerHtml(rawAnswer) {
     { prefix: 'Requires verification:', badgeClass: 'badge-verify', badgeText: 'REQUIRES VERIFICATION' },
     { prefix: 'Lawyer judgment required:', badgeClass: 'badge-judgment', badgeText: 'LAWYER JUDGMENT REQUIRED' },
     { prefix: 'By analogy:', badgeClass: 'badge-analogy', badgeText: 'ANALOGICAL AUTHORITY' },
+    { prefix: 'Counterargument:', badgeClass: 'badge-adversarial', badgeText: 'ADVERSARIAL ANALYSIS — Counterargument' },
+    { prefix: 'Assessment:', badgeClass: 'badge-adversarial', badgeText: 'ADVERSARIAL ANALYSIS — Assessment' },
   ];
   const VERIFICATION_FALLBACKS = [
     /the retrieved (?:sources|excerpts|material) do(?:es)? not (?:establish|contain|specify)/i,

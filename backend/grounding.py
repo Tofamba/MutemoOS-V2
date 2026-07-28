@@ -62,6 +62,10 @@ BILL_COMPARISON_RULES = """
   Only the first two columns ("Current Provision" and "Proposed Change") should ever contain direct quotations or paraphrases of retrieved text — cite these normally per the existing citation rules. The "Effect" and "Constitutional/Legal Issue" columns are your own analysis and inference; if either column states an inference rather than a directly grounded fact, prefix that cell's content with "Analysis:" so it's visually distinguishable from the quoted/grounded columns.
   After the table, provide the fuller narrative discussion as usual."""
 
+ADVERSARIAL_ANALYSIS_RULES = """
+- For any conclusion that is genuinely contestable (i.e., a reasonable opposing counsel could argue the other way — not for settled procedural facts or uncontroversial statutory readings), after stating your position, add a new paragraph starting with the exact line "Counterargument:" followed by the strongest reasonable opposing reading or argument, genuinely steelmanned — not a weak strawman. Then, in a separate following paragraph, start with the exact line "Assessment:" followed by your own reasoned view on which position is stronger and why.
+- Do NOT apply this to every point — only to conclusions where genuine legal disagreement is plausible. A rough guide: 1-3 genuinely contestable points per analysis, not every clause or every sentence. Overuse dilutes its value."""
+
 
 def compute_grounding(results: list, legal_results: list, zlr_results: list,
                        has_attached_doc: bool = False) -> dict:
