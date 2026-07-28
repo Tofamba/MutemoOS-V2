@@ -31,7 +31,7 @@ import time
 import hmac
 from datetime import datetime, timedelta, date
 from enum import Enum
-from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, BILL_COMPARISON_RULES, ADVERSARIAL_ANALYSIS_RULES, verify_citations, run_legal_research_agent
+from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, BILL_COMPARISON_RULES, ADVERSARIAL_ANALYSIS_RULES, verify_citations, verify_inline_case_citations, run_legal_research_agent
 from backend.deadline_engine import try_compute_deadline
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
@@ -4181,6 +4181,8 @@ async def search_documents(req: SearchRequest, request: Request):
     )
 
     answer, qc_log = verify_citations(answer, synthesis_context)
+    answer, inline_qc_log = verify_inline_case_citations(answer, synthesis_context)
+    qc_log = qc_log + inline_qc_log
 
     answer = apply_confidence_safeguard(answer, grounding)
 

@@ -254,6 +254,41 @@ def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
     return '\n\n'.join(new_paragraphs), qc_log
 
 
+CASE_CITATION_PATTERN = re.compile(
+    r"([A-Z][A-Za-z\.\'\-]+(?:\s+[A-Z][A-Za-z\.\'\-]+)*\s+v\.?\s+"
+    r"[A-Z][A-Za-z\.\'\-]+(?:\s+[A-Za-z\.\'\-&]+)*)\s*\(([^)]{2,40})\)"
+)
+
+def verify_inline_case_citations(answer_text: str, retrieved_context: str) -> tuple:
+    """
+    Deterministic QC pass, complementary to verify_citations(): scans the
+    ENTIRE answer text for "X v Y (citation)" patterns anywhere in the
+    prose — not just inside blockquotes — since a case name can be dropped
+    into ordinary narrative without ever being directly quoted. Confirms
+    each matched case name appears somewhere in the exact retrieved context
+    sent to synthesis; unverified matches get an inline warning annotation
+    rather than being silently left to read as confirmed.
+    """
+    normalized_context = ' '.join(retrieved_context.split()).lower()
+    qc_log = []
+    result_text = answer_text
+    for match in CASE_CITATION_PATTERN.finditer(answer_text):
+        case_name = match.group(1).strip()
+        citation = match.group(2).strip()
+        full_match = match.group(0)
+        normalized_case_name = ' '.join(case_name.split()).lower()
+        if normalized_case_name not in normalized_context:
+            qc_log.append({
+                "qc_status": "inline_citation_unverified",
+                "case_name": case_name,
+                "citation": citation,
+                "qc_reason": "This case name/citation was not found in the retrieved context provided to the model — it may be drawn from general knowledge rather than the Vault, and has not been verified.",
+            })
+            annotation = f'{full_match} [⚠ UNVERIFIED — not found in retrieved sources, confirm independently before relying on it]'
+            result_text = result_text.replace(full_match, annotation, 1)
+    return result_text, qc_log
+
+
 def run_legal_research_agent(query: str, context: str) -> dict:
     """
     Haiku-based structured gap-analysis pass. NOT a second legal opinion —
