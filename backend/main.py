@@ -4999,7 +4999,8 @@ Professional, direct{', using clear headed sections for a thorough document revi
                 "for the rest, or ask a narrower follow-up question.**"
             )
         return answer_text
-    except Exception:
+    except Exception as e:
+        print(f"[synthesise_answer_sync] synthesis failed: {e}")
         total = len(results) + len(legal_results or [])
         return f"Found {total} relevant excerpt(s). Review the sources below."
 
