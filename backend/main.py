@@ -34,6 +34,7 @@ from enum import Enum
 from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent
 from backend.deadline_engine import try_compute_deadline
 from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
+from backend.authority_ranker import rerank
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
 try:
@@ -4106,6 +4107,8 @@ def _zlr_semantic_search(zlr_chunks: list, query: str, category_filter: Optional
                     "citation": chunk.get("citation"),
                     "taxonomy_category": chunk.get("taxonomy_category"),
                     "relevant_excerpt": chunk["text"][:400],
+                    "legal_source_type": chunk.get("legal_source_type"),
+                    "authority_strength": chunk.get("authority_strength"),
                 })
                 if len(results) >= limit:
                     break
@@ -4128,6 +4131,8 @@ def _zlr_semantic_search(zlr_chunks: list, query: str, category_filter: Optional
                 "citation": chunk.get("citation"),
                 "taxonomy_category": chunk.get("taxonomy_category"),
                 "relevant_excerpt": chunk["text"][:400],
+                "legal_source_type": chunk.get("legal_source_type"),
+                "authority_strength": chunk.get("authority_strength"),
             })
     return results
 
@@ -4212,7 +4217,7 @@ async def search_documents(req: SearchRequest, request: Request):
         firm_chunk_rows = await conn.fetch(
             """
             SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
-                   d.legal_source_type, d.authority_strength
+                   d.matter_type, d.legal_source_type, d.authority_strength
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.firm_id=$1 AND c.chunk_source='firm'
@@ -4220,10 +4225,22 @@ async def search_documents(req: SearchRequest, request: Request):
             FIRM_ID
         )
         legal_chunk_rows = await conn.fetch(
-            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
+            """
+            SELECT c.*, lu.legal_source_type, lu.authority_strength
+            FROM chunks c
+            LEFT JOIN legal_updates lu ON lu.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='legal'
+            """,
+            FIRM_ID
         )
         zlr_chunk_rows = await conn.fetch(
-            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='zlr'", FIRM_ID
+            """
+            SELECT c.*, z.legal_source_type, z.authority_strength
+            FROM chunks c
+            LEFT JOIN zlr_entries z ON z.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='zlr'
+            """,
+            FIRM_ID
         )
 
     firm_chunks = [dict(r) for r in firm_chunk_rows]
@@ -4249,6 +4266,8 @@ async def search_documents(req: SearchRequest, request: Request):
                 "citation": r.get("citation"),
                 "taxonomy_category": r.get("taxonomy_category"),
                 "summary": r.get("summary"),
+                "legal_source_type": r.get("legal_source_type"),
+                "authority_strength": r.get("authority_strength"),
             })
 
     deadline_info = try_compute_deadline(req.query, legal_results, zlr_results)
@@ -4258,6 +4277,11 @@ async def search_documents(req: SearchRequest, request: Request):
         r["display_label"] = display_label(r)
     if not all_results:
         return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
+
+    # Authority-first reranking (backend/authority_ranker.py) — additive:
+    # existing `results`/grounding fields are untouched, this is a second,
+    # independent view of the same candidates for clients that want it.
+    authority_ranking = rerank(all_results, req.query)
 
     grounding = compute_grounding(results, legal_results, zlr_results)
 
@@ -4306,10 +4330,15 @@ async def search_documents(req: SearchRequest, request: Request):
                 "research_agent_status": research_agent_status,
                 "research_agent_gaps": research_map.get("gaps", []) if research_map else [],
                 "qc_downgrades": qc_log,
+                "authority_confidence": authority_ranking["confidence"],
+                "authority_excluded_count": authority_ranking["excluded_count"],
             }),
         )
 
-    return {"answer": answer, "results": all_results, **grounding}
+    return {
+        "answer": answer, "results": all_results, **grounding,
+        "authority_ranking": authority_ranking,
+    }
 
 # Cap on attached-document text sent to the model — generous enough for a
 # full lease agreement, contract, or affidavit (roughly 40k chars is well
@@ -4809,6 +4838,7 @@ def _semantic_search_firm(req, chunks: list) -> list:
                     "filename": chunk.get("document_filename") or "Unknown Document",
                     "document_type": chunk.get("document_type"),
                     "court": chunk.get("court"),
+                    "matter_type": chunk.get("matter_type"),
                     "legal_source_type": chunk.get("legal_source_type"),
                     "authority_strength": chunk.get("authority_strength"),
                 })
@@ -4834,6 +4864,7 @@ def _semantic_search_firm(req, chunks: list) -> list:
                 "filename": chunk.get("document_filename") or "Unknown Document",
                 "document_type": chunk.get("document_type"),
                 "court": chunk.get("court"),
+                "matter_type": chunk.get("matter_type"),
                 "legal_source_type": chunk.get("legal_source_type"),
                 "authority_strength": chunk.get("authority_strength"),
             })
@@ -4864,6 +4895,8 @@ def _semantic_search_legal(req, chunks: list) -> list:
                     "source_type": chunk.get("source_type"),
                     "source_name": chunk.get("source_name"),
                     "reference": chunk.get("reference"),
+                    "legal_source_type": chunk.get("legal_source_type"),
+                    "authority_strength": chunk.get("authority_strength"),
                 })
                 if len(results) >= req.limit:
                     break

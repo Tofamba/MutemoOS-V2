@@ -1,0 +1,80 @@
+# Authority-weight configuration for backend/authority_ranker.py.
+#
+# Loaded once per process by backend/config/legal_ranking.py (@lru_cache) —
+# restart the app to pick up a change here; there is no hot-reload.
+#
+# authority_weights MUST have an entry for every value in
+# backend/legal_taxonomy.py's LegalSourceType enum — the loader raises
+# LegalRankingConfigError at import time (i.e. at app startup) if any type
+# is missing or any weight falls outside 0-100. An unmapped type must fail
+# loudly here, not silently score 0 inside the ranker.
+
+_notes:
+  description: >
+    Ceiling values for "this type of source, squarely on point" — added to
+    semantic similarity (0.0-1.0) and the match bonuses in
+    compute_authority_score() (act_name_match/query_title_match/
+    citation_overlap), so a source's TYPE alone already does most of the
+    ranking work; the bonuses only refine it further. Kept deliberately on
+    a different scale from similarity so authority dominates by
+    construction rather than via a tunable multiplier that could quietly
+    drift back toward semantic-first ranking.
+  rationale: >
+    Court-hierarchy ordering: Constitution > Statute/Statutory Instrument >
+    Constitutional Court/Supreme Court > High Court > Labour Court >
+    Magistrates Court/Administrative Tribunal. A Bill sits below Labour
+    Court and above Administrative Tribunal on its own — it is significant
+    but not yet binding law; act_name_match/query_title_match in
+    authority_ranker.py bring an on-point Bill up toward Statute-level
+    scores without baking "matching the query" into this table.
+  changelog:
+    - date: "2026-07-29"
+      change: "Extracted from the hard-coded AUTHORITY_WEIGHTS dict in backend/authority_ranker.py into this file, unchanged in value."
+
+authority_weights:
+  constitution: 100
+  statute: 95                    # principal Act
+  statutory_instrument: 90
+  supreme_court_judgment: 85
+  constitutional_court_judgment: 85
+  high_court_judgment: 70
+  labour_court: 60
+  bill: 55
+  magistrates_court: 50
+  administrative_tribunal: 45
+  academic_source: 30            # legal textbook / law journal
+  government_publication: 25
+  firm_precedent: 20
+  template: 15
+  memorandum: 15
+  opinion: 10
+  pleading: 10
+  correspondence: 0
+  unknown: 0
+
+# Secondary sort key used only when two items score an exact tie on
+# final_score — earlier entries win ties. Does not need to cover every
+# source type: any type not listed here simply sorts last among ties
+# rather than raising, since an incomplete tie-break list is a much
+# lower-stakes gap than a missing authority weight (it affects ordering
+# among identical scores only, never the score itself).
+tie_break_order:
+  - constitution
+  - statute
+  - statutory_instrument
+  - constitutional_court_judgment
+  - supreme_court_judgment
+  - bill
+  - high_court_judgment
+  - labour_court
+  - magistrates_court
+  - administrative_tribunal
+  - academic_source
+  - government_publication
+  - firm_precedent
+  - template
+  - memorandum
+  - opinion
+  - pleading
+  - correspondence
+  - unknown

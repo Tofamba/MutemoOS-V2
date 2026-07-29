@@ -2619,22 +2619,51 @@ function renderSearchResults(data, query) {
   }
 
   let html = '';
+  const ar = data.authority_ranking || null;
+
+  // authority_ranking.confidence (PRIMARY/SECONDARY AUTHORITY FOUND, ONLY
+  // BACKGROUND MATERIAL FOUND, NO RELEVANT LEGAL AUTHORITY FOUND) replaces
+  // the old sources_sufficient banner — it never reports "no precedent"
+  // when primary legislation is present, since legislation outranks
+  // precedent. Falls back to the old logic for responses that predate
+  // authority_ranking (e.g. the attached-document search job result).
+  const CONFIDENCE_STYLE = {
+    'PRIMARY AUTHORITY FOUND':           { bg: '#dafbe1', border: '#8fd6a3', color: '#1a7f37', icon: '✓' },
+    'SECONDARY AUTHORITY FOUND':         { bg: '#e3f0fb', border: '#9cc3e6', color: '#205f8f', icon: '✓' },
+    'ONLY BACKGROUND MATERIAL FOUND':    { bg: '#fff3d6', border: '#e8c050', color: '#5c4600', icon: '⚠️' },
+    'NO RELEVANT LEGAL AUTHORITY FOUND': { bg: '#f6e3e0', border: '#e0a89e', color: '#a3312a', icon: '⚠️' },
+  };
 
   if (data.answer) {
-    const sufficient = data.sources_sufficient !== false;
-    const totalFound = (data.source_tier_breakdown?.authority || 0) + (data.source_tier_breakdown?.context || 0);
-    const warningHeadline = totalFound === 0
-      ? "NO FIRM PRECEDENTS OR LEGAL SOURCES FOUND"
-      : "SOURCES FOUND BELOW CONFIDENCE THRESHOLD";
-    const topWarning = !sufficient
-      ? `<div style="margin-bottom:0.6rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600">
-          ⚠️ <strong>${warningHeadline}</strong><br>
-          ${escHtml(data.grounding_note || 'This analysis is based on general legal knowledge only, not verified against firm records or Zimbabwean case law/legislation.')}
-         </div>`
-      : '';
-    const bottomNote = sufficient && data.grounding_note
-      ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
-      : '';
+    let topWarning, bottomNote;
+    if (ar) {
+      const style = CONFIDENCE_STYLE[ar.confidence] || CONFIDENCE_STYLE['NO RELEVANT LEGAL AUTHORITY FOUND'];
+      const counts = ['primary', 'secondary', 'commentary', 'background']
+        .map(t => `${(ar.source_groups[t] || []).length} ${t}`)
+        .filter(c => !c.startsWith('0 '))
+        .join(' · ');
+      topWarning = `<div style="margin-bottom:0.6rem;padding:0.6rem 0.75rem;background:${style.bg};border:1px solid ${style.border};border-radius:4px;font-size:0.8rem;color:${style.color}">
+          ${style.icon} <strong>${escHtml(ar.confidence)}</strong>${counts ? `<br><span style="font-size:0.72rem">${escHtml(counts)}</span>` : ''}
+         </div>`;
+      bottomNote = ar.excluded_count
+        ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">${ar.excluded_count} source(s) excluded as not relevant to this query (e.g. correspondence or unrelated-matter documents with no reference to it)</div>`
+        : '';
+    } else {
+      const sufficient = data.sources_sufficient !== false;
+      const totalFound = (data.source_tier_breakdown?.authority || 0) + (data.source_tier_breakdown?.context || 0);
+      const warningHeadline = totalFound === 0
+        ? "NO FIRM PRECEDENTS OR LEGAL SOURCES FOUND"
+        : "SOURCES FOUND BELOW CONFIDENCE THRESHOLD";
+      topWarning = !sufficient
+        ? `<div style="margin-bottom:0.6rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600">
+            ⚠️ <strong>${warningHeadline}</strong><br>
+            ${escHtml(data.grounding_note || 'This analysis is based on general legal knowledge only, not verified against firm records or Zimbabwean case law/legislation.')}
+           </div>`
+        : '';
+      bottomNote = sufficient && data.grounding_note
+        ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
+        : '';
+    }
     const attachedBadge = data.attached_document
       ? `<div style="margin-bottom:0.5rem;font-size:0.75rem;color:var(--ink3)">📎 Analyzing: <strong>${escHtml(data.attached_document.filename)}</strong>${data.attached_document.truncated ? ' (document was long — analysis based on the first portion)' : ''}
           ${data.attached_document.low_confidence ? `<br><span style="color:#a15c00">⚠ Low OCR confidence (${data.attached_document.ocr_confidence}%) — this photo may have been misread in places (e.g. digits/letters). Verify anything numeric or exact against the original before relying on it.</span>` : ''}
@@ -2650,28 +2679,37 @@ function renderSearchResults(data, query) {
     </div>`;
   }
 
-  // Group by document
-  const grouped = {};
-  data.results.forEach(r => {
-    if (!grouped[r.document_id]) grouped[r.document_id] = [];
-    grouped[r.document_id].push(r);
-  });
+  // Builds one result card for a document's chunk group. `ranking`, when
+  // present (from authority_ranking.results, keyed by chunk_id below),
+  // adds a "Matched because" explanation in place of a bare percentage —
+  // see backend/authority_ranker.py. Falls back to the plain % match
+  // badge when ranking is unavailable (e.g. the attached-document search
+  // job result, which doesn't run authority_ranking).
+  function whyMatchedHtml(ranking) {
+    if (!ranking || !ranking.reasons || !ranking.reasons.length) return '';
+    return `<div style="font-size:0.72rem;color:var(--green);margin-top:5px;line-height:1.5">
+      <div style="font-weight:700;color:var(--ink3);text-transform:uppercase;font-size:0.62rem;letter-spacing:0.4px;margin-bottom:2px">Matched because</div>
+      ${ranking.reasons.map(r => `✓ ${escHtml(r)}`).join('<br>')}
+    </div>`;
+  }
 
-  const docCount = Object.keys(grouped).length;
-  html += `<p style="font-size:0.75rem;color:var(--ink3);margin-bottom:0.75rem">${docCount} document${docCount!==1?'s':''} · ${data.results.length} excerpt${data.results.length!==1?'s':''} for "${escHtml(query)}"</p>`;
+  function scoreBadgeHtml(topScore, ranking) {
+    const tierLabel = ranking ? `<div style="font-size:0.6rem;color:var(--ink3);text-transform:uppercase;letter-spacing:0.4px;margin-top:2px">${escHtml(ranking.tier)}</div>` : '';
+    return `<div style="text-align:right"><span class="sr-score">${Math.round(topScore*100)}% match</span>${tierLabel}</div>`;
+  }
 
-  Object.entries(grouped).forEach(([docId, chunks]) => {
-    const first = chunks[0];
+  function cardHtml(first, chunks, ranking) {
     const topScore = Math.max(...chunks.map(c => c.similarity));
 
     if (first.result_source === 'zlr') {
       const weightBadge = first.authority_weight === 'Binding' ? '🟢' : first.authority_weight === 'Highly Persuasive' ? '🔵' : '⚪';
       const weightColor = first.authority_weight === 'Binding' ? 'chip-green' : first.authority_weight === 'Highly Persuasive' ? 'chip-blue' : 'chip-gray';
-      html += `<div class="search-result" style="border-left:3px solid var(--green)">
+      return `<div class="search-result" style="border-left:3px solid var(--green)">
         <div class="sr-header">
           <div style="font-size:1.2rem">📖</div>
           <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">${escHtml(first.filename)}</div>
+            <div style="font-weight:700;font-size:0.88rem">${escHtml(first.display_label || first.filename)}</div>
+            <div style="font-size:0.72rem;color:var(--ink3)">${escHtml(first.filename)}</div>
             <div style="margin-top:3px">
               ${first.citation ? `<span class="chip chip-green">${escHtml(first.citation)}</span>` : ''}
               ${first.taxonomy_category ? `<span class="chip chip-blue">${escHtml(first.taxonomy_category)}</span>` : ''}
@@ -2682,24 +2720,24 @@ function renderSearchResults(data, query) {
               <div style="font-size:0.7rem;color:var(--ink3);font-style:italic;margin-top:3px">
                 ${escHtml(first.subject_chains.slice(0,2).join(' | '))}
               </div>` : ''}
+            ${whyMatchedHtml(ranking)}
           </div>
-          <span class="sr-score">${Math.round(topScore*100)}% match</span>
+          ${scoreBadgeHtml(topScore, ranking)}
         </div>
         <div class="sr-body">
           ${first.summary ? `<div class="sr-excerpt">${escHtml(first.summary.slice(0,350))}</div>` : ''}
           ${first.zimlii_url ? `<a href="${escHtml(first.zimlii_url)}" target="_blank" class="btn btn-sm btn-outline">View online ↗</a>` : ''}
         </div>
       </div>`;
-      return;
     }
 
-    if (first.result_source === 'legal_update') {
+    if (first.result_source === 'legal_update' || first.result_source === 'legal') {
       const isLegislation = first.source_type === 'legislation';
-      html += `<div class="search-result" style="border-left:3px solid ${isLegislation ? 'var(--gold2)' : 'var(--blue)'}">
+      return `<div class="search-result" style="border-left:3px solid ${isLegislation ? 'var(--gold2)' : 'var(--blue)'}">
         <div class="sr-header">
           <div style="font-size:1.2rem">${isLegislation ? '📜' : '⚖'}</div>
           <div style="flex:1">
-            <div style="font-weight:700;font-size:0.88rem">${escHtml(first.reference || first.filename)}</div>
+            <div style="font-weight:700;font-size:0.88rem">${escHtml(first.display_label || first.reference || first.filename)}</div>
             <div style="font-size:0.72rem;color:var(--ink3);margin-top:2px">${escHtml(first.filename)}</div>
             <div style="margin-top:5px">
               <span class="chip ${isLegislation ? 'chip-gold' : 'chip-blue'}">${isLegislation ? 'Legislation' : 'Case Law'}</span>
@@ -2707,15 +2745,15 @@ function renderSearchResults(data, query) {
               ${first.doc_date ? `<span class="chip chip-blue">${first.doc_date}</span>` : ''}
               ${first.court ? `<span class="chip chip-green">${escHtml(first.court)}</span>` : ''}
             </div>
+            ${whyMatchedHtml(ranking)}
           </div>
-          <span class="sr-score">${Math.round(topScore*100)}% match</span>
+          ${scoreBadgeHtml(topScore, ranking)}
         </div>
         <div class="sr-body">
           <div class="sr-excerpt">${escHtml(chunks[0].text.slice(0,400))}${chunks[0].text.length > 400 ? '…' : ''}</div>
           <div style="font-size:0.7rem;color:var(--ink3)">${chunks.length} excerpt${chunks.length!==1?'s':''} · Public legal source</div>
         </div>
       </div>`;
-      return;
     }
 
     const precedentJson = JSON.stringify({
@@ -2724,22 +2762,23 @@ function renderSearchResults(data, query) {
       matter_name: first.matter_name,
     }).replace(/'/g, "\\'");
 
-    html += `<div class="search-result">
+    return `<div class="search-result">
       <div class="sr-header">
         <div style="font-size:1.2rem">📄</div>
         <div style="flex:1">
           <div style="font-weight:700;font-size:0.88rem">${escHtml(first.filename)}</div>
           <div style="font-size:0.72rem;color:var(--ink3);margin-top:2px">
-            <span class="chip chip-green" style="margin-right:6px">Firm Precedent</span>
-            ${escHtml(first.matter_name)}${first.matter_number ? ` — ${first.matter_number}` : ''}
+            <span class="chip chip-green" style="margin-right:6px">${escHtml(first.display_label || 'Firm Precedent')}</span>
+            ${escHtml(first.matter_name || '')}${first.matter_number ? ` — ${first.matter_number}` : ''}
           </div>
           <div style="margin-top:5px">
             ${first.document_type ? `<span class="chip chip-gray">${first.document_type.replace(/_/g,' ')}</span>` : ''}
             ${first.doc_date ? `<span class="chip chip-blue">${first.doc_date}</span>` : ''}
             ${first.court ? `<span class="chip chip-green">${escHtml(first.court)}</span>` : ''}
           </div>
+          ${whyMatchedHtml(ranking)}
         </div>
-        <span class="sr-score">${Math.round(topScore*100)}% match</span>
+        ${scoreBadgeHtml(topScore, ranking)}
       </div>
       <div class="sr-body">
         <div class="sr-excerpt">${escHtml(chunks[0].text.slice(0,400))}${chunks[0].text.length > 400 ? '…' : ''}</div>
@@ -2751,7 +2790,59 @@ function renderSearchResults(data, query) {
         </div>
       </div>
     </div>`;
-  });
+  }
+
+  // Groups a flat result list by document_id and renders one card per
+  // group, looking up each group's ranking (if any) by its first chunk's
+  // chunk_id.
+  function groupAndRenderCards(items, rankingByChunkId) {
+    const grouped = {};
+    items.forEach(r => {
+      if (!grouped[r.document_id]) grouped[r.document_id] = [];
+      grouped[r.document_id].push(r);
+    });
+    return Object.values(grouped)
+      .map(chunks => cardHtml(chunks[0], chunks, rankingByChunkId ? rankingByChunkId[chunks[0].chunk_id] : null))
+      .join('');
+  }
+
+  if (ar && ar.results) {
+    // Authority-first presentation: PRIMARY SOURCES (Constitution/Acts/
+    // Bills/Regulations) and SECONDARY SOURCES (case law) lead; COMMENTARY
+    // (firm precedent/opinions) and BACKGROUND are shown separately and
+    // never given equal billing — see backend/authority_ranker.py's
+    // source_tier grouping. Items the hard filter excluded simply don't
+    // appear in any group.
+    const rankingByChunkId = {};
+    ar.results.forEach(r => { rankingByChunkId[r.chunk_id] = r; });
+
+    const sections = [
+      { key: 'primary', title: 'Primary Sources' },
+      { key: 'secondary', title: 'Secondary Sources' },
+      { key: 'commentary', title: 'Commentary' },
+      { key: 'background', title: 'Background' },
+    ];
+    const nonEmpty = sections.filter(s => (ar.source_groups[s.key] || []).length > 0);
+
+    if (nonEmpty.length === 0) {
+      html += `<p style="font-size:0.8rem;color:var(--ink3);margin-bottom:0.75rem">No sources scored above the relevance threshold for "${escHtml(query)}".</p>`;
+    } else {
+      nonEmpty.forEach(s => {
+        const items = ar.source_groups[s.key];
+        const excerptCount = items.length;
+        html += `<div style="margin:1rem 0 0.5rem;font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink3)">
+          ${s.title} <span style="font-weight:400">(${excerptCount} excerpt${excerptCount!==1?'s':''})</span>
+        </div>`;
+        html += groupAndRenderCards(items, rankingByChunkId);
+      });
+    }
+  } else {
+    // Fallback for responses without authority_ranking (e.g. the
+    // attached-document search job) — unchanged flat presentation.
+    const docCount = new Set(data.results.map(r => r.document_id)).size;
+    html += `<p style="font-size:0.75rem;color:var(--ink3);margin-bottom:0.75rem">${docCount} document${docCount!==1?'s':''} · ${data.results.length} excerpt${data.results.length!==1?'s':''} for "${escHtml(query)}"</p>`;
+    html += groupAndRenderCards(data.results, null);
+  }
 
   el.innerHTML = html;
   document.getElementById('search-print-btn').style.display = 'block';
