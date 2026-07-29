@@ -217,7 +217,12 @@ def display_label(r: dict) -> str:
     result_source = r.get("result_source")
 
     if result_source == "firm":
-        return "Firm Precedent"
+        legal_source_type = r.get("legal_source_type")
+        if legal_source_type is None:
+            return "Firm Precedent"  # not yet backfilled — preserves prior behaviour
+        if legal_source_type == "unknown":
+            return "Unknown Document"
+        return legal_source_type.replace("_", " ").title()
 
     if result_source == "zlr":
         return "Zimbabwe Case Law"

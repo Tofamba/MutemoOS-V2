@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, date
 from enum import Enum
 from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent
 from backend.deadline_engine import try_compute_deadline
+from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
 try:
@@ -198,6 +199,12 @@ async def run_migrations():
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS idx_documents_matter ON documents(matter_id);
         CREATE INDEX IF NOT EXISTS idx_documents_firm ON documents(firm_id);
+        -- Legal source classification (backend/legal_taxonomy.py) — nullable,
+        -- backfilled by /api/admin/backfill-legal-taxonomy, computed going
+        -- forward wherever document_type is set.
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS legal_source_type TEXT;
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS authority_strength TEXT;
+        CREATE INDEX IF NOT EXISTS idx_documents_legal_type ON documents(legal_source_type);
 
         CREATE TABLE IF NOT EXISTS legal_updates (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -239,6 +246,9 @@ async def run_migrations():
           AND a.uploaded_at > b.uploaded_at;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_updates_dedup
             ON legal_updates(firm_id, source_url) WHERE source_url IS NOT NULL;
+        ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS legal_source_type TEXT;
+        ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS authority_strength TEXT;
+        CREATE INDEX IF NOT EXISTS idx_legal_updates_legal_type ON legal_updates(legal_source_type);
 
         CREATE TABLE IF NOT EXISTS zlr_entries (
             id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -280,6 +290,12 @@ async def run_migrations():
           AND a.uploaded_at > b.uploaded_at;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_zlr_entries_dedup
             ON zlr_entries(firm_id, zimlii_url) WHERE zimlii_url IS NOT NULL;
+        -- New column, distinct from the existing authority_weight (which is a
+        -- coarse per-series Binding/Persuasive value tied to jurisdiction, and
+        -- already displayed in the frontend) — left untouched for compatibility.
+        ALTER TABLE zlr_entries ADD COLUMN IF NOT EXISTS legal_source_type TEXT;
+        ALTER TABLE zlr_entries ADD COLUMN IF NOT EXISTS authority_strength TEXT;
+        CREATE INDEX IF NOT EXISTS idx_zlr_entries_legal_type ON zlr_entries(legal_source_type);
 
         CREATE TABLE IF NOT EXISTS calendar_events (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2244,6 +2260,64 @@ async def reclassify_zlr(request: Request):
             updated += 1
     return {"reclassified": updated, "total": len(rows)}
 
+@app.post("/api/admin/backfill-legal-taxonomy")
+async def backfill_legal_taxonomy(request: Request):
+    """
+    One-time backfill of legal_source_type/authority_strength for rows
+    that predate this classification (backend/legal_taxonomy.py) — pure,
+    deterministic, no AI call, safe to re-run any time (idempotent: only
+    rows still missing legal_source_type are touched).
+    """
+    require_admin_token(request)
+    counts = {"documents": 0, "legal_updates": 0, "zlr_entries": 0}
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, document_type FROM documents WHERE firm_id=$1 AND legal_source_type IS NULL",
+            FIRM_ID
+        )
+    for row in rows:
+        source_type = classify_firm_document(row["document_type"])
+        strength = authority_strength_for(source_type)
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE documents SET legal_source_type=$1, authority_strength=$2 WHERE id=$3",
+                source_type.value, strength.value, row["id"]
+            )
+        counts["documents"] += 1
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, source_type, reference FROM legal_updates WHERE firm_id=$1 AND legal_source_type IS NULL",
+            FIRM_ID
+        )
+    for row in rows:
+        source_type = classify_legal_update(row["source_type"], row["reference"])
+        strength = authority_strength_for(source_type)
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE legal_updates SET legal_source_type=$1, authority_strength=$2 WHERE id=$3",
+                source_type.value, strength.value, row["id"]
+            )
+        counts["legal_updates"] += 1
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, court FROM zlr_entries WHERE firm_id=$1 AND legal_source_type IS NULL",
+            FIRM_ID
+        )
+    for row in rows:
+        source_type = classify_zlr_entry(row["court"])
+        strength = authority_strength_for(source_type)
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE zlr_entries SET legal_source_type=$1, authority_strength=$2 WHERE id=$3",
+                source_type.value, strength.value, row["id"]
+            )
+        counts["zlr_entries"] += 1
+
+    return {"backfilled": counts}
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
@@ -2788,6 +2862,9 @@ async def _process_document_background(doc_id: str, matter_id: str, content: byt
         except Exception:
             metadata = {}
 
+    legal_source_type = classify_firm_document(metadata.get("document_type"))
+    authority_strength = authority_strength_for(legal_source_type)
+
     chunk_count = 0
     if text:
         new_chunks = chunk_text(text, page_count, doc_id, matter_id)
@@ -2847,7 +2924,8 @@ async def _process_document_background(doc_id: str, matter_id: str, content: byt
                 document_type=$1, matter_type=$2, parties=$3,
                 doc_date=$4, court=$5, word_count=$6, page_count=$7,
                 chunk_count=$8, ocr_used=$9, status='complete', r2_key=$12,
-                ocr_confidence=$13, needs_review=$14
+                ocr_confidence=$13, needs_review=$14,
+                legal_source_type=$15, authority_strength=$16
             WHERE id=$10 AND firm_id=$11
         """,
         metadata.get("document_type"), metadata.get("matter_type"),
@@ -2855,7 +2933,8 @@ async def _process_document_background(doc_id: str, matter_id: str, content: byt
         doc_date, metadata.get("court"),
         word_count, page_count, chunk_count, ocr_used,
         _uuid_mod.UUID(doc_id), FIRM_ID, r2_key,
-        ocr_confidence, needs_review
+        ocr_confidence, needs_review,
+        legal_source_type.value, authority_strength.value
         )
         await conn.execute(
             "UPDATE matters SET document_count = document_count + 1, last_activity=NOW() WHERE id=$1 AND firm_id=$2",
@@ -3058,17 +3137,22 @@ async def upload_legal_update(
         except ValueError:
             scraped_at_ts = None
 
+    legal_source_type = classify_legal_update(source_type, reference)
+    authority_strength = authority_strength_for(legal_source_type)
+
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO legal_updates
                 (id, firm_id, filename, source_type, source_name, reference,
-                 source_url, scraped_at, status, uploaded_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'processing',NOW())
+                 source_url, scraped_at, status, uploaded_at,
+                 legal_source_type, authority_strength)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'processing',NOW(),$9,$10)
             ON CONFLICT (firm_id, source_url) WHERE source_url IS NOT NULL DO NOTHING
             RETURNING *
         """,
         _uuid_mod.UUID(item_id), FIRM_ID, filename, source_type, source_name, reference,
-        source_url or None, scraped_at_ts
+        source_url or None, scraped_at_ts,
+        legal_source_type.value, authority_strength.value
         )
 
     if not row:
@@ -3715,6 +3799,9 @@ async def _process_zlr_background(item_id: str, content: bytes, filename: str, e
     authority_weight = get_authority_weight(source)
     subject_chains_json = json.dumps(parsed.get("subject_chains", []))
 
+    legal_source_type = classify_zlr_entry(parsed.get("court"))
+    authority_strength = authority_strength_for(legal_source_type)
+
     enriched_text = f"""CASE: {parsed.get('case_name') or ''}
 CITATION: {parsed.get('citation') or ''}
 JUDGMENT: {parsed.get('judgment_number') or ''}
@@ -3761,7 +3848,8 @@ FULL TEXT:
                 raw_text=$12, word_count=$13, chunk_count=$14, ocr_used=$15,
                 jurisdiction=$16, authority_weight=$17,
                 zimlii_url=COALESCE($18, zimlii_url),
-                ocr_confidence=$21, needs_review=$22
+                ocr_confidence=$21, needs_review=$22,
+                legal_source_type=$23, authority_strength=$24
             WHERE id=$19 AND firm_id=$20
         """,
         parsed.get("case_name") or filename,
@@ -3771,7 +3859,8 @@ FULL TEXT:
         subject_chains_json, parsed.get("taxonomy_category", "General"),
         parsed.get("summary"), text, len(text.split()), len(new_chunks), ocr_used,
         jurisdiction, authority_weight, zimlii_url or parsed.get("zimlii_url"),
-        _uuid_mod.UUID(item_id), FIRM_ID, ocr_confidence, needs_review
+        _uuid_mod.UUID(item_id), FIRM_ID, ocr_confidence, needs_review,
+        legal_source_type.value, authority_strength.value
         )
     if needs_review:
         print(f"[zlr] ⚠ {filename}: OCR confidence {ocr_confidence}% (below 80%) — flagged for manual review")
@@ -3895,12 +3984,14 @@ SUBJECT: {' | '.join(case['subject_chains'])}
 SUMMARY: {case.get('summary') or ''}"""
 
             subject_chains_json = json.dumps(case.get("subject_chains", []))
+            case_legal_source_type = classify_zlr_entry(case.get("court"))
+            case_authority_strength = authority_strength_for(case_legal_source_type)
             await conn.execute("""
                 INSERT INTO zlr_entries (id, firm_id, filename, source, volume_year,
                     jurisdiction, authority_weight, case_name, judgment_number, court, judge,
                     judgment_date, subject_chains, taxonomy_category, summary, raw_text,
-                    word_count, chunk_count, uploaded_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,0,NOW())
+                    word_count, chunk_count, uploaded_at, legal_source_type, authority_strength)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,0,NOW(),$18,$19)
             """,
             _uuid_mod.UUID(item_id), FIRM_ID,
             f"{case['case_name']} [{case['judgment_number']}]",
@@ -3911,7 +4002,8 @@ SUMMARY: {case.get('summary') or ''}"""
             case.get("court"), case.get("judge"),
             case.get("judgment_date"), subject_chains_json,
             case.get("taxonomy_category", "General"), case.get("summary"),
-            raw_text, len((case.get("summary") or "").split())
+            raw_text, len((case.get("summary") or "").split()),
+            case_legal_source_type.value, case_authority_strength.value
             )
 
             new_chunks = chunk_text(raw_text, 1, item_id, "zlr")
@@ -4119,7 +4211,8 @@ async def search_documents(req: SearchRequest, request: Request):
     async with _db_pool.acquire() as conn:
         firm_chunk_rows = await conn.fetch(
             """
-            SELECT c.*, d.filename AS document_filename
+            SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
+                   d.legal_source_type, d.authority_strength
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE c.firm_id=$1 AND c.chunk_source='firm'
@@ -4292,7 +4385,14 @@ async def _run_document_search_job(
 
         async with _db_pool.acquire() as conn:
             firm_chunk_rows = await conn.fetch(
-                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='firm'", FIRM_ID
+                """
+                SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
+                       d.legal_source_type, d.authority_strength
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='firm'
+                """,
+                FIRM_ID
             )
             legal_chunk_rows = await conn.fetch(
                 "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
@@ -4707,6 +4807,10 @@ def _semantic_search_firm(req, chunks: list) -> list:
                     "page_number": chunk.get("page_number"),
                     "chunk_index": chunk.get("chunk_index"),
                     "filename": chunk.get("document_filename") or "Unknown Document",
+                    "document_type": chunk.get("document_type"),
+                    "court": chunk.get("court"),
+                    "legal_source_type": chunk.get("legal_source_type"),
+                    "authority_strength": chunk.get("authority_strength"),
                 })
                 if len(results) >= req.limit:
                     break
@@ -4728,6 +4832,10 @@ def _semantic_search_firm(req, chunks: list) -> list:
                 "document_id": str(chunk["document_id"]),
                 "matter_id": chunk.get("matter_id"),
                 "filename": chunk.get("document_filename") or "Unknown Document",
+                "document_type": chunk.get("document_type"),
+                "court": chunk.get("court"),
+                "legal_source_type": chunk.get("legal_source_type"),
+                "authority_strength": chunk.get("authority_strength"),
             })
     return results
 
