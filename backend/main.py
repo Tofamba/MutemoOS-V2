@@ -4424,10 +4424,22 @@ async def _run_document_search_job(
                 FIRM_ID
             )
             legal_chunk_rows = await conn.fetch(
-                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
+                """
+                SELECT c.*, lu.legal_source_type, lu.authority_strength
+                FROM chunks c
+                LEFT JOIN legal_updates lu ON lu.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='legal'
+                """,
+                FIRM_ID
             )
             zlr_chunk_rows = await conn.fetch(
-                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='zlr'", FIRM_ID
+                """
+                SELECT c.*, z.legal_source_type, z.authority_strength
+                FROM chunks c
+                LEFT JOIN zlr_entries z ON z.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='zlr'
+                """,
+                FIRM_ID
             )
         firm_chunks = [dict(r) for r in firm_chunk_rows]
         legal_chunks = [dict(r) for r in legal_chunk_rows]
@@ -4448,6 +4460,8 @@ async def _run_document_search_job(
                     "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
                     "citation": r.get("citation"), "taxonomy_category": r.get("taxonomy_category"),
                     "summary": r.get("summary"),
+                    "legal_source_type": r.get("legal_source_type"),
+                    "authority_strength": r.get("authority_strength"),
                 })
 
         all_results = results + legal_results + zlr_results

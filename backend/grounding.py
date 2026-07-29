@@ -12,7 +12,9 @@ indistinguishable from one backed by real authority.
 
 import json
 import logging
+import os
 import re
+from typing import Optional
 
 import anthropic
 
@@ -21,6 +23,11 @@ logger = logging.getLogger(__name__)
 # Separate Anthropic client instance — grounding.py is imported by main.py,
 # so importing main's `client` back here would be circular.
 ai_client = anthropic.Anthropic()
+
+# Same reasoning as ai_client above, and same default as main.py's own
+# FIRM_NAME — re-reads the env var directly rather than importing it, since
+# importing from main.py here would be circular.
+FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "Sawyer & Mkushi Legal Practitioners")
 
 AUTHORITY_FLOOR = 0.6
 
@@ -131,68 +138,138 @@ def enforce_confidence_consistency(answer_text: str) -> tuple:
     return ''.join(result_blocks), qc_log
 
 
-def compute_grounding(results: list, legal_results: list, zlr_results: list,
-                       has_attached_doc: bool = False) -> dict:
+def compute_grounding(results: list, legal_results: list, zlr_results: list, has_attached_doc: bool = False) -> dict:
     """
     Determine whether an AI answer is actually grounded in retrieved firm/
     legal/case-law sources, or is unsupported general reasoning — and say so
-    explicitly. This was previously dead code: the frontend has had a
-    warning UI for this since it was built, but no backend endpoint ever
-    populated sources_sufficient/grounding_note/source_gap, so a
-    zero-source answer looked identical to a well-grounded one. For a legal
-    tool, that's a real risk — confident-sounding output with nothing behind
-    it needs to be unmistakable, not indistinguishable from a verified one.
+    explicitly. Keys off each result's pre-computed authority_strength
+    ('binding'/'persuasive'/'contextual', written once at ingest by
+    authority_strength_for() in backend/legal_taxonomy.py) rather than
+    re-deriving authority from a hand-maintained source_type list that can
+    drift out of sync with the real taxonomy.
     """
-    authority_items = list(results or []) + list(zlr_results or [])
-    context_items = []
-    for r in (legal_results or []):
-        if r.get("source_type") in CONTEXT_SOURCE_TYPES:
-            context_items.append(r)
-        else:
-            authority_items.append(r)
+    all_hits = results + legal_results + zlr_results
+    authority_hits = [r for r in all_hits if r.get('authority_strength') in ('binding', 'persuasive')]
+    context_hits = [r for r in all_hits if r.get('authority_strength') == 'contextual']
 
-    total = len(authority_items) + len(context_items)
-    max_similarity_score = max(
-        (r.get("similarity", 0) for r in authority_items + context_items), default=0
-    )
+    max_score = max([r.get('similarity', 0) for r in authority_hits]) if authority_hits else 0
+    sources_sufficient = bool(authority_hits) and max_score >= AUTHORITY_FLOOR
 
-    if total == 0:
-        if has_attached_doc:
-            note = ("No firm precedents or case law were found to cross-reference this "
-                    "document. This analysis is based on the document's own content and "
-                    "general legal principles only — verify against ZimLII, applicable "
-                    "legislation, and firm records before relying on it.")
-        else:
-            note = ("No firm precedents, legal updates, or case law matched this query. "
-                    "This analysis reflects general legal knowledge only — verify against "
-                    "ZimLII, applicable legislation, and firm records before relying on it.")
-        return {
-            "sources_sufficient": False,
-            "grounding_note": note,
-            "source_gap": "No matching sources in the vault",
-            "source_tier_breakdown": {"authority": 0, "context": 0},
-            "max_similarity_score": 0,
-        }
-
-    sources_sufficient = any(r.get("similarity", 0) >= AUTHORITY_FLOOR for r in authority_items)
-
-    if sources_sufficient:
-        grounding_note = f"Grounded in {total} retrieved source(s) from the vault."
-        source_gap = None
+    if not authority_hits and not context_hits and not has_attached_doc:
+        note = "No binding or contextual legal sources found. Reliance is on general principles only."
+    elif not authority_hits:
+        note = f"No binding or persuasive authority found. Supported only by {len(context_hits)} contextual source(s) — verify independently before relying on this."
+    elif not sources_sufficient:
+        note = f"Found {len(authority_hits)} authoritative source(s), but below the confidence threshold for binding reliance (best match {max_score:.0%})."
     else:
-        grounding_note = ("Retrieved sources did not meet the confidence threshold for binding "
-                           "legal authority. This analysis relies on background context and "
-                           "general legal principles only — verify against ZimLII, applicable "
-                           "legislation, and firm records before relying on it.")
-        source_gap = "No authority-tier source met the similarity threshold"
+        note = f"✓ Grounded in {len(authority_hits)} authoritative source(s)."
+        if context_hits:
+            note += f" Supported by {len(context_hits)} contextual item(s)."
 
     return {
         "sources_sufficient": sources_sufficient,
-        "grounding_note": grounding_note,
-        "source_gap": source_gap,
-        "source_tier_breakdown": {"authority": len(authority_items), "context": len(context_items)},
-        "max_similarity_score": max_similarity_score,
+        "grounding_note": note,
+        "max_similarity_score": max_score,
+        "source_tier_breakdown": {"authority": len(authority_hits), "context": len(context_hits)},
     }
+
+
+def get_relevance_tier(similarity: float) -> str:
+    """Coarse, human-facing label for a raw similarity score, consistent with AUTHORITY_FLOOR."""
+    if similarity >= 0.8:
+        return "Strong Match"
+    if similarity >= AUTHORITY_FLOOR:
+        return "Relevant"
+    if similarity >= 0.4:
+        return "Possibly Relevant"
+    return "Weak Match"
+
+
+# Case number near a CASE/JUDGMENT/REF keyword, e.g. "Case No. HC 6204/26".
+_CASE_NUMBER_KEYWORD_PATTERN = re.compile(
+    r"\b(?:CASE|JUDGMENT|REF)(?:\s+NO\.?)?\s*[:#]?\s*([A-Z]{1,4}[\s-]?\d{2,5}/\d{2,4})\b",
+    re.IGNORECASE,
+)
+# Bare case-number token with no keyword — real headers routinely read
+# "IN THE HIGH COURT OF ZIMBABWE HARARE HC 6204/26" with the number sitting
+# right after the court name, nothing labelling it as a case number at all.
+_CASE_NUMBER_BARE_PATTERN = re.compile(r"\b[A-Z]{1,4}[\s-]?\d{2,5}/\d{2,4}\b")
+_COURT_HEADER_PATTERN = re.compile(r"\bIN THE .*?COURT\b", re.IGNORECASE)
+
+
+def extract_identity_from_text(text: str) -> Optional[str]:
+    """
+    Best-effort fallback identity for a document with no case_name/
+    reference/filename, used by group_results_by_document() below. Tries,
+    in order: a case number next to a CASE/JUDGMENT/REF keyword; a bare
+    case-number token immediately following a court-header line (the
+    common real-world pattern the keyword search alone misses); then,
+    if the text is on this firm's own letterhead, a generic identity
+    naming the firm rather than misreading the letterhead text as a case
+    name. Returns None if nothing usable is found.
+    """
+    if not text:
+        return None
+    header = text[:500]  # case captions and letterheads sit at the top of a document
+
+    keyword_match = _CASE_NUMBER_KEYWORD_PATTERN.search(header)
+    if keyword_match:
+        return keyword_match.group(1).upper().replace(" ", "")
+
+    court_match = _COURT_HEADER_PATTERN.search(header)
+    if court_match:
+        remainder = header[court_match.end():court_match.end() + 200]
+        bare_match = _CASE_NUMBER_BARE_PATTERN.search(remainder)
+        if bare_match:
+            return bare_match.group(0).upper().replace(" ", "")
+
+    if FIRM_NAME and FIRM_NAME.upper() in header.upper():
+        return f"{FIRM_NAME} — Correspondence"
+
+    return None
+
+
+def group_results_by_document(all_results: list) -> list:
+    """
+    Collapses chunk-level results into one entry per underlying document —
+    a case, Act, or firm document may otherwise appear as several separate
+    "documents" in a result list purely because it was retrieved via
+    multiple chunks (or, for the same case reaching the corpus through two
+    ingestion paths — e.g. Vault upload and Legal Updates — under two
+    different document_ids entirely, which dedup_key's normalized-name/
+    source_url fallback collapses back into one).
+    """
+    grouped = {}
+    for r in all_results:
+        raw_name = (r.get("case_name") or r.get("reference") or r.get("filename") or "").strip().lower()
+        normalized_name = re.sub(r'[^a-z0-9]+', '', raw_name)
+        dedup_key = r.get("source_url") or r.get("zimlii_url") or normalized_name or str(r.get("document_id"))
+
+        if dedup_key not in grouped:
+            display_name = r.get("case_name") or r.get("reference") or r.get("filename")
+            if not display_name or display_name == "Unknown":
+                display_name = extract_identity_from_text(r["text"]) or "Unnamed Document"
+            if display_name.lower().startswith("section ") and r.get("source_name"):
+                display_name = f"{r['source_name']} ({display_name})"
+
+            grouped[dedup_key] = {
+                "document_id": r.get("document_id"),
+                "display_name": display_name,
+                "type_label": (r.get("legal_source_type") or r.get("result_source") or "document").replace("_", " ").title(),
+                "max_similarity": r.get("similarity", 0),
+                "authority_strength": r.get("authority_strength", "contextual"),
+                "is_authority": r.get("authority_strength") in ("binding", "persuasive"),
+                "excerpts": [],
+            }
+
+        grouped[dedup_key]["excerpts"].append({"text": r["text"], "similarity": r.get("similarity", 0), "page": r.get("page_number")})
+        grouped[dedup_key]["max_similarity"] = max(grouped[dedup_key]["max_similarity"], r.get("similarity", 0))
+
+    final_docs = []
+    for data in grouped.values():
+        data["relevance_tier"] = get_relevance_tier(data["max_similarity"])
+        final_docs.append(data)
+    return sorted(final_docs, key=lambda x: x["max_similarity"], reverse=True)
 
 
 def format_context(results: list, legal_results: list, zlr_results: list) -> str:
