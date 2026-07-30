@@ -4983,7 +4983,7 @@ RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT
             # needs significant headroom. Going well above what's been
             # demonstrated necessary so far rather than incrementally
             # guessing again.
-            max_tokens=8000 if attached_doc_text else 4000,
+           max_tokens=min(8000 + len(attached_doc_text) // 5, 24000) if attached_doc_text else 4000,
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 Today's date: {datetime.utcnow().strftime('%Y-%m-%d')}
 
