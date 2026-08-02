@@ -353,6 +353,9 @@ select{cursor:pointer}
         <div class="card-body">
           <div class="form-group">
             <label>Matter</label>
+            <input type="text" id="upload-matter-search" placeholder="🔍 Type to filter matters…"
+                   oninput="filterMatterOptions('upload-matter-select', this.value)"
+                   style="margin-bottom:0.35rem"/>
             <select id="upload-matter-select" onchange="onUploadMatterChange()">
               <option value="">— Select existing matter —</option>
             </select>
@@ -801,6 +804,7 @@ select{cursor:pointer}
                   <option value="billing_review">Billing / Finance Review</option>
                   <option value="pro_bono">Pro Bono</option>
                   <option value="networking">Networking / Business Development</option>
+                  <option value="file_review">File review</option>
                 </optgroup>
                 <optgroup label="Court & Litigation">
                   <option value="chamber_application">Chamber Application</option>
@@ -816,6 +820,9 @@ select{cursor:pointer}
             </div>
             <div class="form-group">
               <label>Matter</label>
+              <input type="text" id="cal-matter-search" placeholder="🔍 Type to filter matters…"
+                     oninput="filterMatterOptions('cal-matter', this.value)"
+                     style="margin-bottom:0.35rem"/>
               <select id="cal-matter">
                 <option value="">— None —</option>
               </select>
@@ -1849,23 +1856,53 @@ async function loadMatters() {
   } catch(e) { console.error('Could not load matters:', e); }
 }
 
+// Every dropdown that lets a user pick a matter — id -> its placeholder
+// option's HTML. Add new matter-pickers here (plus a search <input> with
+// oninput="filterMatterOptions('<id>', this.value)") to get alphabetical
+// sorting and live filtering for free via populateMatterSelects()/
+// filterMatterOptions() below.
+const MATTER_SELECT_PLACEHOLDERS = {
+  'upload-matter-select': '<option value="">— Select existing matter —</option>',
+  'cal-matter': '<option value="">— None —</option>',
+};
+
+function sortedMattersList() {
+  return [...matters].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+}
+
+function renderMatterOptions(el, placeholderHtml, matterList) {
+  const val = el.value;
+  el.innerHTML = placeholderHtml;
+  matterList.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.name + (m.number ? ` — ${m.number}` : '');
+    el.appendChild(opt);
+  });
+  if ([...el.options].some(o => o.value === val)) el.value = val;
+}
+
 function populateMatterSelects() {
-  const selects = ['upload-matter-select','cal-matter'];
-  selects.forEach(id => {
+  const sorted = sortedMattersList();
+  Object.entries(MATTER_SELECT_PLACEHOLDERS).forEach(([id, placeholder]) => {
     const el = document.getElementById(id);
     if (!el) return;
-    const val = el.value;
-    el.innerHTML = id === 'cal-matter'
-      ? '<option value="">— None —</option>'
-      : '<option value="">— Select existing matter —</option>';
-    matters.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.name + (m.number ? ` — ${m.number}` : '');
-      el.appendChild(opt);
-    });
-    el.value = val;
+    renderMatterOptions(el, placeholder, sorted);
   });
+}
+
+// Narrows a matter select's visible options to those matching the given
+// search text — rebuilds the option list rather than toggling individual
+// option visibility, since browser support for hiding option elements via
+// CSS is inconsistent. Selection is preserved if it still matches.
+function filterMatterOptions(selectId, query) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  const q = query.trim().toLowerCase();
+  const filtered = sortedMattersList().filter(m =>
+    !q || (m.name || '').toLowerCase().includes(q) || (m.number || '').toLowerCase().includes(q)
+  );
+  renderMatterOptions(el, MATTER_SELECT_PLACEHOLDERS[selectId] || '<option value=""></option>', filtered);
 }
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
@@ -4467,7 +4504,7 @@ async function extractDates(docId, filename) {
 
     extractedDates = data.dates;
 
-    const EVENT_ICONS = { hearing: '⚖', deadline: '⏰', filing: '📋', round_table: '🤝', ptc: '👨‍⚖️', mediation: '🕊', meeting: '👤', consultation: '💬', signing: '✍', call: '📞', speaking: '🎤', radio_tv: '📻', cpd: '📚', lsz: '⚖', board: '🏛', staff_meeting: '👥', leave: '🏖', billing_review: '💰', pro_bono: '🤲', networking: '🤝', chamber_application: '⚡', judgment_awaiting: '⏳', social: '🎉', church: '✝', personal: '👤', other: '📅' };
+    const EVENT_ICONS = { hearing: '⚖', deadline: '⏰', filing: '📋', round_table: '🤝', ptc: '👨‍⚖️', mediation: '🕊', meeting: '👤', consultation: '💬', signing: '✍', call: '📞', speaking: '🎤', radio_tv: '📻', cpd: '📚', lsz: '⚖', board: '🏛', staff_meeting: '👥', leave: '🏖', billing_review: '💰', pro_bono: '🤲', networking: '🤝', file_review: '📁', chamber_application: '⚡', judgment_awaiting: '⏳', social: '🎉', church: '✝', personal: '👤', other: '📅' };
 
     document.getElementById('date-modal-content').innerHTML = `
       <p style="font-size:0.82rem;color:var(--ink2);margin-bottom:1rem">
