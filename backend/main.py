@@ -5039,7 +5039,15 @@ Zimbabwean legal system. Produce a complete, properly formatted document —
 not a template or outline. Use [_____] for any specific detail (dates,
 amounts, ID numbers) not supplied. Number paragraphs/clauses where that is
 standard practice for this document type. Do not add commentary before or
-after the document itself — output the document only."""
+after the document itself — output the document only.
+
+This document is being drafted for {FIRM_NAME} specifically. Any firm
+name, letterhead, or legal practitioners' signature block in this document
+must read exactly "{FIRM_NAME}" — never a different firm name. If a firm
+precedent or retrieved authority provided below was drafted by or
+mentions a different firm, match only its language, structure, and
+formatting — never copy a firm identity, letterhead, or signature block
+from it verbatim."""
 
 # Per-type drafting guidance — the specifics that make a Zimbabwean legal
 # document actually usable rather than a generic template. Litigation types
@@ -5511,6 +5519,79 @@ async def generate_document(req: DocumentRequest, request: Request):
             f"structure, and drafting style where appropriate:\n---\n{text}\n---"
         )
 
+    # Corpus-wide retrieval \u2014 the same search /api/search runs, so drafting
+    # draws on genuinely relevant case law/legislation/firm precedent from
+    # the whole Vault, not just the single manually-attached precedent
+    # above. Without this the model had nothing but its own training data
+    # to cite from, which produced a real fabricated citation in testing
+    # (a genuine case name attached to the wrong citation number). Additive
+    # alongside precedent_block, not a replacement for it.
+    retrieval_query = req.facts + (f" {req.instructions}" if req.instructions else "")
+    retrieval_req = SearchRequest(query=retrieval_query, limit=8)
+
+    async with _db_pool.acquire() as conn:
+        firm_chunk_rows = await conn.fetch(
+            """
+            SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
+                   d.matter_type, d.legal_source_type, d.authority_strength
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='firm'
+            """,
+            FIRM_ID
+        )
+        legal_chunk_rows = await conn.fetch(
+            """
+            SELECT c.*, lu.legal_source_type, lu.authority_strength
+            FROM chunks c
+            LEFT JOIN legal_updates lu ON lu.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='legal'
+            """,
+            FIRM_ID
+        )
+        zlr_chunk_rows = await conn.fetch(
+            """
+            SELECT c.*, z.legal_source_type, z.authority_strength
+            FROM chunks c
+            LEFT JOIN zlr_entries z ON z.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='zlr'
+            """,
+            FIRM_ID
+        )
+
+    retrieved_results = await asyncio.to_thread(
+        _semantic_search_firm, retrieval_req, [dict(r) for r in firm_chunk_rows]
+    )
+    retrieved_legal_results = await asyncio.to_thread(
+        _semantic_search_legal, retrieval_req, [dict(r) for r in legal_chunk_rows]
+    )
+    retrieved_zlr_results = []
+    zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
+    if zlr_chunks_list:
+        raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, retrieval_query, None, 3)
+        for r in raw_zlr:
+            retrieved_zlr_results.append({
+                "result_source": "zlr",
+                "chunk_id": r.get("item_id"),
+                "text": r.get("relevant_excerpt", ""),
+                "similarity": r.get("similarity", 0),
+                "document_id": r.get("item_id"),
+                "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
+                "citation": r.get("citation"),
+                "taxonomy_category": r.get("taxonomy_category"),
+                "summary": r.get("summary"),
+                "legal_source_type": r.get("legal_source_type"),
+                "authority_strength": r.get("authority_strength"),
+            })
+
+    retrieved_context = format_context(retrieved_results, retrieved_legal_results, retrieved_zlr_results)
+    retrieved_block = (
+        f"\n\nAVAILABLE AUTHORITY FROM THE FIRM'S VAULT (retrieved as potentially relevant to "
+        f"these facts \u2014 cite only what is genuinely on point; do not force a connection to "
+        f"authority that doesn't actually apply, and do not cite any case not shown here):"
+        f"\n---\n{retrieved_context}\n---"
+    ) if retrieved_context else ""
+
     party_block = ""
     if is_litigation:
         party_block = f"""Court: {req.court or 'High Court of Zimbabwe'}
@@ -5540,6 +5621,7 @@ Facts and background:
 
 {f"Additional instructions: {req.instructions}" if req.instructions else ""}
 {precedent_block}
+{retrieved_block}
 
 DOCUMENT-SPECIFIC REQUIREMENTS:
 {guidance}
@@ -5553,7 +5635,10 @@ Draft the complete document now."""
         # adversarial counter-arguments) need real headroom, and a flat
         # 4096 has no way to grow with input size. Capped well under
         # claude-sonnet-4-5's real 64,000-token ceiling.
-        max_tokens = min(6000 + len(req.facts + (req.instructions or '') + precedent_block) // 5, 20000)
+        max_tokens = min(
+            6000 + len(req.facts + (req.instructions or '') + precedent_block + retrieved_block) // 5,
+            20000,
+        )
         msg = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=max_tokens,
@@ -5571,6 +5656,20 @@ Draft the complete document now."""
                 "Treat the final section as incomplete and re-run the "
                 "request for the rest, or ask a narrower follow-up question.**"
             )
+
+        # Same inline citation check as the research/synthesis path, against
+        # the exact retrieved context this document was drafted from — but
+        # softer wording than research's "UNVERIFIED": the corpus is not
+        # comprehensive (currently ~523 ZLR chunks), so a citation absent
+        # from it is unconfirmed, not proven fabricated.
+        document_text, inline_qc_log = verify_inline_case_citations(
+            document_text, retrieved_context,
+            annotation_suffix="[⚠ Not found in retrieved sources — verify independently before filing]",
+        )
+        if inline_qc_log:
+            print(f"[generate_document] {len(inline_qc_log)} citation(s) not found in retrieved context: "
+                  f"{[q['case_name'] for q in inline_qc_log]}")
+
         return {"document": document_text, "doc_type": req.doc_type}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Document generation failed: {e}")

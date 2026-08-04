@@ -405,7 +405,11 @@ CASE_CITATION_PATTERN = re.compile(
     r"[A-Z][A-Za-z\.\'\-]+(?:\s+[A-Za-z\.\'\-&]+)*)\s*\(([^)]{2,40})\)"
 )
 
-def verify_inline_case_citations(answer_text: str, retrieved_context: str) -> tuple:
+def verify_inline_case_citations(
+    answer_text: str,
+    retrieved_context: str,
+    annotation_suffix: str = "[⚠ UNVERIFIED — not found in retrieved sources, confirm independently before relying on it]",
+) -> tuple:
     """
     Deterministic QC pass, complementary to verify_citations(): scans the
     ENTIRE answer text for "X v Y (citation)" patterns anywhere in the
@@ -414,6 +418,14 @@ def verify_inline_case_citations(answer_text: str, retrieved_context: str) -> tu
     each matched case name appears somewhere in the exact retrieved context
     sent to synthesis; unverified matches get an inline warning annotation
     rather than being silently left to read as confirmed.
+
+    annotation_suffix lets a caller soften the wording — e.g. drafting,
+    where the corpus is far from comprehensive, uses "not found in
+    retrieved sources — verify independently before filing" rather than
+    the research path's "UNVERIFIED" language, since absence from a
+    limited corpus isn't proof of a fabricated citation, just an
+    unconfirmed one. The default preserves the original research-path
+    wording exactly, so existing callers are unaffected.
     """
     normalized_context = ' '.join(retrieved_context.split()).lower()
     qc_log = []
@@ -430,7 +442,7 @@ def verify_inline_case_citations(answer_text: str, retrieved_context: str) -> tu
                 "citation": citation,
                 "qc_reason": "This case name/citation was not found in the retrieved context provided to the model — it may be drawn from general knowledge rather than the Vault, and has not been verified.",
             })
-            annotation = f'{full_match} [⚠ UNVERIFIED — not found in retrieved sources, confirm independently before relying on it]'
+            annotation = f'{full_match} {annotation_suffix}'
             result_text = result_text.replace(full_match, annotation, 1)
     return result_text, qc_log
 
