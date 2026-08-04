@@ -5430,6 +5430,54 @@ DOC_TYPE_LABELS_BACKEND = {
     "freeform": "legal document",
 }
 
+ADVOCACY_RULES = """
+LITIGATION DRAFTING VOICE — this document is an advocate's submission, not a
+legal textbook. The reader is a judge who must be persuaded, not a student
+being taught the law. Every substantive paragraph should follow this rhythm,
+not "state law → quote statute → move on":
+
+1. STATE THE PROPOSITION FIRST, not the statute. Open with what you are
+   arguing, in your own words, before any citation. Wrong: "Section 68(1)
+   provides that administrative conduct must be procedurally fair." Right:
+   "The Respondent's conduct falls squarely within the prohibition in s 68
+   because the impugned decision was taken without notice, consultation, or
+   reasons — conduct that cannot be described as lawful or procedurally
+   fair."
+
+2. APPLY TO THE FACTS IMMEDIATELY. Do not recite a legal principle in the
+   abstract and leave the application implicit or for a later paragraph.
+   The proposition and its application to this client's facts belong in the
+   same breath.
+
+3. WEAVE AUTHORITY INTO THE ARGUMENT, don't just cite it. Prefer "This
+   principle has been repeatedly affirmed by this Court — see X v Y, where
+   [holding]..." over a bare citation dropped after a legal statement.
+   Authorities support a proposition you have already made; they do not
+   replace making it.
+
+4. ANTICIPATE THE OPPONENT, THEN REFUTE. For any point where a contrary
+   argument is realistically available, name it plainly, then dismantle it
+   — don't wait to be asked. This is what makes Heads persuasive rather than
+   descriptive.
+
+5. VARY PARAGRAPH LENGTH TO MATCH WEIGHT, not uniform blocks. A minor,
+   uncontested point can be one sentence. A contested, central issue may
+   need several paragraphs of sustained argument. Mechanically equal
+   paragraph lengths read as generated, not argued — real Heads of Argument
+   expand exactly where the case is won or lost and compress everywhere
+   else.
+
+6. USE ADVOCATE'S DICTION where it fits naturally — "it is respectfully
+   submitted that," "with respect," "the inevitable consequence is,"
+   "surely," "this Court has already held" — but only where it earns its
+   place; don't insert stock phrases as decoration. The goal is genuine
+   persuasive register, not a checklist of phrases.
+
+7. THE GOAL OF EVERY PARAGRAPH IS TO ADVANCE WHY THE CLIENT MUST WIN, not
+   to inform the reader about the law. If a paragraph could be deleted
+   without weakening the argument, it does not belong.
+"""
+
 LITIGATION_DOC_TYPES = {
     "summons_matrimonial", "summons_civil", "court_application",
     "urgent_chamber", "notice_of_appeal", "review", "heads_of_argument",
@@ -5475,6 +5523,14 @@ Second Party: {req.defendant or '[SECOND PARTY]'}"""
         if req.case_number:
             party_block += f"\nReference/Matter Number: {req.case_number}"
 
+    # Advocate's-voice instructions only apply to litigation documents
+    # (Heads of Argument, applications, appeals, etc.) — a contract or
+    # letter drafted in a persuasive/adversarial register would be wrong.
+    # Additive alongside precedent_block, not a replacement for it: a
+    # litigation document with a matched firm precedent should get both
+    # the precedent's language/structure AND the advocacy voice rules.
+    advocacy_block = ADVOCACY_RULES if is_litigation else ""
+
     prompt = f"""Draft a {DOC_TYPE_LABELS_BACKEND.get(req.doc_type, 'legal document')}.
 
 {party_block}
@@ -5487,6 +5543,7 @@ Facts and background:
 
 DOCUMENT-SPECIFIC REQUIREMENTS:
 {guidance}
+{advocacy_block}
 
 Draft the complete document now."""
 
