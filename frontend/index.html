@@ -51,7 +51,15 @@
 @media print {
   /* Hide everything except the search results when printing from search tab */
   .header, .nav, .btn, .toolbar, .card-header, .section-head,
-  #tab-draft > *:not(#print-area),
+  /* #print-area is nested inside #draft-step3 (#tab-draft > #draft-step3 >
+     #print-area), not a direct child of #tab-draft — hiding *:not(#print-area)
+     at only the #tab-draft level hid #draft-step3 itself (since it isn't
+     literally #print-area), taking #print-area down with it as a
+     display:none descendant that the later `#print-area{display:block}`
+     rule can never override. Un-hide the ancestor, then hide its own
+     direct children other than #print-area instead. */
+  #tab-draft > *:not(#draft-step3),
+  #draft-step3 > *:not(#print-area),
   #search-print-btn,
   .result-actions,
   .use-precedent-btn { display: none !important; }
@@ -3861,16 +3869,19 @@ async function generateDocument() {
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Generation failed'); }
     const data = await res.json();
 
-    // Render in editor — convert plain text to formatted HTML
+    // Render in editor — convert plain text to formatted HTML. A run of
+    // one or more blank lines is ONE paragraph boundary, not one <p> per
+    // blank line — giving every blank line its own margined <p><br></p>
+    // stacked three default browser paragraph-margins between sections.
     const editor = document.getElementById('draft-editor');
     const formatted = data.document
-      .split('\n')
-      .map(line => {
-        const t = line.trim();
-        if (!t) return '<p><br></p>';
-        if (t === t.toUpperCase() && t.length > 3 && t.length < 80) return `<p style="text-align:center"><strong>${escHtml(t)}</strong></p>`;
-        if (/^\d+\./.test(t)) return `<p>${escHtml(t)}</p>`;
-        return `<p>${escHtml(t)}</p>`;
+      .split(/\n\s*\n+/)
+      .map(block => block.trim())
+      .filter(block => block.length > 0)
+      .map(block => {
+        const isHeading = block === block.toUpperCase() && block.length > 3 && block.length < 80 && !block.includes('\n');
+        const inner = escHtml(block).replace(/\n/g, '<br>');
+        return isHeading ? `<p style="text-align:center"><strong>${inner}</strong></p>` : `<p>${inner}</p>`;
       }).join('');
 
     editor.innerHTML = formatted;

@@ -13,7 +13,7 @@ Changes from v1.1:
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Response, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -35,6 +35,7 @@ from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, 
 from backend.deadline_engine import try_compute_deadline
 from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
 from backend.authority_ranker import rerank
+from backend.docx_export import paragraphs_from_plain_text, paragraphs_from_html, build_docx_bytes
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
 try:
@@ -1998,6 +1999,10 @@ class ExportRequest(BaseModel):
     affidavit_text: str
     deponent_name: Optional[str] = "Deponent"
     document_id: Optional[str] = "DOC"
+
+class ExportDocumentDocxRequest(BaseModel):
+    content_html: str
+    filename: Optional[str] = "Document"
 
 class Attendee(BaseModel):
     email: str
@@ -5500,76 +5505,47 @@ Draft the complete document now."""
 
 @app.post("/api/export-docx")
 async def export_docx(req: ExportRequest, request: Request):
+    """
+    Builds affidavit_text into a .docx via backend/docx_export.py — no
+    longer shells out to Node/npm per request (the previous implementation
+    generated and ran a throwaway docx.js script, installing the npm
+    `docx` package into a temp dir on every single export). Same visual
+    result (Times New Roman, justified body, centered/bold caption lines,
+    1" margins), built with python-docx, which was already a declared
+    dependency (used elsewhere for reading uploaded .docx files).
+    """
     user = await get_current_user(request)
     _check_permission(user, "draft:document")
-    node_path = None
-    for candidate in ["/usr/local/bin/node", "/usr/bin/node", "node"]:
-        import shutil
-        if shutil.which(candidate):
-            node_path = candidate
-            break
-    if not node_path:
-        raise HTTPException(status_code=503, detail="Node.js is not available. Copy the affidavit text manually.")
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        script_path = os.path.join(tmpdir, "make_docx.js")
-        output_path = os.path.join(tmpdir, f"affidavit_{req.document_id}.docx")
-        escaped_text = req.affidavit_text.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
-        node_script = f"""
-const {{ Document, Packer, Paragraph, TextRun, AlignmentType }} = require('docx');
-const fs = require('fs');
-const text = `{escaped_text}`;
-const lines = text.split('\\n');
-const paragraphs = lines.map(line => {{
-    const isCentered = line.trim().startsWith('IN THE') || line.trim().startsWith('CASE NO') ||
-                       line.trim().startsWith('BETWEEN') || line.trim() === '';
-    return new Paragraph({{
-        alignment: isCentered ? AlignmentType.CENTER : AlignmentType.JUSTIFIED,
-        spacing: {{ after: 120 }},
-        children: [new TextRun({{
-            text: line,
-            font: 'Times New Roman',
-            size: 24,
-            bold: line.trim().startsWith('IN THE') || line.trim().startsWith('CASE NO'),
-        }})]
-    }});
-}});
-const doc = new Document({{
-    sections: [{{
-        properties: {{ page: {{ margin: {{ top: 1440, right: 1440, bottom: 1440, left: 1440 }} }} }},
-        children: paragraphs
-    }}]
-}});
-Packer.toBuffer(doc).then(buffer => {{
-    fs.writeFileSync('{output_path}', buffer);
-    console.log('done');
-}});
-"""
-        with open(script_path, "w") as f:
-            f.write(node_script)
-
-        pkg_path = os.path.join(tmpdir, "package.json")
-        with open(pkg_path, "w") as f:
-            json.dump({"dependencies": {"docx": "^8.5.0"}}, f)
-
-        install = subprocess.run(["npm", "install", "--prefix", tmpdir, "docx"],
-                                  capture_output=True, text=True, timeout=60, cwd=tmpdir)
-        if install.returncode != 0:
-            raise HTTPException(status_code=500, detail="Failed to install docx package")
-
-        result = subprocess.run([node_path, script_path],
-                                capture_output=True, text=True, timeout=30, cwd=tmpdir)
-        if result.returncode != 0 or not os.path.exists(output_path):
-            raise HTTPException(status_code=500, detail=f"DOCX generation failed: {result.stderr[:200]}")
-
-        with open(output_path, "rb") as f:
-            docx_bytes = f.read()
-
-    from fastapi.responses import Response as FastAPIResponse
-    return FastAPIResponse(
+    paragraph_blocks = paragraphs_from_plain_text(req.affidavit_text)
+    if not paragraph_blocks:
+        raise HTTPException(status_code=422, detail="No content to export.")
+    docx_bytes = await asyncio.to_thread(build_docx_bytes, paragraph_blocks)
+    return Response(
         content=docx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="affidavit_{req.document_id}.docx"'}
+    )
+
+@app.post("/api/export-document-docx")
+async def export_document_docx(req: ExportDocumentDocxRequest, request: Request):
+    """
+    Exports the drafting editor's CURRENT (possibly hand-edited) HTML
+    content as a .docx — by export time the content is rich HTML (headings,
+    bold, centered captions from the editor's own formatting/toolbar), not
+    the original plain-text AI output, so this parses content_html rather
+    than re-deriving from the AI's first draft.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+    paragraph_blocks = paragraphs_from_html(req.content_html)
+    if not paragraph_blocks:
+        raise HTTPException(status_code=422, detail="No content to export.")
+    docx_bytes = await asyncio.to_thread(build_docx_bytes, paragraph_blocks)
+    safe_filename = re.sub(r'[^\w\-. ]', '_', req.filename or "Document")
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}.docx"'}
     )
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
