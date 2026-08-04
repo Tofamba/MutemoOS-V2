@@ -5491,13 +5491,30 @@ DOCUMENT-SPECIFIC REQUIREMENTS:
 Draft the complete document now."""
 
     try:
+        # Scaled the same way as synthesise_answer_sync's research path —
+        # litigation documents (Heads of Argument, multiple issues,
+        # adversarial counter-arguments) need real headroom, and a flat
+        # 4096 has no way to grow with input size. Capped well under
+        # claude-sonnet-4-5's real 64,000-token ceiling.
+        max_tokens = min(6000 + len(req.facts + (req.instructions or '') + precedent_block) // 5, 20000)
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=4096,
+            max_tokens=max_tokens,
             system=DOCUMENT_SYSTEM_BASE.format(FIRM_NAME=FIRM_NAME),
             messages=[{"role": "user", "content": prompt}]
         )
-        return {"document": msg.content[0].text, "doc_type": req.doc_type}
+        document_text = msg.content[0].text
+        if msg.stop_reason == "max_tokens":
+            # Same truncation safeguard as synthesise_answer_sync — without
+            # this, a cut-off litigation document reads as complete and
+            # could be filed with no indication the ending is missing.
+            document_text += (
+                "\n\n---\n**⚠ This document was cut off before completing "
+                "— it ran out of space rather than reaching a natural end. "
+                "Treat the final section as incomplete and re-run the "
+                "request for the rest, or ask a narrower follow-up question.**"
+            )
+        return {"document": document_text, "doc_type": req.doc_type}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Document generation failed: {e}")
 
