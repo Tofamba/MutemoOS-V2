@@ -566,10 +566,20 @@ select{cursor:pointer}
         </div>
       </div>
       <div class="form-group">
-        <label>Client Name</label>
-        <input type="text" id="nm-client" placeholder="e.g. John Moyo" oninput="debouncedConflictCheck()"/>
+        <label>Client</label>
+        <input type="text" id="nm-client-search" placeholder="🔍 Search existing clients…"
+               oninput="filterClientOptions('nm-client-select', this.value)" style="margin-bottom:0.4rem"/>
+        <select id="nm-client-select" onchange="onNmClientSelectChange()">
+          <option value="">— Select existing client —</option>
+        </select>
+        <div style="font-size:0.72rem;color:var(--ink3);margin:0.4rem 0 0.25rem">— or type a new client's name to create one —</div>
+        <input type="text" id="nm-client" placeholder="e.g. John Moyo" oninput="onNmClientNameInput()"/>
       </div>
       <div id="nm-conflict-warning" style="display:none;margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600"></div>
+      <div class="form-group">
+        <label>Other Named Parties (optional)</label>
+        <textarea id="nm-case-parties" rows="2" placeholder="Co-respondents, companies, or family members named in the matter who aren't themselves a client — e.g. the client's company, or a relative cited separately"></textarea>
+      </div>
       <div class="form-row">
         <div class="form-group">
           <label>Next Critical Deadline (optional)</label>
@@ -1595,6 +1605,7 @@ let precedentContext = null;
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   await loadMatters();
+  await loadClients();
   renderCalendar();
   showTab('search');
   checkUserIdentity();
@@ -1777,13 +1788,37 @@ function openNewMatterModal() {
   const modal = document.getElementById('new-matter-modal');
   modal.style.display = 'flex';
   document.getElementById('nm-name').focus();
+  loadClients(); // pick up any client created elsewhere since last load
+}
+
+// Set when an existing client is chosen from nm-client-select; cleared the
+// moment the client-name text is hand-edited, since at that point it no
+// longer necessarily matches the selected client's actual name.
+let _nmSelectedClientId = null;
+
+function onNmClientSelectChange() {
+  const select = document.getElementById('nm-client-select');
+  const id = select.value;
+  if (!id) return;
+  const client = clients.find(c => c.id === id);
+  if (!client) return;
+  _nmSelectedClientId = id;
+  document.getElementById('nm-client').value = client.full_name;
+  debouncedConflictCheck();
+}
+
+function onNmClientNameInput() {
+  _nmSelectedClientId = null;
+  debouncedConflictCheck();
 }
 
 function closeNewMatterModal() {
   document.getElementById('new-matter-modal').style.display = 'none';
-  ['nm-name','nm-internal-ref','nm-external-ref','nm-client','nm-deadline','nm-deadline-note'].forEach(id => {
+  ['nm-name','nm-internal-ref','nm-external-ref','nm-client','nm-client-search','nm-case-parties','nm-deadline','nm-deadline-note'].forEach(id => {
     document.getElementById(id).value = '';
   });
+  document.getElementById('nm-client-select').value = '';
+  _nmSelectedClientId = null;
   document.getElementById('nm-type').value = '';
   document.getElementById('nm-status').value = 'Active';
   document.getElementById('nm-status-msg').className = 'status';
@@ -1829,6 +1864,24 @@ async function submitNewMatter() {
   msg.className = 'status show';
   msg.textContent = 'Creating…';
   try {
+    const clientName = document.getElementById('nm-client').value.trim();
+    let clientId = _nmSelectedClientId;
+
+    // No existing client selected, but a name was typed — create the
+    // client inline before the matter, so the matter can link to it via
+    // client_id from the moment it's created.
+    if (!clientId && clientName) {
+      const cRes = await fetch(`${API}/api/clients`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ full_name: clientName })
+      });
+      const cData = await cRes.json();
+      if (!cRes.ok) throw new Error(cData.detail || 'Failed to create client');
+      clientId = cData.id;
+      clients.push(cData);
+    }
+
     const res = await fetch(`${API}/api/matters`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -1836,7 +1889,9 @@ async function submitNewMatter() {
         name,
         internal_ref: document.getElementById('nm-internal-ref').value.trim() || null,
         external_ref: document.getElementById('nm-external-ref').value.trim() || null,
-        client_name: document.getElementById('nm-client').value.trim() || null,
+        client_name: clientId ? null : (clientName || null),
+        client_id: clientId || null,
+        case_parties: document.getElementById('nm-case-parties').value.trim() || null,
         status: document.getElementById('nm-status').value || 'Active',
         matter_type: document.getElementById('nm-type').value || null,
         next_deadline: document.getElementById('nm-deadline').value || null,
@@ -1864,6 +1919,35 @@ async function loadMatters() {
   } catch(e) { console.error('Could not load matters:', e); }
 }
 
+// Generic alphabetical-select-with-live-search machinery, shared by every
+// "pick one of these records" dropdown (matters, clients, ...). Each entity
+// supplies its own placeholder map, sort/filter text, and option label —
+// the DOM mechanics (render, preserve selection, filter-and-rerender) live
+// here once.
+function renderSelectOptions(el, placeholderHtml, items, labelFn) {
+  const val = el.value;
+  el.innerHTML = placeholderHtml;
+  items.forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = item.id;
+    opt.textContent = labelFn(item);
+    el.appendChild(opt);
+  });
+  if ([...el.options].some(o => o.value === val)) el.value = val;
+}
+
+// Narrows a select's visible options to those matching the given search
+// text — rebuilds the option list rather than toggling individual option
+// visibility, since browser support for hiding option elements via CSS is
+// inconsistent. Selection is preserved if it still matches.
+function filterSelectOptions(selectId, query, sortedList, placeholders, labelFn, matchFn) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  const q = query.trim().toLowerCase();
+  const filtered = sortedList.filter(item => !q || matchFn(item, q));
+  renderSelectOptions(el, placeholders[selectId] || '<option value=""></option>', filtered, labelFn);
+}
+
 // Every dropdown that lets a user pick a matter — id -> its placeholder
 // option's HTML. Add new matter-pickers here (plus a search <input> with
 // oninput="filterMatterOptions('<id>', this.value)") to get alphabetical
@@ -1878,16 +1962,10 @@ function sortedMattersList() {
   return [...matters].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 }
 
+const _matterLabel = m => m.name + (m.number ? ` — ${m.number}` : '');
+
 function renderMatterOptions(el, placeholderHtml, matterList) {
-  const val = el.value;
-  el.innerHTML = placeholderHtml;
-  matterList.forEach(m => {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.name + (m.number ? ` — ${m.number}` : '');
-    el.appendChild(opt);
-  });
-  if ([...el.options].some(o => o.value === val)) el.value = val;
+  renderSelectOptions(el, placeholderHtml, matterList, _matterLabel);
 }
 
 function populateMatterSelects() {
@@ -1899,18 +1977,48 @@ function populateMatterSelects() {
   });
 }
 
-// Narrows a matter select's visible options to those matching the given
-// search text — rebuilds the option list rather than toggling individual
-// option visibility, since browser support for hiding option elements via
-// CSS is inconsistent. Selection is preserved if it still matches.
 function filterMatterOptions(selectId, query) {
-  const el = document.getElementById(selectId);
-  if (!el) return;
-  const q = query.trim().toLowerCase();
-  const filtered = sortedMattersList().filter(m =>
-    !q || (m.name || '').toLowerCase().includes(q) || (m.number || '').toLowerCase().includes(q)
+  filterSelectOptions(
+    selectId, query, sortedMattersList(), MATTER_SELECT_PLACEHOLDERS, _matterLabel,
+    (m, q) => (m.name || '').toLowerCase().includes(q) || (m.number || '').toLowerCase().includes(q)
   );
-  renderMatterOptions(el, MATTER_SELECT_PLACEHOLDERS[selectId] || '<option value=""></option>', filtered);
+}
+
+// Same pattern, for the client picker in the new-matter modal (see
+// selectExistingClient()/onNmClientSelectChange() below).
+let clients = [];
+const CLIENT_SELECT_PLACEHOLDERS = {
+  'nm-client-select': '<option value="">— Select existing client —</option>',
+};
+
+function sortedClientsList() {
+  return [...clients].sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
+}
+
+const _clientLabel = c => c.full_name;
+
+function populateClientSelects() {
+  const sorted = sortedClientsList();
+  Object.entries(CLIENT_SELECT_PLACEHOLDERS).forEach(([id, placeholder]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    renderSelectOptions(el, placeholder, sorted, _clientLabel);
+  });
+}
+
+function filterClientOptions(selectId, query) {
+  filterSelectOptions(
+    selectId, query, sortedClientsList(), CLIENT_SELECT_PLACEHOLDERS, _clientLabel,
+    (c, q) => (c.full_name || '').toLowerCase().includes(q)
+  );
+}
+
+async function loadClients() {
+  try {
+    const res = await fetch(`${API}/api/clients`);
+    clients = await res.json();
+    populateClientSelects();
+  } catch(e) { console.error('Could not load clients:', e); }
 }
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────

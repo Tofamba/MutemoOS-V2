@@ -165,6 +165,36 @@ async def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_matters_firm ON matters(firm_id);
         CREATE INDEX IF NOT EXISTS idx_matters_status ON matters(firm_id, status);
 
+        -- ── Clients ──────────────────────────────────────────────────────
+        -- Separate from matters (one client can have many matters over time).
+        -- client_id is nullable on matters until the standalone migration
+        -- script (scripts/migrate_clients.py) backfills it for existing rows
+        -- from the legacy client_name text column — see that script for why
+        -- this can't just be done automatically at startup.
+        CREATE TABLE IF NOT EXISTS clients (
+            id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id                     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            full_name                   TEXT NOT NULL,
+            email                       TEXT,
+            phone                       TEXT,
+            physical_address            TEXT,
+            id_or_registration_number   TEXT,
+            notes                       TEXT,
+            created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_clients_firm ON clients(firm_id);
+        CREATE INDEX IF NOT EXISTS idx_clients_name_lower ON clients(firm_id, lower(full_name));
+
+        -- client_id: who the firm has an actual client relationship with.
+        -- case_parties: free text for everyone else named in the matter
+        -- (co-respondents, companies, family members) who isn't a client —
+        -- e.g. the client's own company or a relative named as a separate
+        -- respondent alongside them.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS client_id UUID REFERENCES clients(id);
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS case_parties TEXT;
+        CREATE INDEX IF NOT EXISTS idx_matters_client ON matters(client_id);
+
         CREATE TABLE IF NOT EXISTS progress_notes (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             matter_id   UUID NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
@@ -503,6 +533,10 @@ PERMISSIONS = {
     "matter:create":        {"admin", "partner", "associate", "secretary"},
     "matter:edit":          {"admin", "partner", "associate", "secretary"},
     "matter:delete":        {"admin", "partner"},
+    # Clients
+    "client:read":          {"admin", "partner", "associate", "secretary"},
+    "client:create":        {"admin", "partner", "associate", "secretary"},
+    "client:edit":          {"admin", "partner", "associate", "secretary"},
     # Documents
     "document:upload":      {"admin", "partner", "associate", "secretary"},
     "document:delete":      {"admin", "partner"},
@@ -1533,6 +1567,8 @@ class AutoCreateMatterRequest(BaseModel):
     coverage_tier: str
     service_type: str
     description: Optional[str] = None
+    client_id: Optional[str] = None
+    case_parties: Optional[str] = None
 
 class ReassignRequest(BaseModel):
     to_lawyer_id: str
@@ -1575,21 +1611,39 @@ async def auto_create_matter(req: AutoCreateMatterRequest, request: Request):
             raise HTTPException(status_code=422,
                 detail="assigned_lawyer_id is not a panel_lawyer in this firm")
 
+        client_id_uuid = None
+        client_name = req.client_name
+        if req.client_id:
+            try:
+                client_id_uuid = _uuid_mod.UUID(req.client_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="client_id must be a valid UUID")
+            client_row = await conn.fetchrow(
+                "SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2", client_id_uuid, firm_uuid
+            )
+            if not client_row:
+                raise HTTPException(status_code=404, detail="Client not found")
+            # Same sync-from-client-record behavior as create_matter/update_matter.
+            # Also used below for the derived matter name, since (unlike
+            # create_matter) this endpoint doesn't take an explicit `name` —
+            # it's built from client_name, so a resolved client should win there too.
+            client_name = client_row["full_name"]
+
         created_at = datetime.now(timezone.utc)
         sla_deadline = calculate_sla_deadline(created_at, req.coverage_tier)
         matter_id = _uuid_mod.uuid4()
 
         row = await conn.fetchrow("""
             INSERT INTO matters (
-                id, firm_id, name, client_name, status,
+                id, firm_id, name, client_name, client_id, case_parties, status,
                 assigned_lawyer_id, coverage_tier, service_type,
                 sla_deadline, external_ref, created_at
             )
-            VALUES ($1,$2,$3,$4,'Active',$5,$6,$7,$8,$9,$10)
+            VALUES ($1,$2,$3,$4,$5,$6,'Active',$7,$8,$9,$10,$11,$12)
             RETURNING *
         """,
         matter_id, firm_uuid,
-        f"{req.client_name} — {req.service_type}", req.client_name,
+        f"{client_name} — {req.service_type}", client_name, client_id_uuid, req.case_parties,
         lawyer_uuid, req.coverage_tier,
         req.service_type, sla_deadline, req.external_ref, created_at
         )
@@ -1946,6 +2000,8 @@ class MatterCreate(BaseModel):
     matter_type: Optional[str] = None
     status: Optional[str] = "Active"
     client_name: Optional[str] = None
+    client_id: Optional[str] = None
+    case_parties: Optional[str] = None
     custom_status: Optional[str] = None
     next_deadline: Optional[str] = None
     next_deadline_note: Optional[str] = None
@@ -1957,9 +2013,27 @@ class MatterUpdate(BaseModel):
     matter_type: Optional[str] = None
     status: Optional[str] = None
     client_name: Optional[str] = None
+    client_id: Optional[str] = None
+    case_parties: Optional[str] = None
     custom_status: Optional[str] = None
     next_deadline: Optional[str] = None       # ISO date string, e.g. "2026-08-15"
     next_deadline_note: Optional[str] = None
+
+class ClientCreate(BaseModel):
+    full_name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    physical_address: Optional[str] = None
+    id_or_registration_number: Optional[str] = None
+    notes: Optional[str] = None
+
+class ClientUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    physical_address: Optional[str] = None
+    id_or_registration_number: Optional[str] = None
+    notes: Optional[str] = None
 
 class ProgressNote(BaseModel):
     text: str
@@ -2052,7 +2126,7 @@ class DigestSettings(BaseModel):
 
 def _row_to_matter(row) -> dict:
     d = dict(row)
-    for k in ("id", "firm_id", "created_by"):
+    for k in ("id", "firm_id", "created_by", "client_id"):
         if d.get(k):
             d[k] = str(d[k])
     for k in ("created_at", "last_activity"):
@@ -2060,6 +2134,16 @@ def _row_to_matter(row) -> dict:
             d[k] = d[k].isoformat()
     if d.get("next_deadline"):
         d["next_deadline"] = d["next_deadline"].isoformat()
+    return d
+
+def _row_to_client(row) -> dict:
+    d = dict(row)
+    for k in ("id", "firm_id"):
+        if d.get(k):
+            d[k] = str(d[k])
+    for k in ("created_at", "updated_at"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
     return d
 
 def _row_to_doc(row) -> dict:
@@ -2435,19 +2519,37 @@ async def create_matter(matter: MatterCreate, request: Request):
             parsed_deadline = date.fromisoformat(matter.next_deadline)
         except ValueError:
             raise HTTPException(status_code=400, detail="next_deadline must be in YYYY-MM-DD format")
+
+    client_id = None
+    client_name = matter.client_name
     async with _db_pool.acquire() as conn:
+        if matter.client_id:
+            try:
+                client_id = _uuid_mod.UUID(matter.client_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
+            client_row = await conn.fetchrow(
+                "SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2", client_id, FIRM_ID
+            )
+            if not client_row:
+                raise HTTPException(status_code=404, detail="Client not found")
+            # client_name is a display fallback/audit trail once client_id is
+            # set — keep it in sync with the actual client record rather than
+            # trusting a possibly-stale value passed alongside client_id.
+            client_name = client_row["full_name"]
+
         row = await conn.fetchrow("""
             INSERT INTO matters (id, firm_id, name, number, internal_ref, external_ref,
-                                 client_name, matter_type, status, custom_status,
+                                 client_name, client_id, case_parties, matter_type, status, custom_status,
                                  last_activity, created_at, created_by,
                                  next_deadline, next_deadline_note)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             RETURNING *
         """,
         mid, FIRM_ID,
         matter.name, matter.number or matter.internal_ref,
         matter.internal_ref, matter.external_ref,
-        matter.client_name, matter.matter_type,
+        client_name, client_id, matter.case_parties, matter.matter_type,
         matter.status or "Active", matter.custom_status,
         now, now,
         _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
@@ -2456,6 +2558,81 @@ async def create_matter(matter: MatterCreate, request: Request):
     m = _row_to_matter(row)
     m["progress_notes"] = []
     return m
+
+@app.post("/api/clients", status_code=201)
+async def create_client(client: ClientCreate, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:create")
+    cid = _uuid_mod.uuid4()
+    now = datetime.utcnow()
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO clients (id, firm_id, full_name, email, phone,
+                                 physical_address, id_or_registration_number, notes,
+                                 created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            RETURNING *
+        """,
+        cid, FIRM_ID,
+        client.full_name, client.email, client.phone,
+        client.physical_address, client.id_or_registration_number, client.notes,
+        now, now
+        )
+    return _row_to_client(row)
+
+@app.get("/api/clients")
+async def list_clients(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+        )
+    return [_row_to_client(r) for r in rows]
+
+@app.get("/api/clients/{client_id}")
+async def get_client(client_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    try:
+        cid = _uuid_mod.UUID(client_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM clients WHERE id=$1 AND firm_id=$2", cid, FIRM_ID)
+        if not row:
+            raise HTTPException(status_code=404, detail="Client not found")
+        matter_rows = await conn.fetch(
+            "SELECT * FROM matters WHERE client_id=$1 AND firm_id=$2 "
+            "ORDER BY last_activity DESC NULLS LAST, created_at DESC",
+            cid, FIRM_ID
+        )
+    c = _row_to_client(row)
+    c["matters"] = [_row_to_matter(m) for m in matter_rows]
+    return c
+
+@app.patch("/api/clients/{client_id}")
+async def update_client(client_id: str, update: ClientUpdate, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    try:
+        cid = _uuid_mod.UUID(client_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
+    fields = {k: v for k, v in update.dict().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    fields["updated_at"] = datetime.utcnow()
+    set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
+    values = list(fields.values())
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE clients SET {set_clauses} WHERE id=$1 AND firm_id=${len(values)+2} RETURNING *",
+            cid, *values, FIRM_ID
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return _row_to_client(row)
 
 @app.get("/api/matters/template")
 async def download_matter_template():
@@ -2490,9 +2667,28 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
         except ValueError:
             raise HTTPException(status_code=400, detail="next_deadline must be in YYYY-MM-DD format")
     fields["last_activity"] = datetime.utcnow()
-    set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
-    values = list(fields.values())
+
     async with _db_pool.acquire() as conn:
+        if "client_id" in fields:
+            # Same UUID-typing caveat as next_deadline above, plus a firm-
+            # ownership check so a matter can't be pointed at another firm's
+            # client record. Resolved before the SET clause is built so the
+            # values list only ever needs one construction pass.
+            try:
+                client_uuid = _uuid_mod.UUID(fields["client_id"])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
+            client_row = await conn.fetchrow(
+                "SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2", client_uuid, FIRM_ID
+            )
+            if not client_row:
+                raise HTTPException(status_code=404, detail="Client not found")
+            fields["client_id"] = client_uuid
+            if "client_name" not in fields:
+                fields["client_name"] = client_row["full_name"]
+
+        set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
+        values = list(fields.values())
         row = await conn.fetchrow(
             f"UPDATE matters SET {set_clauses} WHERE id=$1 AND firm_id=${len(values)+2} RETURNING *",
             _uuid_mod.UUID(matter_id), *values, FIRM_ID
@@ -2674,7 +2870,7 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
         return "Active"
 
     def build_matter_dict(internal_ref, client_name, subject, law_text, external_ref,
-                          action_done, next_action, raw_status, latest_comm):
+                          action_done, next_action, raw_status, latest_comm, opposing=""):
         if not client_name and not internal_ref:
             return None, "No client name or internal ref"
         if client_name and subject:
@@ -2703,6 +2899,14 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
             "status": status, "custom_status": "",
             "created_at": now, "last_activity": now,
             "document_count": 0, "notes": notes,
+            # No per-row client_id here — the import template has no client
+            # picker (it's a bulk file upload, one row per matter, no way to
+            # search/select an existing client mid-import). client_name is
+            # still recorded as free text, same as every other matter created
+            # before Client existed; scripts/migrate_clients.py's grouping
+            # logic is the intended follow-up step to link these to Client
+            # records afterward, same as any pre-existing matter.
+            "case_parties": opposing or None,
         }, None
 
     created = []
@@ -2751,7 +2955,7 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
             matter, err = build_matter_dict(
                 g("internal_ref"), g("client_name"), g("subject") or g("opposing"),
                 g("law_type"), g("external_ref"), g("action_done"),
-                g("next_action"), g("status"), g("latest_comm")
+                g("next_action"), g("status"), g("latest_comm"), g("opposing")
             )
             if matter:
                 matters_to_insert.append(matter)
@@ -2802,12 +3006,12 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
         for m in matters_to_insert:
             row = await conn.fetchrow("""
                 INSERT INTO matters (id, firm_id, name, number, internal_ref, external_ref,
-                                     client_name, matter_type, status, custom_status,
+                                     client_name, case_parties, matter_type, status, custom_status,
                                      last_activity, created_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
             """,
             m["id"], FIRM_ID, m["name"], m["number"], m["internal_ref"], m["external_ref"],
-            m["client_name"], m["matter_type"], m["status"], m["custom_status"],
+            m["client_name"], m["case_parties"], m["matter_type"], m["status"], m["custom_status"],
             m["last_activity"], m["created_at"]
             )
             for note in m.get("notes", []):
