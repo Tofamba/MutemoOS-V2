@@ -333,6 +333,7 @@ select{cursor:pointer}
   <button class="nav-btn" id="nav-vault" onclick="showTab('vault')">📁 Vault</button>
   <button class="nav-btn active" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
+  <button class="nav-btn" id="nav-clients" onclick="showTab('clients')">👤 Clients</button>
   <button class="nav-btn" id="nav-affidavit" onclick="showTab('affidavit')" data-role-hide="secretary">📄 Draft Affidavit</button>
   <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft Document</button>
   <button class="nav-btn" id="nav-contract-review" onclick="showTab('contract-review')" data-role-hide="secretary">📋 Contract Review</button>
@@ -654,6 +655,72 @@ select{cursor:pointer}
   </div>
 
   <div id="matters-list"></div>
+</div>
+
+<!-- ═══════════════ CLIENTS TAB ═══════════════ -->
+<div id="tab-clients" style="display:none">
+  <div id="clients-list-view">
+    <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
+      <div>
+        <h2>👤 Clients</h2>
+        <p>Everyone the firm has a client relationship with, and every matter linked to them.</p>
+      </div>
+      <button class="btn btn-primary" onclick="openClientModal()" style="white-space:nowrap;margin-top:0.25rem">+ New Client</button>
+    </div>
+
+    <div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center">
+      <input type="text" id="clients-search" placeholder="🔍 Search clients by name, email, phone, or ID/registration number…"
+        style="flex:1;padding:0.6rem 0.85rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit"
+        oninput="filterClients(this.value)"/>
+      <span id="clients-count" style="font-size:0.75rem;color:var(--ink3);white-space:nowrap"></span>
+    </div>
+
+    <div id="clients-list"></div>
+  </div>
+
+  <!-- Client Detail View -->
+  <div id="client-detail-view" style="display:none">
+    <button class="btn btn-outline btn-sm" onclick="backToClientsList()" style="margin-bottom:1rem">← Back to Clients</button>
+    <div id="client-detail-content"></div>
+  </div>
+
+  <!-- New/Edit Client Modal -->
+  <div id="client-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <div style="font-weight:700;font-size:1rem" id="client-modal-title">+ New Client</div>
+        <button onclick="closeClientModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+      </div>
+      <div class="form-group">
+        <label>Full Name *</label>
+        <input type="text" id="cm-full-name" placeholder="e.g. John Moyo"/>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="cm-email" placeholder="john@example.com"/>
+        </div>
+        <div class="form-group">
+          <label>Phone</label>
+          <input type="text" id="cm-phone" placeholder="+263 77 123 4567"/>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Physical Address</label>
+        <input type="text" id="cm-address" placeholder="e.g. 12 Baines Avenue, Harare"/>
+      </div>
+      <div class="form-group">
+        <label>ID / Registration Number</label>
+        <input type="text" id="cm-id-number" placeholder="National ID or company registration number"/>
+      </div>
+      <div class="form-group">
+        <label>Notes</label>
+        <textarea id="cm-notes" rows="3" placeholder="Any additional notes about this client…"></textarea>
+      </div>
+      <div id="client-modal-status" class="status" style="margin-bottom:0.5rem"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="submitClientForm()">Save Client</button>
+    </div>
+  </div>
 </div>
 
 <!-- ═══════════════ AFFIDAVIT TAB ═══════════════ -->
@@ -2018,16 +2085,260 @@ async function loadClients() {
     const res = await fetch(`${API}/api/clients`);
     clients = await res.json();
     populateClientSelects();
+    renderClientsList();
   } catch(e) { console.error('Could not load clients:', e); }
+}
+
+// Client list has no matter_count field of its own — computed here from the
+// already-loaded `matters` array (each matter carries client_id) rather
+// than adding a backend round-trip just for a count.
+function clientMatterCount(clientId) {
+  return matters.filter(m => m.client_id === clientId).length;
+}
+
+function renderClientsList(filtered = null) {
+  const el = document.getElementById('clients-list');
+  const countEl = document.getElementById('clients-count');
+  if (!el) return;
+
+  const sorted = sortedClientsList();
+  const isSearching = filtered !== null;
+  const displayList = isSearching ? filtered : sorted;
+  const total = clients.length;
+
+  if (countEl) {
+    countEl.textContent = isSearching
+      ? `${displayList.length} of ${total} client${total !== 1 ? 's' : ''}`
+      : `${total} client${total !== 1 ? 's' : ''}`;
+  }
+
+  if (!displayList.length) {
+    el.innerHTML = isSearching
+      ? '<div class="empty-state"><p>No clients match your search.</p></div>'
+      : '<div class="empty-state"><div class="icon">👤</div><p>No clients yet. Add one, or link one while creating a matter.</p></div>';
+    return;
+  }
+
+  el.innerHTML = displayList.map(c => {
+    const count = clientMatterCount(c.id);
+    return `
+    <div class="matter-item">
+      <div class="matter-row" onclick="openClientDetail('${c.id}')">
+        <div class="matter-icon">👤</div>
+        <div class="matter-expand">
+          <div class="matter-name">${escHtml(c.full_name)}</div>
+          <div class="matter-meta">
+            <span class="chip chip-gray">${count} matter${count !== 1 ? 's' : ''}</span>
+            ${c.email ? `<span style="font-size:0.7rem;color:var(--ink3)">${escHtml(c.email)}</span>` : ''}
+            ${c.phone ? `<span style="font-size:0.7rem;color:var(--ink3)">${escHtml(c.phone)}</span>` : ''}
+          </div>
+        </div>
+        <div class="matter-actions">
+          <span style="color:var(--ink3);font-size:0.8rem">▶</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterClients(query) {
+  if (!query.trim()) {
+    renderClientsList();
+    return;
+  }
+  const q = query.toLowerCase();
+  const filtered = sortedClientsList().filter(c =>
+    (c.full_name || '').toLowerCase().includes(q) ||
+    (c.email || '').toLowerCase().includes(q) ||
+    (c.phone || '').toLowerCase().includes(q) ||
+    (c.id_or_registration_number || '').toLowerCase().includes(q)
+  );
+  renderClientsList(filtered);
+}
+
+// Renders a single "label over value" block for the detail view. Falls
+// back to an em-dash for null/blank fields (production already has clients
+// created by the migration script with only full_name populated) — never
+// prints the literal string "null" or leaves the block visually empty.
+function _clientDetailField(label, value) {
+  return `<div><label style="font-size:0.72rem;color:var(--ink3);font-weight:600">${label}</label>
+    <div style="font-size:0.85rem;margin-top:2px">${value ? escHtml(value) : '<span style="color:var(--ink3)">—</span>'}</div></div>`;
+}
+
+let _currentClientDetailId = null;
+
+async function openClientDetail(id) {
+  document.getElementById('clients-list-view').style.display = 'none';
+  const detailView = document.getElementById('client-detail-view');
+  const content = document.getElementById('client-detail-content');
+  detailView.style.display = 'block';
+  content.innerHTML = '<div style="padding:1rem 0;color:var(--ink3)">Loading…</div>';
+  _currentClientDetailId = id;
+
+  try {
+    const res = await fetch(`${API}/api/clients/${id}`);
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'Could not load client'); }
+    const client = await res.json();
+    content.innerHTML = renderClientDetailContent(client);
+  } catch(e) {
+    content.innerHTML = `<div class="status show error">Error: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderClientDetailContent(client) {
+  const clientMatters = client.matters || [];
+  return `
+    <div class="card">
+      <div style="padding:1.1rem 1.25rem">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div>
+            <h2 style="margin:0 0 4px">${escHtml(client.full_name)}</h2>
+            <span class="chip chip-gray">${clientMatters.length} matter${clientMatters.length !== 1 ? 's' : ''}</span>
+          </div>
+          <button class="btn btn-outline btn-sm" onclick="openClientModal('${client.id}')">✎ Edit</button>
+        </div>
+        <div style="margin-top:1rem;display:grid;grid-template-columns:1fr 1fr;gap:0.85rem">
+          ${_clientDetailField('EMAIL', client.email)}
+          ${_clientDetailField('PHONE', client.phone)}
+          <div style="grid-column:1/-1">${_clientDetailField('ADDRESS', client.physical_address)}</div>
+          ${_clientDetailField('ID / REGISTRATION NUMBER', client.id_or_registration_number)}
+        </div>
+        <div style="margin-top:0.85rem">${_clientDetailField('NOTES', client.notes)}</div>
+      </div>
+    </div>
+
+    <div class="matter-section-title" style="margin:1.1rem 0 0.5rem">📂 MATTERS (${clientMatters.length})</div>
+    ${!clientMatters.length ? '<div class="empty-state"><p>No matters linked to this client yet.</p></div>' :
+      clientMatters.map(m => {
+        const status = m.status || 'Active';
+        const statusColor = STATUS_COLORS[status] || 'chip-gray';
+        const ref = m.internal_ref || m.number || '';
+        return `
+        <div class="matter-item">
+          <div class="matter-row" onclick="goToMatter('${m.id}')">
+            <div class="matter-icon">📁</div>
+            <div class="matter-expand">
+              <div class="matter-name">
+                ${ref ? `<span style="color:var(--ink3);font-size:0.75rem;font-weight:600;margin-right:6px">${escHtml(ref)}</span>` : ''}
+                ${escHtml(m.name)}
+              </div>
+              <div class="matter-meta">
+                <span class="chip ${statusColor}">${escHtml(status)}</span>
+                ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
+              </div>
+            </div>
+            <div class="matter-actions"><span style="color:var(--ink3);font-size:0.8rem">→</span></div>
+          </div>
+        </div>`;
+      }).join('')}
+  `;
+}
+
+function backToClientsList() {
+  document.getElementById('client-detail-view').style.display = 'none';
+  document.getElementById('clients-list-view').style.display = 'block';
+  _currentClientDetailId = null;
+}
+
+// Jumps from a client's matter list to that matter's existing detail view
+// — the Matters tab's accordion-expand panel (there's no separate matter
+// detail page in this app). Filters the matters list down to just this one
+// first so it's guaranteed visible regardless of the tab's normal top-10
+// default, then expands and scrolls to it.
+function goToMatter(matterId) {
+  const matter = matters.find(m => m.id === matterId);
+  if (!matter) return;
+  showTab('matters');
+  renderMattersList([matter]);
+  const row = document.getElementById(`matter-docs-${matterId}`)?.closest('.matter-item');
+  if (row) row.scrollIntoView({behavior: 'smooth', block: 'start'});
+  toggleMatter(matterId);
+}
+
+// null when creating a new client, the client's id when editing an existing one.
+let _editingClientId = null;
+
+function openClientModal(clientId = null) {
+  _editingClientId = clientId;
+  const statusMsg = document.getElementById('client-modal-status');
+  statusMsg.className = 'status';
+  statusMsg.textContent = '';
+
+  // Production already has clients created by the migration script with
+  // only full_name populated — every other field defaults to '' here
+  // (never the literal string "null"/"undefined") whether creating fresh
+  // or prefilling from a sparse existing record.
+  const client = clientId ? clients.find(c => c.id === clientId) : null;
+  document.getElementById('client-modal-title').textContent = clientId ? '✎ Edit Client' : '+ New Client';
+  document.getElementById('cm-full-name').value = client?.full_name || '';
+  document.getElementById('cm-email').value = client?.email || '';
+  document.getElementById('cm-phone').value = client?.phone || '';
+  document.getElementById('cm-address').value = client?.physical_address || '';
+  document.getElementById('cm-id-number').value = client?.id_or_registration_number || '';
+  document.getElementById('cm-notes').value = client?.notes || '';
+
+  document.getElementById('client-modal').style.display = 'flex';
+  document.getElementById('cm-full-name').focus();
+}
+
+function closeClientModal() {
+  document.getElementById('client-modal').style.display = 'none';
+  _editingClientId = null;
+}
+
+async function submitClientForm() {
+  const fullName = document.getElementById('cm-full-name').value.trim();
+  const statusMsg = document.getElementById('client-modal-status');
+  if (!fullName) {
+    statusMsg.className = 'status show error';
+    statusMsg.textContent = 'Full name is required.';
+    return;
+  }
+  statusMsg.className = 'status show';
+  statusMsg.textContent = 'Saving…';
+
+  const payload = {
+    full_name: fullName,
+    email: document.getElementById('cm-email').value.trim() || null,
+    phone: document.getElementById('cm-phone').value.trim() || null,
+    physical_address: document.getElementById('cm-address').value.trim() || null,
+    id_or_registration_number: document.getElementById('cm-id-number').value.trim() || null,
+    notes: document.getElementById('cm-notes').value.trim() || null,
+  };
+
+  try {
+    const editingId = _editingClientId;
+    const url = editingId ? `${API}/api/clients/${editingId}` : `${API}/api/clients`;
+    const res = await fetch(url, {
+      method: editingId ? 'PATCH' : 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed to save client');
+
+    statusMsg.className = 'status show success';
+    statusMsg.textContent = `✓ Client "${data.full_name}" saved.`;
+
+    await loadClients(); // refreshes the cached `clients` array and the list view
+    if (editingId && _currentClientDetailId === editingId) {
+      await openClientDetail(editingId); // keep the open detail view in sync with the edit
+    }
+    setTimeout(() => closeClientModal(), 700);
+  } catch(e) {
+    statusMsg.className = 'status show error';
+    statusMsg.textContent = `Error: ${e.message}`;
+  }
 }
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['vault','search','matters','affidavit','calendar','legalupdates','draft','contract-review','zlr','users'].forEach(t => {
+  ['vault','search','matters','clients','affidavit','calendar','legalupdates','draft','contract-review','zlr','users'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
   if (tab === 'matters') renderMattersList();
+  if (tab === 'clients') renderClientsList();
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
