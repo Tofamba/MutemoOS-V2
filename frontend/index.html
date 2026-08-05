@@ -1851,11 +1851,26 @@ async function logout() {
 
 
 
-function openNewMatterModal() {
+// presetClientId: when opened via "+ New Matter for this Client" from a
+// client's detail view, preselects that client so the picker step is
+// skipped — see applyClientPresetToNewMatterModal() below.
+function openNewMatterModal(presetClientId = null) {
   const modal = document.getElementById('new-matter-modal');
   modal.style.display = 'flex';
   document.getElementById('nm-name').focus();
-  loadClients(); // pick up any client created elsewhere since last load
+  if (presetClientId) applyClientPresetToNewMatterModal(presetClientId); // apply immediately from whatever's cached
+  loadClients().then(() => { // pick up any client created elsewhere since last load
+    if (presetClientId) applyClientPresetToNewMatterModal(presetClientId); // re-apply once fresh data lands
+  });
+}
+
+function applyClientPresetToNewMatterModal(clientId) {
+  const client = clients.find(c => c.id === clientId);
+  if (!client) return;
+  _nmSelectedClientId = clientId;
+  document.getElementById('nm-client').value = client.full_name;
+  const select = document.getElementById('nm-client-select');
+  if (select && [...select.options].some(o => o.value === clientId)) select.value = clientId;
 }
 
 // Set when an existing client is chosen from nm-client-select; cleared the
@@ -2207,7 +2222,22 @@ function renderClientDetailContent(client) {
       </div>
     </div>
 
-    <div class="matter-section-title" style="margin:1.1rem 0 0.5rem">📂 MATTERS (${clientMatters.length})</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin:1.1rem 0 0.5rem">
+      <div class="matter-section-title" style="margin:0">📂 MATTERS (${clientMatters.length})</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline btn-sm" onclick="toggleLinkMatterPicker('${client.id}')">+ Link Existing Matter</button>
+        <button class="btn btn-primary btn-sm" onclick="openNewMatterModal('${client.id}')">+ New Matter for this Client</button>
+      </div>
+    </div>
+    <div id="link-matter-picker-${client.id}" style="display:none;margin-bottom:0.75rem">
+      <input type="text" id="link-matter-search-${client.id}" placeholder="🔍 Search matters to link…"
+        oninput="filterLinkMatterOptions('${client.id}', this.value)"
+        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.8rem;margin-bottom:0.4rem;font-family:inherit"/>
+      <select id="link-matter-select-${client.id}" onchange="onLinkMatterSelectChange('${client.id}')"
+        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.8rem">
+      </select>
+      <div id="link-matter-status-${client.id}" class="status" style="margin-top:0.4rem"></div>
+    </div>
     ${!clientMatters.length ? '<div class="empty-state"><p>No matters linked to this client yet.</p></div>' :
       clientMatters.map(m => {
         const status = m.status || 'Active';
@@ -2232,6 +2262,50 @@ function renderClientDetailContent(client) {
         </div>`;
       }).join('')}
   `;
+}
+
+const LINK_MATTER_PLACEHOLDER = '<option value="">— Select a matter to link —</option>';
+
+// Excludes matters already linked to this same client — they're already
+// shown in the list above, no point offering them again.
+function _linkableMattersFor(clientId) {
+  return sortedMattersList().filter(m => m.client_id !== clientId);
+}
+
+function toggleLinkMatterPicker(clientId) {
+  const picker = document.getElementById(`link-matter-picker-${clientId}`);
+  const isOpen = picker.style.display !== 'none';
+  picker.style.display = isOpen ? 'none' : 'block';
+  if (!isOpen) {
+    const select = document.getElementById(`link-matter-select-${clientId}`);
+    renderSelectOptions(select, LINK_MATTER_PLACEHOLDER, _linkableMattersFor(clientId), _matterLabel);
+  }
+}
+
+function filterLinkMatterOptions(clientId, query) {
+  const selectId = `link-matter-select-${clientId}`;
+  filterSelectOptions(
+    selectId, query, _linkableMattersFor(clientId), { [selectId]: LINK_MATTER_PLACEHOLDER }, _matterLabel,
+    (m, q) => (m.name || '').toLowerCase().includes(q) || (m.number || '').toLowerCase().includes(q)
+  );
+}
+
+async function onLinkMatterSelectChange(clientId) {
+  const select = document.getElementById(`link-matter-select-${clientId}`);
+  const matterId = select.value;
+  if (!matterId) return;
+  const statusMsg = document.getElementById(`link-matter-status-${clientId}`);
+  statusMsg.className = 'status show';
+  statusMsg.textContent = 'Linking…';
+  try {
+    // linkMatterToClient() re-renders this whole detail view on success
+    // (via openClientDetail), so the picker and its status message are
+    // replaced with fresh, closed markup — nothing further to reset here.
+    await linkMatterToClient(matterId, clientId);
+  } catch(e) {
+    statusMsg.className = 'status show error';
+    statusMsg.textContent = `Error: ${e.message}`;
+  }
 }
 
 function backToClientsList() {
@@ -2552,6 +2626,15 @@ async function renderMatterPanel(id) {
             </select>
           </div>
           ${matter.custom_status ? `<span class="chip chip-gray">${escHtml(matter.custom_status)}</span>` : ''}
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">CLIENT</label>
+            <input type="text" id="matter-client-search-${id}" placeholder="🔍 Search clients…"
+              oninput="filterMatterClientOptions('${id}', this.value)"
+              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"/>
+            <select id="matter-client-select-${id}" onchange="onMatterClientSelectChange('${id}')"
+              style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper);max-width:150px">
+            </select>
+          </div>
         </div>
       </div>
 
@@ -2658,8 +2741,46 @@ async function renderMatterPanel(id) {
       });
     });
 
+    populateMatterClientSelect(id);
+
   } catch(e) {
     content.innerHTML = '<p style="color:var(--ink3)">Could not load matter details.</p>';
+  }
+}
+
+const MATTER_CLIENT_PLACEHOLDER = '<option value="">— No client linked —</option>';
+
+function populateMatterClientSelect(matterId) {
+  const el = document.getElementById(`matter-client-select-${matterId}`);
+  if (!el) return;
+  const matter = matters.find(m => m.id === matterId);
+  renderSelectOptions(el, MATTER_CLIENT_PLACEHOLDER, sortedClientsList(), _clientLabel);
+  if (matter?.client_id && [...el.options].some(o => o.value === matter.client_id)) {
+    el.value = matter.client_id;
+  }
+}
+
+function filterMatterClientOptions(matterId, query) {
+  const selectId = `matter-client-select-${matterId}`;
+  filterSelectOptions(
+    selectId, query, sortedClientsList(), { [selectId]: MATTER_CLIENT_PLACEHOLDER }, _clientLabel,
+    (c, q) => (c.full_name || '').toLowerCase().includes(q)
+  );
+}
+
+// The placeholder ("— No client linked —") can't actually clear client_id —
+// PATCH /api/matters/{id} treats a null client_id as "field not provided"
+// (same convention as every other PATCH field in this app), so selecting it
+// is a no-op rather than an unlink. Only a real selection triggers a PATCH.
+async function onMatterClientSelectChange(matterId) {
+  const select = document.getElementById(`matter-client-select-${matterId}`);
+  const clientId = select.value;
+  if (!clientId) return;
+  try {
+    await linkMatterToClient(matterId, clientId);
+  } catch(e) {
+    alert(`Could not update client: ${e.message}`);
+    populateMatterClientSelect(matterId); // revert the dropdown to the last known-good state
   }
 }
 
@@ -2684,6 +2805,35 @@ async function updateMatterField(matterId, field, value) {
   const m = matters.find(m => m.id === matterId);
   if (m) m[field] = value;
   renderMattersList();
+}
+
+// Central handler for setting/changing a matter's client_id — used by both
+// the matter detail panel's inline picker and the "Link Existing Matter"
+// flow in a client's detail view, so both stay in sync with the same
+// logic. Reads client_name back from the server's response rather than
+// guessing it locally, since update_matter resolves and syncs it from the
+// authoritative client record. Refreshes every view that could currently
+// be showing this matter or the affected client, so nothing needs a full
+// page reload to reflect the change.
+async function linkMatterToClient(matterId, clientId) {
+  const res = await fetch(`${API}/api/matters/${matterId}`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ client_id: clientId })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Failed to link client');
+
+  const m = matters.find(mm => mm.id === matterId);
+  if (m) {
+    m.client_id = data.client_id;
+    m.client_name = data.client_name;
+  }
+  renderMattersList();
+  populateMatterClientSelect(matterId);
+  if (_currentClientDetailId) await openClientDetail(_currentClientDetailId);
+
+  return data;
 }
 
 async function addNote(matterId, noteText, author) {
