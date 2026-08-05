@@ -5491,128 +5491,136 @@ LITIGATION_DOC_TYPES = {
     "urgent_chamber", "notice_of_appeal", "review", "heads_of_argument",
 }
 
-@app.post("/api/generate-document")
-async def generate_document(req: DocumentRequest, request: Request):
+def _call_document_generation_model(prompt: str, max_tokens: int):
     """
-    General-purpose drafting endpoint backing the "Draft Document" feature —
-    covers 20 document types (litigation, conveyancing, commercial
-    agreements, correspondence) via a shared prompt structure with
-    per-type guidance, the same pattern as generate_affidavit but
-    generalized. This endpoint didn't exist at all until now — the
-    frontend's full Draft Document workflow (type picker, form, editor,
-    docx export) was built and wired up, but every submission would have
-    404'd.
+    Synchronous Anthropic call factored out so it can run via
+    asyncio.to_thread() from inside the background job below — calling
+    the SDK directly inside an async function would block the event loop
+    for the whole generation, stalling every other concurrent request
+    (including other jobs' status polls) for however long this document
+    takes, defeating the point of moving this to a background job.
     """
-    user = await get_current_user(request)
-    _check_permission(user, "draft:document")
-
-    guidance = DOC_TYPE_GUIDANCE.get(req.doc_type, DOC_TYPE_GUIDANCE["freeform"])
-    is_litigation = req.doc_type in LITIGATION_DOC_TYPES
-
-    precedent_block = ""
-    if req.precedent_context:
-        fname = req.precedent_context.get("filename", "precedent")
-        mname = req.precedent_context.get("matter_name", "")
-        text = str(req.precedent_context.get("text", ""))[:4000]
-        precedent_block = (
-            f"\n\nFIRM PRECEDENT ({fname} \u2014 {mname}) \u2014 match this document's language, "
-            f"structure, and drafting style where appropriate:\n---\n{text}\n---"
-        )
-
-    # Corpus-wide retrieval \u2014 the same search /api/search runs, so drafting
-    # draws on genuinely relevant case law/legislation/firm precedent from
-    # the whole Vault, not just the single manually-attached precedent
-    # above. Without this the model had nothing but its own training data
-    # to cite from, which produced a real fabricated citation in testing
-    # (a genuine case name attached to the wrong citation number). Additive
-    # alongside precedent_block, not a replacement for it.
-    retrieval_query = req.facts + (f" {req.instructions}" if req.instructions else "")
-    retrieval_req = SearchRequest(query=retrieval_query, limit=8)
-
-    async with _db_pool.acquire() as conn:
-        firm_chunk_rows = await conn.fetch(
-            """
-            SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
-                   d.matter_type, d.legal_source_type, d.authority_strength
-            FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            WHERE c.firm_id=$1 AND c.chunk_source='firm'
-            """,
-            FIRM_ID
-        )
-        legal_chunk_rows = await conn.fetch(
-            """
-            SELECT c.*, lu.legal_source_type, lu.authority_strength
-            FROM chunks c
-            LEFT JOIN legal_updates lu ON lu.id = c.document_id
-            WHERE c.firm_id=$1 AND c.chunk_source='legal'
-            """,
-            FIRM_ID
-        )
-        zlr_chunk_rows = await conn.fetch(
-            """
-            SELECT c.*, z.legal_source_type, z.authority_strength
-            FROM chunks c
-            LEFT JOIN zlr_entries z ON z.id = c.document_id
-            WHERE c.firm_id=$1 AND c.chunk_source='zlr'
-            """,
-            FIRM_ID
-        )
-
-    retrieved_results = await asyncio.to_thread(
-        _semantic_search_firm, retrieval_req, [dict(r) for r in firm_chunk_rows]
+    return client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=max_tokens,
+        system=DOCUMENT_SYSTEM_BASE.format(FIRM_NAME=FIRM_NAME),
+        messages=[{"role": "user", "content": prompt}]
     )
-    retrieved_legal_results = await asyncio.to_thread(
-        _semantic_search_legal, retrieval_req, [dict(r) for r in legal_chunk_rows]
-    )
-    retrieved_zlr_results = []
-    zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
-    if zlr_chunks_list:
-        raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, retrieval_query, None, 3)
-        for r in raw_zlr:
-            retrieved_zlr_results.append({
-                "result_source": "zlr",
-                "chunk_id": r.get("item_id"),
-                "text": r.get("relevant_excerpt", ""),
-                "similarity": r.get("similarity", 0),
-                "document_id": r.get("item_id"),
-                "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
-                "citation": r.get("citation"),
-                "taxonomy_category": r.get("taxonomy_category"),
-                "summary": r.get("summary"),
-                "legal_source_type": r.get("legal_source_type"),
-                "authority_strength": r.get("authority_strength"),
-            })
 
-    retrieved_context = format_context(retrieved_results, retrieved_legal_results, retrieved_zlr_results)
-    retrieved_block = (
-        f"\n\nAVAILABLE AUTHORITY FROM THE FIRM'S VAULT (retrieved as potentially relevant to "
-        f"these facts \u2014 cite only what is genuinely on point; do not force a connection to "
-        f"authority that doesn't actually apply, and do not cite any case not shown here):"
-        f"\n---\n{retrieved_context}\n---"
-    ) if retrieved_context else ""
 
-    party_block = ""
-    if is_litigation:
-        party_block = f"""Court: {req.court or 'High Court of Zimbabwe'}
+async def _run_document_generation_job(job_id: str, req: "DocumentRequest", user: dict):
+    """
+    Runs generate_document's full pipeline (retrieval, prompt construction,
+    Sonnet generation, citation verification) in the background — same
+    reasoning as _run_document_search_job above: retrieval + generation +
+    verification held behind one synchronous request regularly exceeds
+    Cloudflare's edge timeout once retrieval was added ahead of generation.
+    """
+    _search_jobs[job_id]["status"] = JobStatus.RUNNING
+    print(f"[generate_job:{job_id}] STARTED")
+    try:
+        guidance = DOC_TYPE_GUIDANCE.get(req.doc_type, DOC_TYPE_GUIDANCE["freeform"])
+        is_litigation = req.doc_type in LITIGATION_DOC_TYPES
+
+        precedent_block = ""
+        if req.precedent_context:
+            fname = req.precedent_context.get("filename", "precedent")
+            mname = req.precedent_context.get("matter_name", "")
+            text = str(req.precedent_context.get("text", ""))[:4000]
+            precedent_block = (
+                f"\n\nFIRM PRECEDENT ({fname} — {mname}) — match this document's language, "
+                f"structure, and drafting style where appropriate:\n---\n{text}\n---"
+            )
+
+        # Corpus-wide retrieval — the same search /api/search runs, so drafting
+        # draws on genuinely relevant case law/legislation/firm precedent from
+        # the whole Vault, not just the single manually-attached precedent
+        # above. Additive alongside precedent_block, not a replacement for it.
+        retrieval_query = req.facts + (f" {req.instructions}" if req.instructions else "")
+        retrieval_req = SearchRequest(query=retrieval_query, limit=8)
+
+        async with _db_pool.acquire() as conn:
+            firm_chunk_rows = await conn.fetch(
+                """
+                SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
+                       d.matter_type, d.legal_source_type, d.authority_strength
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='firm'
+                """,
+                FIRM_ID
+            )
+            legal_chunk_rows = await conn.fetch(
+                """
+                SELECT c.*, lu.legal_source_type, lu.authority_strength
+                FROM chunks c
+                LEFT JOIN legal_updates lu ON lu.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='legal'
+                """,
+                FIRM_ID
+            )
+            zlr_chunk_rows = await conn.fetch(
+                """
+                SELECT c.*, z.legal_source_type, z.authority_strength
+                FROM chunks c
+                LEFT JOIN zlr_entries z ON z.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='zlr'
+                """,
+                FIRM_ID
+            )
+
+        retrieved_results = await asyncio.to_thread(
+            _semantic_search_firm, retrieval_req, [dict(r) for r in firm_chunk_rows]
+        )
+        retrieved_legal_results = await asyncio.to_thread(
+            _semantic_search_legal, retrieval_req, [dict(r) for r in legal_chunk_rows]
+        )
+        retrieved_zlr_results = []
+        zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
+        if zlr_chunks_list:
+            raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, retrieval_query, None, 3)
+            for r in raw_zlr:
+                retrieved_zlr_results.append({
+                    "result_source": "zlr",
+                    "chunk_id": r.get("item_id"),
+                    "text": r.get("relevant_excerpt", ""),
+                    "similarity": r.get("similarity", 0),
+                    "document_id": r.get("item_id"),
+                    "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
+                    "citation": r.get("citation"),
+                    "taxonomy_category": r.get("taxonomy_category"),
+                    "summary": r.get("summary"),
+                    "legal_source_type": r.get("legal_source_type"),
+                    "authority_strength": r.get("authority_strength"),
+                })
+
+        retrieved_context = format_context(retrieved_results, retrieved_legal_results, retrieved_zlr_results)
+        retrieved_block = (
+            f"\n\nAVAILABLE AUTHORITY FROM THE FIRM'S VAULT (retrieved as potentially relevant to "
+            f"these facts — cite only what is genuinely on point; do not force a connection to "
+            f"authority that doesn't actually apply, and do not cite any case not shown here):"
+            f"\n---\n{retrieved_context}\n---"
+        ) if retrieved_context else ""
+        print(f"[generate_job:{job_id}] RETRIEVAL_COMPLETE")
+
+        party_block = ""
+        if is_litigation:
+            party_block = f"""Court: {req.court or 'High Court of Zimbabwe'}
 Case/Matter Number: {req.case_number or '[CASE NUMBER]'}
 Plaintiff/Applicant: {req.plaintiff or '[PLAINTIFF/APPLICANT]'}
 Defendant/Respondent: {req.defendant or '[DEFENDANT/RESPONDENT]'}"""
-    else:
-        party_block = f"""First Party: {req.plaintiff or '[FIRST PARTY]'}
+        else:
+            party_block = f"""First Party: {req.plaintiff or '[FIRST PARTY]'}
 Second Party: {req.defendant or '[SECOND PARTY]'}"""
-        if req.case_number:
-            party_block += f"\nReference/Matter Number: {req.case_number}"
+            if req.case_number:
+                party_block += f"\nReference/Matter Number: {req.case_number}"
 
-    # Advocate's-voice instructions only apply to litigation documents
-    # (Heads of Argument, applications, appeals, etc.) — a contract or
-    # letter drafted in a persuasive/adversarial register would be wrong.
-    # Additive alongside precedent_block, not a replacement for it: a
-    # litigation document with a matched firm precedent should get both
-    # the precedent's language/structure AND the advocacy voice rules.
-    advocacy_block = ADVOCACY_RULES if is_litigation else ""
+        # Advocate's-voice instructions only apply to litigation documents
+        # (Heads of Argument, applications, appeals, etc.) — a contract or
+        # letter drafted in a persuasive/adversarial register would be wrong.
+        advocacy_block = ADVOCACY_RULES if is_litigation else ""
 
-    prompt = f"""Draft a {DOC_TYPE_LABELS_BACKEND.get(req.doc_type, 'legal document')}.
+        prompt = f"""Draft a {DOC_TYPE_LABELS_BACKEND.get(req.doc_type, 'legal document')}.
 
 {party_block}
 
@@ -5629,22 +5637,16 @@ DOCUMENT-SPECIFIC REQUIREMENTS:
 
 Draft the complete document now."""
 
-    try:
         # Scaled the same way as synthesise_answer_sync's research path —
-        # litigation documents (Heads of Argument, multiple issues,
-        # adversarial counter-arguments) need real headroom, and a flat
-        # 4096 has no way to grow with input size. Capped well under
+        # litigation documents need real headroom. Capped well under
         # claude-sonnet-4-5's real 64,000-token ceiling.
         max_tokens = min(
             6000 + len(req.facts + (req.instructions or '') + precedent_block + retrieved_block) // 5,
             20000,
         )
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=max_tokens,
-            system=DOCUMENT_SYSTEM_BASE.format(FIRM_NAME=FIRM_NAME),
-            messages=[{"role": "user", "content": prompt}]
-        )
+        msg = await asyncio.to_thread(_call_document_generation_model, prompt, max_tokens)
+        print(f"[generate_job:{job_id}] SYNTHESIS_COMPLETE")
+
         document_text = msg.content[0].text
         if msg.stop_reason == "max_tokens":
             # Same truncation safeguard as synthesise_answer_sync — without
@@ -5660,19 +5662,90 @@ Draft the complete document now."""
         # Same inline citation check as the research/synthesis path, against
         # the exact retrieved context this document was drafted from — but
         # softer wording than research's "UNVERIFIED": the corpus is not
-        # comprehensive (currently ~523 ZLR chunks), so a citation absent
-        # from it is unconfirmed, not proven fabricated.
+        # comprehensive, so a citation absent from it is unconfirmed, not
+        # proven fabricated.
         document_text, inline_qc_log = verify_inline_case_citations(
             document_text, retrieved_context,
             annotation_suffix="[⚠ Not found in retrieved sources — verify independently before filing]",
         )
         if inline_qc_log:
-            print(f"[generate_document] {len(inline_qc_log)} citation(s) not found in retrieved context: "
+            print(f"[generate_job:{job_id}] {len(inline_qc_log)} citation(s) not found in retrieved context: "
                   f"{[q['case_name'] for q in inline_qc_log]}")
+        print(f"[generate_job:{job_id}] CITATION_QC_COMPLETE")
 
-        return {"document": document_text, "doc_type": req.doc_type}
+        _search_jobs[job_id]["result"] = {"document": document_text, "doc_type": req.doc_type}
+        _search_jobs[job_id]["status"] = JobStatus.COMPLETE
+        print(f"[generate_job:{job_id}] COMPLETE")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Document generation failed: {e}")
+        print(f"[generate_job:{job_id}] FAILED: {e}")
+        _search_jobs[job_id]["error"] = str(e)
+        _search_jobs[job_id]["status"] = JobStatus.FAILED
+
+
+@app.post("/api/generate-document", status_code=202)
+async def generate_document(req: DocumentRequest, request: Request):
+    """
+    General-purpose drafting endpoint backing the "Draft Document" feature —
+    covers 20 document types (litigation, conveyancing, commercial
+    agreements, correspondence) via a shared prompt structure with
+    per-type guidance, the same pattern as generate_affidavit but
+    generalized.
+
+    Runs as a fire-and-poll background job, same pattern and same job
+    store (_search_jobs) as /api/search/document — retrieval + Sonnet
+    generation + citation verification regularly exceeded Cloudflare's
+    edge timeout once retrieval was added ahead of generation, held
+    behind one synchronous request. Returns a job_id immediately; poll
+    /api/generate-document/status/{job_id} for the result.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+
+    now = datetime.utcnow()
+    for jid, job in list(_search_jobs.items()):
+        if now - datetime.fromisoformat(job["created_at"]) > _SEARCH_JOB_MAX_AGE:
+            del _search_jobs[jid]
+
+    job_id = str(_uuid_mod.uuid4())
+    job_user = {
+        "id": user.get("id"),
+        "firm_id": user.get("firm_id"),
+        "display_name": user.get("display_name"),
+        "role": user.get("role"),
+    }
+
+    _search_jobs[job_id] = {
+        "status": JobStatus.PENDING,
+        "result": None,
+        "error": None,
+        "firm_id": str(user.get("firm_id") or FIRM_ID),
+        "created_at": now.isoformat(),
+    }
+
+    asyncio.create_task(_run_document_generation_job(job_id, req, job_user))
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/generate-document/status/{job_id}")
+async def get_document_generation_job_status(job_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+
+    job = _search_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["firm_id"] != str(user.get("firm_id") or FIRM_ID):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job["result"],
+        "error": job["error"],
+    }
+
 
 # ── DOCX Export ───────────────────────────────────────────────────────────────
 

@@ -2585,56 +2585,74 @@ async function doSearch() {
   }
 }
 
-// Polls /api/search/document/status/{jobId} every ~2s until the background
-// job (see backend/main.py _run_document_search_job) completes or fails.
-// myToken lets a later doSearch() call silently stop an in-flight poll
-// instead of it fighting the new submission for the results panel.
-function pollDocumentSearchJob(jobId, query, myToken) {
+// Generic fire-and-poll status checker shared by every background-job
+// feature (document search, document generation — see backend/main.py's
+// shared _search_jobs store). Only the actual polling mechanics (fetch
+// loop, caller-owned cancellation, ~2s retry cadence, network-error
+// handling) live here; each caller supplies its own status URL and what
+// to do with a complete/failed/errored response.
+function pollJobStatus(statusUrl, isCancelled, handlers) {
   return new Promise((resolve) => {
     async function poll() {
-      if (myToken !== _searchPollToken) return resolve();
+      if (isCancelled()) return resolve();
       try {
-        const res = await fetch(`${API}/api/search/document/status/${jobId}`);
+        const res = await fetch(statusUrl);
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || 'Could not check search status');
+          throw new Error(err.detail || 'Could not check job status');
         }
         const data = await res.json();
-        if (myToken !== _searchPollToken) return resolve();
-
-        // TEMP diagnostic logging — remove once the stale-frontend vs.
-        // result-shape-mismatch question is settled.
-        console.log('[search_job_poll] payload:', JSON.stringify(data));
+        if (isCancelled()) return resolve();
 
         if (data.status === 'complete') {
-          const result = data.result;
-          if (!result) {
-            console.warn('[search_job_poll] status=complete but data.result is missing:', data);
-            document.getElementById('search-results').innerHTML = `<div class="status show error">Search job completed without a result.</div>`;
-            return resolve();
-          }
-          if (!Array.isArray(result.results)) {
-            console.warn('[search_job_poll] result.results is not an array:', result);
-            document.getElementById('search-results').innerHTML = `<div class="status show error">Search result is missing the expected results array — please refresh the page and try again.</div>`;
-            return resolve();
-          }
-          renderSearchResults(result, query);
+          handlers.onComplete(data);
           return resolve();
         }
         if (data.status === 'failed') {
-          document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${escHtml(data.error || 'Unknown error')}.</div>`;
+          handlers.onFailed(data.error || 'Unknown error');
           return resolve();
         }
         setTimeout(poll, 2000);
       } catch (e) {
-        if (myToken === _searchPollToken) {
-          document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}. Is the server running?</div>`;
-        }
+        if (!isCancelled()) handlers.onError(e);
         resolve();
       }
     }
     poll();
   });
+}
+
+// Polls /api/search/document/status/{jobId} (see backend/main.py
+// _run_document_search_job). myToken lets a later doSearch() call
+// silently stop an in-flight poll instead of it fighting the new
+// submission for the results panel.
+function pollDocumentSearchJob(jobId, query, myToken) {
+  return pollJobStatus(
+    `${API}/api/search/document/status/${jobId}`,
+    () => myToken !== _searchPollToken,
+    {
+      onComplete: (data) => {
+        const result = data.result;
+        if (!result) {
+          console.warn('[search_job_poll] status=complete but data.result is missing:', data);
+          document.getElementById('search-results').innerHTML = `<div class="status show error">Search job completed without a result.</div>`;
+          return;
+        }
+        if (!Array.isArray(result.results)) {
+          console.warn('[search_job_poll] result.results is not an array:', result);
+          document.getElementById('search-results').innerHTML = `<div class="status show error">Search result is missing the expected results array — please refresh the page and try again.</div>`;
+          return;
+        }
+        renderSearchResults(result, query);
+      },
+      onFailed: (error) => {
+        document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${escHtml(error)}.</div>`;
+      },
+      onError: (e) => {
+        document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}. Is the server running?</div>`;
+      },
+    }
+  );
 }
 
 function printSearchResults() {
@@ -3840,11 +3858,67 @@ function clearDraftPrecedent() {
   document.getElementById('draft-precedent-suggestions').innerHTML = '';
 }
 
+// Separate token pool from _searchPollToken — sharing one would let a new
+// document-generation submission cancel an in-flight search poll (or vice
+// versa) even though the two features' result panels don't overlap.
+let _draftPollToken = 0;
+
+// Convert plain text to formatted HTML in the editor. A run of one or more
+// blank lines is ONE paragraph boundary, not one <p> per blank line — giving
+// every blank line its own margined <p><br></p> stacked three default
+// browser paragraph-margins between sections.
+function renderDraftedDocument(documentText) {
+  const editor = document.getElementById('draft-editor');
+  const formatted = documentText
+    .split(/\n\s*\n+/)
+    .map(block => block.trim())
+    .filter(block => block.length > 0)
+    .map(block => {
+      const isHeading = block === block.toUpperCase() && block.length > 3 && block.length < 80 && !block.includes('\n');
+      const inner = escHtml(block).replace(/\n/g, '<br>');
+      return isHeading ? `<p style="text-align:center"><strong>${inner}</strong></p>` : `<p>${inner}</p>`;
+    }).join('');
+
+  editor.innerHTML = formatted;
+  document.getElementById('draft-step3').style.display = 'block';
+  document.getElementById('draft-editor-title').textContent = DOC_TYPE_LABELS[currentDocType] || 'Drafted Document';
+  document.getElementById('draft-step3').scrollIntoView({behavior:'smooth', block:'start'});
+  updateDraftWordCount();
+  showDraftStatus('✓ Document drafted. Edit directly in the editor below, then export.', 'success');
+}
+
+// Polls /api/generate-document/status/{jobId} (see backend/main.py
+// _run_document_generation_job).
+function pollDocumentGenerationJob(jobId, myToken) {
+  return pollJobStatus(
+    `${API}/api/generate-document/status/${jobId}`,
+    () => myToken !== _draftPollToken,
+    {
+      onComplete: (data) => {
+        const result = data.result;
+        if (!result || !result.document) {
+          console.warn('[draft_job_poll] status=complete but data.result.document is missing:', data);
+          showDraftStatus('Document job completed without a result. Please try again.', 'error');
+          return;
+        }
+        renderDraftedDocument(result.document);
+      },
+      onFailed: (error) => {
+        showDraftStatus(`Error: ${error}`, 'error');
+      },
+      onError: (e) => {
+        showDraftStatus(`Error: ${e.message}`, 'error');
+      },
+    }
+  );
+}
+
 async function generateDocument() {
   const facts = document.getElementById('draft-facts').value.trim();
   if (!facts) { showDraftStatus('Please describe the facts and what the document must achieve.', 'error'); return; }
   if (!currentDocType) { showDraftStatus('Please select a document type first.', 'error'); return; }
 
+  const myToken = ++_draftPollToken;
   const btn = document.getElementById('draft-gen-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Drafting…';
@@ -3869,32 +3943,15 @@ async function generateDocument() {
     if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Generation failed'); }
     const data = await res.json();
 
-    // Render in editor — convert plain text to formatted HTML. A run of
-    // one or more blank lines is ONE paragraph boundary, not one <p> per
-    // blank line — giving every blank line its own margined <p><br></p>
-    // stacked three default browser paragraph-margins between sections.
-    const editor = document.getElementById('draft-editor');
-    const formatted = data.document
-      .split(/\n\s*\n+/)
-      .map(block => block.trim())
-      .filter(block => block.length > 0)
-      .map(block => {
-        const isHeading = block === block.toUpperCase() && block.length > 3 && block.length < 80 && !block.includes('\n');
-        const inner = escHtml(block).replace(/\n/g, '<br>');
-        return isHeading ? `<p style="text-align:center"><strong>${inner}</strong></p>` : `<p>${inner}</p>`;
-      }).join('');
-
-    editor.innerHTML = formatted;
-    document.getElementById('draft-step3').style.display = 'block';
-    document.getElementById('draft-editor-title').textContent = DOC_TYPE_LABELS[currentDocType] || 'Drafted Document';
-    document.getElementById('draft-step3').scrollIntoView({behavior:'smooth', block:'start'});
-    updateDraftWordCount();
-    showDraftStatus('✓ Document drafted. Edit directly in the editor below, then export.', 'success');
+    if (myToken !== _draftPollToken) return;
+    await pollDocumentGenerationJob(data.job_id, myToken);
   } catch(e) {
-    showDraftStatus(`Error: ${e.message}`, 'error');
+    if (myToken === _draftPollToken) showDraftStatus(`Error: ${e.message}`, 'error');
   } finally {
-    btn.disabled = false;
-    btn.innerHTML = '✍ Draft Document';
+    if (myToken === _draftPollToken) {
+      btn.disabled = false;
+      btn.innerHTML = '✍ Draft Document';
+    }
   }
 }
 
