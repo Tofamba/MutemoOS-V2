@@ -4326,6 +4326,77 @@ async def search_zlr(req: LegalUpdateSearchRequest, request: Request):
     results = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks, req.query, req.source_type, req.limit)
     return {"results": results, "count": len(results)}
 
+# Chunks from chunk_text() run ~2500 chars (500 words); a ZLR judgment's
+# chunk almost always opens with case-caption/coram boilerplate (case name,
+# court, judge, hearing dates) before reaching the actual facts or holding.
+# A short excerpt taken from chunk start therefore tends to show only that
+# boilerplate — enough for the case NAME to match the query, but not enough
+# substantive content for a drafting model to recognize the case as
+# genuinely on point. Widened well past the old 400-char cutoff, and
+# centered on whichever sentence in the chunk most overlaps the query's own
+# words, rather than always the start.
+ZLR_EXCERPT_CHARS = 1400
+
+def _best_excerpt_window(text: str, query: str, window_chars: int = ZLR_EXCERPT_CHARS) -> str:
+    """
+    Picks a window_chars-sized slice of text by sliding a probe across it
+    and scoring each position by query-word overlap — a simple,
+    dependency-free stand-in for "where in this chunk did the actual match
+    come from," since ChromaDB gives us a similarity score for the whole
+    chunk but not which part of it drove that score.
+
+    The first ~300 chars are deliberately excluded from candidate
+    positions. chunk_text() rejoins words with single spaces, so no
+    newlines survive chunking — a judgment's caption/coram block (case
+    name, court, judge, dates) then has no punctuation boundary separating
+    it from the first real sentence, and it legitimately scores well
+    against any query that names the same parties as the case caption
+    (exactly the Kombayi case: "MINISTER OF LOCAL GOVERNMENT" in the
+    caption vs. a query about "Ministry of Local Government" overlap on
+    3+ words). Left unexcluded, the excerpt would anchor right back on the
+    caption it was supposed to get past. A judgment's caption is reliably
+    near chunk start (especially chunk 0), so skipping straight past it is
+    a safe bet without needing to actually parse judgment structure.
+
+    Falls back to text[:window_chars] if the text already fits, the query
+    has no usable words, or nothing beyond the skipped lead-in scores
+    above zero — same behavior as the old flat slice in that case, just at
+    the new, wider length.
+    """
+    if len(text) <= window_chars:
+        return text
+
+    query_words = set(re.findall(r"[a-z]{3,}", query.lower()))
+    if not query_words:
+        return text[:window_chars]
+
+    probe_chars = min(300, window_chars // 3)
+    stride = 100
+    skip_chars = min(300, max(0, len(text) - probe_chars))
+
+    best_pos, best_score = None, 0
+    for pos in range(skip_chars, len(text) - probe_chars + 1, stride):
+        probe_words = set(re.findall(r"[a-z]{3,}", text[pos:pos + probe_chars].lower()))
+        score = len(query_words & probe_words)
+        if score > best_score:
+            best_score, best_pos = score, pos
+
+    if best_pos is None:
+        return text[:window_chars]
+
+    # A little lead-in before the match so the excerpt doesn't start
+    # mid-sentence, without giving up much of the window to it.
+    lead_in = min(200, window_chars // 4)
+    window_start = max(0, min(best_pos - lead_in, len(text) - window_chars))
+    if window_start > 0:
+        # Snap forward to the next word boundary rather than starting
+        # mid-word — purely cosmetic, doesn't change which content is in
+        # the window by more than a few characters.
+        next_space = text.find(" ", window_start)
+        if 0 <= next_space < window_start + 50:
+            window_start = next_space + 1
+    return text[window_start:window_start + window_chars]
+
 def _zlr_semantic_search(zlr_chunks: list, query: str, category_filter: Optional[str], limit: int) -> list:
     results = []
     try:
@@ -4355,7 +4426,7 @@ def _zlr_semantic_search(zlr_chunks: list, query: str, category_filter: Optional
                     "case_name": chunk.get("case_name"),
                     "citation": chunk.get("citation"),
                     "taxonomy_category": chunk.get("taxonomy_category"),
-                    "relevant_excerpt": chunk["text"][:400],
+                    "relevant_excerpt": _best_excerpt_window(chunk["text"], query),
                     "legal_source_type": chunk.get("legal_source_type"),
                     "authority_strength": chunk.get("authority_strength"),
                 })
@@ -4379,7 +4450,7 @@ def _zlr_semantic_search(zlr_chunks: list, query: str, category_filter: Optional
                 "case_name": chunk.get("case_name"),
                 "citation": chunk.get("citation"),
                 "taxonomy_category": chunk.get("taxonomy_category"),
-                "relevant_excerpt": chunk["text"][:400],
+                "relevant_excerpt": _best_excerpt_window(chunk["text"], query),
                 "legal_source_type": chunk.get("legal_source_type"),
                 "authority_strength": chunk.get("authority_strength"),
             })
@@ -5843,11 +5914,28 @@ async def _run_document_generation_job(job_id: str, req: "DocumentRequest", user
         if retrieved_zlr_results:
             print(f"[generate_job:{job_id}] ZLR_MATCHES: " + ", ".join(r.get('filename', 'unknown') for r in retrieved_zlr_results))
         if retrieved_legal_results:
-            print(f"[generate_job:{job_id}] LEGAL_MATCHES: " + ", ".join(r.get('filename', 'unknown') for r in retrieved_legal_results[:5]))
+            # _semantic_search_legal's result dicts have no "filename" key at
+            # all (that's a "firm"/ZLR-result field) — legal_updates results
+            # carry the name under "reference"/"source_name" instead, same
+            # as format_context()'s own lookup a few lines below and the
+            # Legal Updates list in the frontend (item.reference || item.filename).
+            print(f"[generate_job:{job_id}] LEGAL_MATCHES: " + ", ".join(
+                (r.get('reference') or r.get('source_name') or 'unknown') for r in retrieved_legal_results[:5]
+            ))
+        # Framed as citation-affirmative rather than caution-first: an earlier
+        # version read "cite only what is genuinely on point; do not force a
+        # connection... do not cite any case not shown here" — two negatives
+        # to one hedge, and testing showed the model erring toward citing
+        # nothing even when a retrieved case (by name/citation) was clearly
+        # on point, treating citation as high-risk by default rather than
+        # evaluating each source's actual relevance. The "not shown below"
+        # guardrail against fabricating uncited case names is preserved.
         retrieved_block = (
             f"\n\nAVAILABLE AUTHORITY FROM THE FIRM'S VAULT (retrieved as potentially relevant to "
-            f"these facts — cite only what is genuinely on point; do not force a connection to "
-            f"authority that doesn't actually apply, and do not cite any case not shown here):"
+            f"these facts). When a retrieved case or source below is genuinely relevant to the "
+            f"facts or legal issue, cite it directly by name — this is exactly the kind of "
+            f"authority this document should draw on. Only omit citation for a retrieved source "
+            f"that is not actually on point, and never cite a case that is not shown below:"
             f"\n---\n{retrieved_context}\n---"
         ) if retrieved_context else ""
         print(f"[generate_job:{job_id}] RETRIEVAL_COMPLETE")
