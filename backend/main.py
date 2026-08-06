@@ -5839,6 +5839,11 @@ async def _run_document_generation_job(job_id: str, req: "DocumentRequest", user
                 })
 
         retrieved_context = format_context(retrieved_results, retrieved_legal_results, retrieved_zlr_results)
+        print(f"[generate_job:{job_id}] RETRIEVAL_RESULTS firm={len(retrieved_results)} legal={len(retrieved_legal_results)} zlr={len(retrieved_zlr_results)} context_chars={len(retrieved_context)}")
+        if retrieved_zlr_results:
+            print(f"[generate_job:{job_id}] ZLR_MATCHES: " + ", ".join(r.get('filename', 'unknown') for r in retrieved_zlr_results))
+        if retrieved_legal_results:
+            print(f"[generate_job:{job_id}] LEGAL_MATCHES: " + ", ".join(r.get('filename', 'unknown') for r in retrieved_legal_results[:5]))
         retrieved_block = (
             f"\n\nAVAILABLE AUTHORITY FROM THE FIRM'S VAULT (retrieved as potentially relevant to "
             f"these facts — cite only what is genuinely on point; do not force a connection to "
