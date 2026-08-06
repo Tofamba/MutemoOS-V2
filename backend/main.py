@@ -681,22 +681,29 @@ def require_admin_token(request: Request):
             raise HTTPException(status_code=403, detail="Admin access required")
 
 # ── OTP Authentication ────────────────────────────────────────────────────────
-# Delivered via WhatsApp Business Cloud API (Meta), not SMS/Twilio — reuses
-# the same Meta WhatsApp Business setup already used for AlertEngine. This
-# uses a dedicated AUTHENTICATION-category template, which (unlike regular
+# Preferred channel is WhatsApp Business Cloud API (Meta) — reuses the same
+# Meta WhatsApp Business setup already used for AlertEngine. This uses a
+# dedicated AUTHENTICATION-category template, which (unlike regular
 # utility/marketing templates) is NOT subject to the 24-hour conversation
 # window restriction that affected AlertEngine's other WhatsApp delivery —
 # authentication templates can be sent proactively any time, to anyone,
 # once approved by Meta. Uses the "Copy Code" button type since this is a
 # web app (one-tap/zero-tap autofill need native app integration).
+# Twilio SMS is the middle fallback (see _send_sms_otp/_send_otp_code below)
+# for firms without WhatsApp Business Verification yet; email via Resend
+# remains the last-resort stopgap.
 WHATSAPP_ACCESS_TOKEN     = os.environ.get("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID  = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_OTP_TEMPLATE     = os.environ.get("WHATSAPP_OTP_TEMPLATE_NAME", "mutemo_login_otp")
 WHATSAPP_OTP_LANG         = os.environ.get("WHATSAPP_OTP_TEMPLATE_LANG", "en")
+TWILIO_ACCOUNT_SID  = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN   = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER  = os.environ.get("TWILIO_FROM_NUMBER")
+_TWILIO_SMS_CONFIGURED = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER)
 # Inlined rather than calling is_email_configured() (defined later in this
 # file) — this line runs at import time, before that function exists yet.
 _EMAIL_OTP_CONFIGURED = bool(os.environ.get("RESEND_API_KEY") or os.environ.get("SMTP_HOST"))
-AUTH_ENABLED = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID) or _EMAIL_OTP_CONFIGURED
+AUTH_ENABLED = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID) or _TWILIO_SMS_CONFIGURED or _EMAIL_OTP_CONFIGURED
 
 OTP_TTL_SECONDS     = 300
 SESSION_TTL_SECONDS = 86400 * 7
@@ -727,25 +734,30 @@ def _send_otp_code(phone: str, email: Optional[str], code: str) -> Optional[str]
     """
     Sends the OTP via whichever channel is actually configured. Prefers
     WhatsApp (the eventual target, once Meta Business Verification
-    completes for the WhatsApp Business Account) but falls back to email
-    via Resend, which is already working today. Once WHATSAPP_ACCESS_TOKEN
-    and WHATSAPP_PHONE_NUMBER_ID are set on Railway, this automatically
-    starts sending via WhatsApp instead — no further code change needed.
+    completes for the WhatsApp Business Account), falls back to Twilio SMS
+    for firms without WhatsApp set up yet, and finally to email via Resend
+    as a last-resort stopgap. Each channel activates automatically as soon
+    as its own env vars are set on Railway — no further code change needed
+    to "switch over" between them.
 
-    Returns the channel actually used ("whatsapp" / "email"), or None if
-    nothing could be sent — this was previously just True/False, which is
-    why the login screen kept saying "code sent to your phone" even when
-    it had actually gone to email: the frontend had no way to know which
-    channel was really used.
+    Returns the channel actually used ("whatsapp" / "sms" / "email"), or
+    None if nothing could be sent — this was previously just True/False,
+    which is why the login screen kept saying "code sent to your phone"
+    even when it had actually gone to email: the frontend had no way to
+    know which channel was really used.
     """
     if WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID:
         if _send_whatsapp_otp(phone, code):
             return "whatsapp"
-        print(f"[otp] WhatsApp send failed for {phone}, falling back to email")
+        print(f"[otp] WhatsApp send failed for {phone}, falling back")
+    if _TWILIO_SMS_CONFIGURED:
+        if _send_sms_otp(phone, code):
+            return "sms"
+        print(f"[otp] SMS send failed for {phone}, falling back")
     if email and _EMAIL_OTP_CONFIGURED:
         if _send_email_otp(email, code):
             return "email"
-    print(f"[otp] No delivery channel available for {phone} (no email on file and WhatsApp not configured)")
+    print(f"[otp] No delivery channel available for {phone} (no email on file and neither WhatsApp nor SMS configured)")
     return None
 
 def _send_whatsapp_otp(phone: str, code: str) -> bool:
@@ -785,6 +797,34 @@ def _send_whatsapp_otp(phone: str, code: str) -> bool:
         return True
     except Exception as e:
         print(f"[otp] WhatsApp send failed: {e}")
+        return False
+
+def _send_sms_otp(phone: str, code: str) -> bool:
+    """
+    Sends the OTP as a plain SMS via Twilio's REST API — a direct httpx
+    call rather than the Twilio SDK, matching _send_whatsapp_otp's style
+    above rather than adding a second HTTP-client convention. Middle
+    fallback: used when WhatsApp isn't configured (or its send failed) but
+    Twilio is, ahead of the email stopgap.
+    """
+    try:
+        import httpx
+        resp = httpx.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json",
+            auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            data={
+                "To": phone,
+                "From": TWILIO_FROM_NUMBER,
+                "Body": f"Your Mutemo Desk login code is {code}. It expires in 5 minutes.",
+            },
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            print(f"[otp] SMS send failed {resp.status_code}: {resp.text[:300]}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[otp] SMS send failed: {e}")
         return False
 
 class OTPRequestBody(BaseModel):

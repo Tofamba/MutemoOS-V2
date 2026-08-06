@@ -66,7 +66,7 @@ A substantial round of feature and reliability work, largely driven by real use 
 - **Matter-level deadline tracking** — critical deadlines now live on the matter itself, shown as a colour-coded chip on the matter list and folded into the existing daily reminder email
 - **Daily vault digest** — a separate daily email summarising new news, legislation, and judgments added to the vault
 - **OCR confidence flagging** — low-confidence OCR (e.g. a poor phone photo) is now flagged for manual review rather than silently trusted downstream
-- **Authentication overhaul** — see below; Twilio SMS OTP replaced
+- **Authentication overhaul** — see below; Twilio SMS OTP replaced with WhatsApp + email (Twilio later reinstated as a fallback channel, in between WhatsApp and email — see the Authentication note under Environment Variables)
 
 **Fixed:**
 - **ChromaDB was not persistent** — the vector index lived on the container's ephemeral filesystem and was silently wiped on every redeploy, even though Postgres (the real source of truth for chunk text) survived. Added a persistent volume plus a startup reconciliation check that rebuilds only what's actually out of sync, rather than a full reindex on every boot
@@ -83,7 +83,7 @@ The production rebuild. Every architectural decision in v2 was driven by lessons
 |---|---|---|
 | **Database** | JSON file (`mutemo_state.json`) | PostgreSQL via asyncpg |
 | **Multi-tenancy** | Single firm, hardcoded | `firm_id` on every table |
-| **Authentication** | Password env var (`MUTEMO_PASSWORD`) | OTP via SMS (Twilio) + session cookies in DB *(superseded in v2.1 — see above)* |
+| **Authentication** | Password env var (`MUTEMO_PASSWORD`) | OTP via SMS (Twilio) + session cookies in DB *(Twilio replaced with WhatsApp+email in v2.1, then reinstated as a fallback channel — see above)* |
 | **Roles** | None — all users equal | `partner / associate / secretary / admin` |
 | **OCR** | Synchronous — blocked the request | Background task — returns 202 immediately |
 | **Legacy .doc support** | python-docx only (failed on binary .doc) | antiword fallback for legacy Word files |
@@ -227,14 +227,15 @@ Copy `.env.example` to `.env` and fill in the values.
 | `MUTEMO_ADMIN_TOKEN` | | Protects `/api/admin/*` endpoints, and is what `mutemo-legal-feed` uses to push content in. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"` |
 | `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID` | | OTP login delivery via Meta Business Cloud API (preferred channel — see Authentication note below) |
 | `WHATSAPP_OTP_TEMPLATE_NAME`, `WHATSAPP_OTP_TEMPLATE_LANG` | | Name/language of the approved Meta AUTHENTICATION-category message template used for OTP delivery |
-| `RESEND_API_KEY` | | Email — calendar invites, reminders, daily digest, and OTP fallback if WhatsApp isn't configured |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | | OTP login delivery via Twilio SMS (middle fallback — see Authentication note below) |
+| `RESEND_API_KEY` | | Email — calendar invites, reminders, daily digest, and OTP fallback if neither WhatsApp nor Twilio is configured |
 | `RESEND_FROM` | | Sender address used for Resend email |
 | `SMTP_HOST` | | Alternative email delivery path, if not using Resend |
 | `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | | Cloudflare R2 document storage — see [below](#document-storage-cloudflare-r2) |
 | `R2_BUCKET` | | R2 bucket name (defaults to `mutemoos-documents` if unset) |
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCESS_APP_ID` | | Syncing invited users to Cloudflare Access automatically on invite |
 
-> **Note on authentication (updated in v2.1):** Twilio SMS has been removed entirely. OTP delivery now prefers WhatsApp if `WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID` are set, and falls back to email via Resend automatically otherwise — no code change is needed to switch once WhatsApp credentials are added. Account creation is invite-gated: a phone number must match a pending, unaccepted invite (or an existing active user) to receive a code at all — this replaced the previous static `MUTEMO_ALLOWED_PHONES` allowlist, which is no longer used. If **neither** WhatsApp nor email is configured, auth is disabled and the app falls back to a synthetic development user — this is a dev/demo fallback only and must not be relied on for a deployment holding real client data.
+> **Note on authentication:** OTP delivery tries three channels in order, each activating automatically as soon as its own env vars are set — no code change needed to switch: WhatsApp (`WHATSAPP_ACCESS_TOKEN`/`WHATSAPP_PHONE_NUMBER_ID`) first, then Twilio SMS (`TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`/`TWILIO_FROM_NUMBER`) for firms without WhatsApp Business Verification yet, then email via Resend as a last-resort stopgap. Account creation is invite-gated: a phone number must match a pending, unaccepted invite (or an existing active user) to receive a code at all — this replaced the previous static `MUTEMO_ALLOWED_PHONES` allowlist, which is no longer used. If **none** of WhatsApp, Twilio, or email is configured, auth is disabled and the app falls back to a synthetic development user — this is a dev/demo fallback only and must not be relied on for a deployment holding real client data.
 
 ---
 

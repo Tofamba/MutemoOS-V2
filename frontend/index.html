@@ -1677,15 +1677,19 @@ async function requestLoginOtp() {
     loginPhone = phone;
     // Show where the code actually went — this used to always say "your
     // phone" regardless of channel, which was actively wrong whenever
-    // WhatsApp wasn't configured and it silently went to email instead.
+    // WhatsApp wasn't configured and it silently went to email (or now SMS)
+    // instead.
+    const CHANNEL_LABELS = { whatsapp: 'WhatsApp', sms: 'SMS', email: 'email' };
+    const channelLabel = CHANNEL_LABELS[data.channel] || data.channel;
     const destinationText = data.channel === 'whatsapp' ? `WhatsApp (${phone})`
+                           : data.channel === 'sms' ? `SMS (${phone})`
                            : data.channel === 'email' ? 'your email'
                            : phone;
     document.getElementById('login-phone-display').textContent = destinationText;
     document.getElementById('login-step-phone').style.display = 'none';
     document.getElementById('login-step-code').style.display = 'block';
     document.getElementById('login-code').focus();
-    showLoginStatus(`Code sent via ${data.channel === 'whatsapp' ? 'WhatsApp' : 'email'}.`, 'success');
+    showLoginStatus(`Code sent via ${channelLabel}.`, 'success');
   } catch(e) {
     showLoginStatus(e.message, 'error');
   } finally {
