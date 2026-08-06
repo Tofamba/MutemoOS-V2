@@ -9,7 +9,11 @@ Covers the two cases the migration script's design hinges on:
     review group and are NEVER auto-merged by this logic
 """
 
-from backend.client_migration import group_client_names, normalize_name
+from backend.client_migration import (
+    group_client_names,
+    normalize_name,
+    split_review_group_by_exact_name,
+)
 
 
 # ── normalize_name ───────────────────────────────────────────────────────────
@@ -131,3 +135,64 @@ def test_group_client_names_never_mutates_input():
     original = [dict(m) for m in matters]
     group_client_names(matters)
     assert matters == original
+
+
+# ── split_review_group_by_exact_name ─────────────────────────────────────────
+# For a review group a human has REJECTED as a false-positive merge (real
+# example from production: "Kudzai Madzingira" and "Kudzai Ndanga" only
+# clustered because they share the token "kudzai") — splits it into one
+# client per distinct exact name, without re-running fuzzy matching.
+
+def test_split_creates_one_client_per_distinct_name():
+    """Two different people incorrectly clustered on a shared token."""
+    members = [
+        {"matter_id": "m1", "client_name": "Kudzai Madzingira", "normalized_name": "kudzai madzingira"},
+        {"matter_id": "m2", "client_name": "Kudzai Ndanga", "normalized_name": "kudzai ndanga"},
+    ]
+    result = split_review_group_by_exact_name(members)
+    assert len(result) == 2
+    names = {r["full_name"] for r in result}
+    assert names == {"Kudzai Madzingira", "Kudzai Ndanga"}
+    for r in result:
+        assert len(r["members"]) == 1
+
+
+def test_split_collapses_exact_duplicate_names_within_the_group():
+    """Real production case: a rejected group of 3 members where 2 are
+    literally the same person on two different matters ("Vongai Murigo"
+    twice) and 1 is a genuinely different person ("Vongai Maroyi") who only
+    got clustered in on shared-token similarity. Must produce exactly 2
+    clients, not 3 — the same-name pair should NOT become duplicates."""
+    members = [
+        {"matter_id": "m1", "client_name": "Vongai Murigo", "normalized_name": "vongai murigo"},
+        {"matter_id": "m2", "client_name": "Vongai Murigo", "normalized_name": "vongai murigo"},
+        {"matter_id": "m3", "client_name": "Vongai Maroyi", "normalized_name": "vongai maroyi"},
+    ]
+    result = split_review_group_by_exact_name(members)
+    assert len(result) == 2
+
+    by_name = {r["full_name"]: r for r in result}
+    assert set(by_name) == {"Vongai Murigo", "Vongai Maroyi"}
+    assert len(by_name["Vongai Murigo"]["members"]) == 2
+    assert {m["matter_id"] for m in by_name["Vongai Murigo"]["members"]} == {"m1", "m2"}
+    assert len(by_name["Vongai Maroyi"]["members"]) == 1
+    assert by_name["Vongai Maroyi"]["members"][0]["matter_id"] == "m3"
+
+
+def test_split_picks_longest_raw_name_as_display_name():
+    members = [
+        {"matter_id": "m1", "client_name": "Muza Trust", "normalized_name": "muza trust"},
+        {"matter_id": "m2", "client_name": "Mutungwe Trust", "normalized_name": "mutungwe trust"},
+    ]
+    result = split_review_group_by_exact_name(members)
+    full_names = {r["full_name"] for r in result}
+    assert full_names == {"Muza Trust", "Mutungwe Trust"}
+
+
+def test_split_preserves_first_appearance_order():
+    members = [
+        {"matter_id": "m1", "client_name": "Pastor Linda", "normalized_name": "pastor linda"},
+        {"matter_id": "m2", "client_name": "Pastor Charlotte", "normalized_name": "pastor charlotte"},
+    ]
+    result = split_review_group_by_exact_name(members)
+    assert [r["full_name"] for r in result] == ["Pastor Linda", "Pastor Charlotte"]

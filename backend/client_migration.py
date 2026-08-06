@@ -126,3 +126,41 @@ def group_client_names(matters: list) -> dict:
             })
 
     return {"auto_resolve": auto_resolve, "review_groups": review_groups, "skipped": skipped}
+
+
+def split_review_group_by_exact_name(members: list) -> list:
+    """
+    For a review_group a human has REJECTED as a single merge (its members
+    are not all the same person/entity — e.g. "Kudzai Madzingira" and
+    "Kudzai Ndanga" only clustered because they share the token "kudzai"),
+    groups its members by EXACT normalized_name instead of fuzzy matching.
+    No further fuzzy clustering is applied — a human has already decided
+    this group is not one identity, so the only thing left to detect is
+    members that are literally the same name appearing on multiple matters
+    (e.g. "Vongai Murigo" named on two separate matters), which should
+    still collapse into one client rather than becoming duplicates.
+
+    members: a review_group's "members" list, each
+        {"matter_id": ..., "client_name": ..., "normalized_name": ...}.
+
+    Returns a list of {"full_name": str, "members": [...]}, one entry per
+    distinct normalized_name, in first-appearance order. "full_name" is
+    the longest raw client_name among that name's members, matching
+    group_client_names()'s own display-name convention.
+    """
+    order = []
+    by_name = {}
+    for m in members:
+        key = m["normalized_name"]
+        if key not in by_name:
+            by_name[key] = []
+            order.append(key)
+        by_name[key].append(m)
+
+    return [
+        {
+            "full_name": max(by_name[key], key=lambda e: len(e["client_name"]))["client_name"],
+            "members": by_name[key],
+        }
+        for key in order
+    ]

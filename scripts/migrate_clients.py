@@ -18,13 +18,19 @@ automatically. Run it manually, review its output, and only then apply it:
                       review step is needed before applying them.
   3. `apply-group` — For a single fuzzy-matched group of 2+ matters from the
                       report (e.g. "Huang" / "Mr. Huang" / "H. Huang"), after
-                      a human has reviewed it: creates ONE Client record and
-                      links all of that group's matters to it. Requires
-                      --yes; without it, prints a preview and makes no
-                      changes. Run once per approved group — reject or split
-                      a bad grouping by simply not applying it (split it
-                      into separate matter_id lists and invoke per-matter
-                      instead, or handle those matters by hand).
+                      a human has reviewed and APPROVED it as one identity:
+                      creates ONE Client record and links all of that
+                      group's matters to it. Requires --yes; without it,
+                      prints a preview and makes no changes.
+  4. `apply-split`   — For a group a human has REJECTED as a false-positive
+                      merge (its members are not all the same person/entity
+                      — e.g. "Kudzai Madzingira" and "Kudzai Ndanga" only
+                      clustered because they share the token "kudzai"):
+                      creates one Client per distinct exact name within the
+                      group instead of one merged Client. Members that are
+                      literally the same name on multiple matters still
+                      collapse into a single client (not duplicated).
+                      Requires --yes, same preview-first convention.
 
 Usage:
     DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py report
@@ -35,6 +41,9 @@ Usage:
 
     DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-group \\
         --report-file review.json --group-index 0 --yes [--name "Override Name"]
+
+    DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-split \\
+        --report-file review.json --group-index 0 --yes
 
 The actual grouping/fuzzy-matching logic lives in backend/client_migration.py
 (pure functions, no DB) so it can be unit-tested independently — see
@@ -57,7 +66,7 @@ except ImportError:
     sys.exit(1)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from backend.client_migration import group_client_names  # noqa: E402
+from backend.client_migration import group_client_names, split_review_group_by_exact_name  # noqa: E402
 
 # Fixed firm_id seeded in postgres_schema.sql — override via env var for a
 # different deployment, same convention as scripts/migrate_to_postgres.py.
@@ -154,7 +163,7 @@ async def cmd_apply_auto(args):
         await conn.close()
 
 
-async def cmd_apply_group(args):
+def _load_group(args):
     report_path = Path(args.report_file)
     if not report_path.exists():
         print(f"ERROR: report file not found: {report_path}")
@@ -166,7 +175,50 @@ async def cmd_apply_group(args):
     if not group:
         print(f"ERROR: no review group with group_index={args.group_index} in {report_path}")
         sys.exit(1)
+    return group
 
+
+async def _filter_stale_members(conn, members: list) -> tuple:
+    """
+    Re-verify a group's members against current DB state before writing —
+    the report may be stale if other groups/auto-resolves were applied
+    since it was generated, or if a matter's client_name changed. Returns
+    (to_link, skipped) matter_id lists; skips anything that no longer
+    matches rather than silently overwriting an unrelated change. Shared
+    by apply-group and apply-split.
+    """
+    to_link, skipped = [], []
+    for m in members:
+        row = await conn.fetchrow(
+            "SELECT client_name, client_id FROM matters WHERE id=$1 AND firm_id=$2",
+            uuid.UUID(m["matter_id"]), uuid.UUID(FIRM_ID),
+        )
+        if not row or row["client_id"] is not None or row["client_name"] != m["client_name"]:
+            skipped.append(m["matter_id"])
+            continue
+        to_link.append(m["matter_id"])
+    return to_link, skipped
+
+
+async def _create_client_and_link(conn, full_name: str, matter_ids: list, now) -> None:
+    async with conn.transaction():
+        client_row = await conn.fetchrow(
+            """
+            INSERT INTO clients (id, firm_id, full_name, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$4)
+            RETURNING id
+            """,
+            uuid.uuid4(), uuid.UUID(FIRM_ID), full_name, now,
+        )
+        for matter_id in matter_ids:
+            await conn.execute(
+                "UPDATE matters SET client_id=$1 WHERE id=$2 AND firm_id=$3 AND client_id IS NULL",
+                client_row["id"], uuid.UUID(matter_id), uuid.UUID(FIRM_ID),
+            )
+
+
+async def cmd_apply_group(args):
+    group = _load_group(args)
     client_name = args.name or group["suggested_name"]
     members = group["members"]
 
@@ -181,45 +233,52 @@ async def cmd_apply_group(args):
 
     conn = await asyncpg.connect(args.database_url)
     try:
-        # Re-verify against current DB state — the report may be stale if
-        # other groups/auto-resolves were applied since it was generated, or
-        # if a matter's client_name changed. Skip anything that no longer
-        # matches rather than silently overwriting an unrelated change.
-        skipped = []
-        to_link = []
-        for m in members:
-            row = await conn.fetchrow(
-                "SELECT client_name, client_id FROM matters WHERE id=$1 AND firm_id=$2",
-                uuid.UUID(m["matter_id"]), uuid.UUID(FIRM_ID),
-            )
-            if not row or row["client_id"] is not None or row["client_name"] != m["client_name"]:
-                skipped.append(m["matter_id"])
-                continue
-            to_link.append(m["matter_id"])
-
+        to_link, skipped = await _filter_stale_members(conn, members)
         if not to_link:
             print("  Nothing left to apply — all members were already linked or changed since the report was generated.")
             return
 
-        now = datetime.now(timezone.utc)
-        async with conn.transaction():
-            client_row = await conn.fetchrow(
-                """
-                INSERT INTO clients (id, firm_id, full_name, created_at, updated_at)
-                VALUES ($1,$2,$3,$4,$4)
-                RETURNING id
-                """,
-                uuid.uuid4(), uuid.UUID(FIRM_ID), client_name, now,
-            )
-            for matter_id in to_link:
-                await conn.execute(
-                    "UPDATE matters SET client_id=$1 WHERE id=$2 AND firm_id=$3 AND client_id IS NULL",
-                    client_row["id"], uuid.UUID(matter_id), uuid.UUID(FIRM_ID),
-                )
+        await _create_client_and_link(conn, client_name, to_link, datetime.now(timezone.utc))
 
         print(f"\n  Created client \"{client_name}\" and linked {len(to_link)} matter(s).")
         if skipped:
             print(f"  Skipped {len(skipped)} matter(s) that had already changed since the report was generated: {skipped}")
+    finally:
+        await conn.close()
+
+
+async def cmd_apply_split(args):
+    group = _load_group(args)
+    splits = split_review_group_by_exact_name(group["members"])
+
+    print(f"  Group [{group['group_index']}] — will create {len(splits)} separate client(s) (rejected merge, split by exact name):")
+    for s in splits:
+        print(f"    - \"{s['full_name']}\" ({len(s['members'])} matter(s)):")
+        for m in s["members"]:
+            print(f"        matter {m['matter_id']} (was \"{m['client_name']}\")")
+
+    if not args.yes:
+        print("\n  This is a preview only — re-run with --yes to apply.")
+        return
+
+    conn = await asyncpg.connect(args.database_url)
+    try:
+        now = datetime.now(timezone.utc)
+        created = 0
+        linked = 0
+        all_skipped = []
+        for s in splits:
+            to_link, skipped = await _filter_stale_members(conn, s["members"])
+            all_skipped.extend(skipped)
+            if not to_link:
+                continue
+            await _create_client_and_link(conn, s["full_name"], to_link, now)
+            created += 1
+            linked += len(to_link)
+
+        print(f"\n  Created {created} client(s) and linked {linked} matter(s).")
+        if all_skipped:
+            print(f"  Skipped {len(all_skipped)} matter(s) that had already changed since the report was generated: {all_skipped}")
     finally:
         await conn.close()
 
@@ -244,11 +303,17 @@ def main():
     p_group.add_argument("--yes", action="store_true", help="Actually apply (default: preview only)")
     p_group.set_defaults(func=cmd_apply_group)
 
+    p_split = sub.add_parser("apply-split", help="Split one human-rejected review group into separate per-name clients")
+    p_split.add_argument("--report-file", default=DEFAULT_REPORT_PATH)
+    p_split.add_argument("--group-index", type=int, required=True)
+    p_split.add_argument("--yes", action="store_true", help="Actually apply (default: preview only)")
+    p_split.set_defaults(func=cmd_apply_split)
+
     args = parser.parse_args()
 
     if not args.database_url:
         print("ERROR: DATABASE_URL environment variable not set.")
-        print("Usage: DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py <report|apply-auto|apply-group> ...")
+        print("Usage: DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py <report|apply-auto|apply-group|apply-split> ...")
         sys.exit(1)
 
     asyncio.run(args.func(args))
