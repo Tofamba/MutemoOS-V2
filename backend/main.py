@@ -676,15 +676,26 @@ async def health_alerts():
     """
     AlertEngine health endpoint — real-time API health metrics.
 
-    "status" stays "ok" regardless of retrieval_ready below — this reflects
-    request-serving health (latency/error rate), not corpus readiness, and
-    a ~90s post-deploy reconcile window is expected/normal, not an
-    incident. retrieval_ready is exposed here for visibility only; it is
-    NOT what gates traffic to retrieval-dependent endpoints — see
-    _require_retrieval_ready, called directly from those endpoints. This
-    endpoint isn't wired up as a Railway healthcheckPath (no railway.json
-    in this repo configures one), so it isn't the right hook for delaying
-    when Railway considers the deploy ready for traffic.
+    WARNING: when fastapi_alertengine is actually installed (i.e. in
+    production — it's absent locally, which is why this handler runs fine
+    in dev/tests), instrument(app) above registers its OWN "/health/alerts"
+    route first, at app-creation time. Starlette matches routes in
+    registration order, so THIS handler never actually receives a request
+    in production — confirmed live: the real response has a completely
+    different shape (service_name/instance_id/metrics/health_score/alerts/
+    adaptive_thresholds), not this one. retrieval_ready below is therefore
+    dead code in production. Don't rely on this path for retrieval-
+    readiness visibility — use /health/ready instead (unauthenticated,
+    not shadowed by anything). Left this field here anyway since it's
+    harmless and this handler + its tests remain meaningful wherever
+    AlertEngine isn't loaded.
+
+    "status" stays "ok" regardless of retrieval_ready below (on the rare
+    chance this handler IS reached) — this reflects request-serving health
+    (latency/error rate), not corpus readiness, and a post-deploy reconcile
+    window is expected/normal, not an incident. This endpoint also isn't
+    wired up as a Railway healthcheckPath (no railway.json in this repo
+    configures one either way).
     """
     return {
         "status": "ok",
@@ -694,6 +705,17 @@ async def health_alerts():
         "retrieval_ready": _retrieval_ready,
         "timestamp": _time.time(),
     }
+
+@app.get("/health/ready")
+async def health_ready():
+    """
+    Unauthenticated, deliberately minimal readiness probe — not shadowed by
+    AlertEngine (distinct path from /health/alerts, see the warning above),
+    so this is the reliable way to check retrieval_ready from outside the
+    process (e.g. during incident triage, or scripted polling after a
+    deploy) without needing a logged-in session.
+    """
+    return {"retrieval_ready": _retrieval_ready}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

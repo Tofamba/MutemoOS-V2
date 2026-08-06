@@ -258,3 +258,16 @@ def test_health_alerts_reports_retrieval_ready_without_changing_status(monkeypat
     result = asyncio.run(health_alerts())
     assert result["retrieval_ready"] is True
     assert result["status"] == "ok"
+
+
+def test_health_ready_reflects_current_flag(monkeypatch):
+    """/health/ready — the reliable readiness probe. Unlike /health/alerts,
+    fastapi_alertengine's instrument(app) doesn't register anything at this
+    path, so this handler isn't shadowed in production."""
+    from backend.main import health_ready
+
+    monkeypatch.setattr(m, "_retrieval_ready", False)
+    assert asyncio.run(health_ready()) == {"retrieval_ready": False}
+
+    monkeypatch.setattr(m, "_retrieval_ready", True)
+    assert asyncio.run(health_ready()) == {"retrieval_ready": True}
