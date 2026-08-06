@@ -574,18 +574,58 @@ def _check_permission(user: dict, permission: str):
         )
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
+# lifespan() reaches `yield` (and Uvicorn starts accepting connections) as
+# soon as warm_up() is *scheduled*, not when it finishes — reconcile_chroma_index()
+# rebuilds the firm/legal/zlr collections sequentially and can take well
+# over a minute after a redeploy with an out-of-sync volume. Confirmed in
+# production: requests were served with legal=0 zlr=0 retrieval results at
+# 18:14:38, while legal didn't finish re-indexing until 18:15:55 and zlr's
+# rebuild hadn't even started — "[startup] semantic search ready" didn't
+# fire until 18:16:05. _retrieval_ready gates the endpoints that actually
+# read from these collections (see _require_retrieval_ready below) so a
+# request landing in that window gets a clear 503 instead of a silent
+# partial/empty result. Endpoints that don't touch ChromaDB (matters,
+# calendar, generate-affidavit, legal-updates keyword search, etc.) are
+# unaffected and keep serving traffic immediately, same as before.
+_retrieval_ready = False
+
+def _require_retrieval_ready():
+    """
+    Raise 503 if the post-deploy ChromaDB reconcile hasn't finished yet.
+    Call this from any endpoint that reads the firm/legal/zlr collections
+    (directly or via _semantic_search_firm/_semantic_search_legal/
+    _zlr_semantic_search) — right after auth/permission checks, before any
+    DB or ChromaDB access, so a not-ready request fails fast rather than
+    running a search against a partially-rebuilt index.
+    """
+    if not _retrieval_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="Search is still initializing after a recent deploy. Please retry in a moment.",
+            headers={"Retry-After": "20"},
+        )
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     asyncio.create_task(reminder_scheduler_loop())
     async def warm_up():
+        global _retrieval_ready
         try:
             await asyncio.to_thread(get_embedding_model)
             await asyncio.to_thread(get_chroma_collections)
             await reconcile_chroma_index()
             print("[startup] semantic search ready")
         except Exception as e:
+            # Chroma/embeddings are unavailable entirely — a different,
+            # already-handled degraded mode (keyword fallback), not the
+            # race condition this flag guards against. Still release the
+            # gate: the collections aren't "mid-rebuild", they're just not
+            # going to be used, and _semantic_search_* already fall back
+            # gracefully when ChromaDB isn't reachable.
             print(f"[startup] semantic search unavailable, will use keyword fallback: {e}")
+        finally:
+            _retrieval_ready = True
     asyncio.create_task(warm_up())
     yield
     if _db_pool:
@@ -633,12 +673,25 @@ def _health_score() -> float:
 
 @app.get("/health/alerts")
 async def health_alerts():
-    """AlertEngine health endpoint — real-time API health metrics."""
+    """
+    AlertEngine health endpoint — real-time API health metrics.
+
+    "status" stays "ok" regardless of retrieval_ready below — this reflects
+    request-serving health (latency/error rate), not corpus readiness, and
+    a ~90s post-deploy reconcile window is expected/normal, not an
+    incident. retrieval_ready is exposed here for visibility only; it is
+    NOT what gates traffic to retrieval-dependent endpoints — see
+    _require_retrieval_ready, called directly from those endpoints. This
+    endpoint isn't wired up as a Railway healthcheckPath (no railway.json
+    in this repo configures one), so it isn't the right hook for delaying
+    when Railway considers the deploy ready for traffic.
+    """
     return {
         "status": "ok",
         "score": _health_score(),
         "p95_latency": _p95_latency(),
         "error_rate": _error_rate(),
+        "retrieval_ready": _retrieval_ready,
         "timestamp": _time.time(),
     }
 app.add_middleware(
@@ -4315,6 +4368,7 @@ async def delete_zlr_entry(item_id: str, request: Request):
 async def search_zlr(req: LegalUpdateSearchRequest, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "search")
+    _require_retrieval_ready()
     async with _db_pool.acquire() as conn:
         chunk_rows = await conn.fetch(
             "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='zlr'",
@@ -4531,6 +4585,7 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 async def search_documents(req: SearchRequest, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "search")
+    _require_retrieval_ready()
 
     # Load chunks from DB for keyword fallback
     async with _db_pool.acquire() as conn:
@@ -4849,6 +4904,7 @@ async def search_with_document(
     """
     user = await get_current_user(request)
     _check_permission(user, "search")
+    _require_retrieval_ready()
 
     now = datetime.utcnow()
     for jid, job in list(_search_jobs.items()):
@@ -6037,6 +6093,7 @@ async def generate_document(req: DocumentRequest, request: Request):
     """
     user = await get_current_user(request)
     _check_permission(user, "draft:document")
+    _require_retrieval_ready()
 
     now = datetime.utcnow()
     for jid, job in list(_search_jobs.items()):
