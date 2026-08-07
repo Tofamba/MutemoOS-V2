@@ -33,6 +33,10 @@ from datetime import datetime, timedelta, date
 from enum import Enum
 from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent
 from backend.client_migration import match_client_name
+from backend.numbering import (
+    generate_initials, disambiguate_initials, next_sequence,
+    format_client_number, format_matter_number,
+)
 from backend.deadline_engine import try_compute_deadline
 from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
 from backend.authority_ranker import rerank
@@ -126,6 +130,22 @@ async def run_migrations():
             UNIQUE (firm_id, phone)
         );
         ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+        -- Prefix used in client_number/matter_number (backend/numbering.py),
+        -- e.g. "NGM" for Nyaradzo Gilbertina Maphosa. Nullable — assigned
+        -- lazily (auto-generated from display_name, with disambiguation on
+        -- collision) the first time a user without one creates a client.
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS initials TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firm_initials
+            ON users(firm_id, initials) WHERE initials IS NOT NULL;
+        -- Fixed prefixes for the 5 partners, confirmed 2026-08-07 — set once,
+        -- only if not already set, so this is safe to leave running on every
+        -- startup. Anyone else (existing or new) gets initials auto-generated
+        -- from their name on first use instead.
+        UPDATE users SET initials='NGM' WHERE firm_id=(SELECT id FROM firms LIMIT 1) AND initials IS NULL AND lower(display_name)=lower('Nyaradzo Gilbertina Maphosa');
+        UPDATE users SET initials='OM'  WHERE firm_id=(SELECT id FROM firms LIMIT 1) AND initials IS NULL AND lower(display_name)=lower('Ostern Mutero');
+        UPDATE users SET initials='JRT' WHERE firm_id=(SELECT id FROM firms LIMIT 1) AND initials IS NULL AND lower(display_name)=lower('Jingini R. Tsivama');
+        UPDATE users SET initials='HPM' WHERE firm_id=(SELECT id FROM firms LIMIT 1) AND initials IS NULL AND lower(display_name)=lower('Honour P Mkushi');
+        UPDATE users SET initials='FS'  WHERE firm_id=(SELECT id FROM firms LIMIT 1) AND initials IS NULL AND lower(display_name)=lower('Farai Siyakurima');
 
         CREATE TABLE IF NOT EXISTS sessions (
             token       TEXT PRIMARY KEY,
@@ -191,6 +211,14 @@ async def run_migrations():
         -- Left blank for individual clients (the client themselves is the
         -- contact).
         ALTER TABLE clients ADD COLUMN IF NOT EXISTS contact_person TEXT;
+        -- Automatic numbering (backend/numbering.py): "{lawyer initials}-{seq:03d}",
+        -- e.g. NGM-007. Assigned once at client creation from the creating/
+        -- uploading lawyer's initials — immutable afterward. NULL for
+        -- clients created before this feature, until backfilled (see
+        -- scripts/backfill_client_matter_numbers.py).
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_number TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_firm_number
+            ON clients(firm_id, client_number) WHERE client_number IS NOT NULL;
 
         -- client_id: who the firm has an actual client relationship with.
         -- case_parties: free text for everyone else named in the matter
@@ -200,6 +228,14 @@ async def run_migrations():
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS client_id UUID REFERENCES clients(id);
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS case_parties TEXT;
         CREATE INDEX IF NOT EXISTS idx_matters_client ON matters(client_id);
+        -- Automatic numbering (backend/numbering.py): "{client_number}-{seq:02d}",
+        -- e.g. NGM-007-02 — sequential within that client. Assigned at
+        -- matter creation only when the matter has a client_id whose client
+        -- already has a client_number; NULL otherwise (unlinked matters,
+        -- or a linked client not yet backfilled).
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS matter_number TEXT;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_matters_firm_number
+            ON matters(firm_id, matter_number) WHERE matter_number IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS progress_notes (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2247,6 +2283,46 @@ class DigestSettings(BaseModel):
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
+async def _resolve_user_initials(conn, firm_id, user_id, display_name, persist: bool = True) -> str:
+    """
+    Returns a user's numbering-prefix initials (backend/numbering.py),
+    generating and disambiguating them against the firm's other users if
+    not already set. `user_id` may be None — the synthetic user returned by
+    get_current_user() when AUTH_ENABLED is False has no real users row —
+    in which case this only computes a value, never persists.
+
+    `persist=False` also computes without writing, for preview-only paths
+    (e.g. the bulk-upload endpoint's commit=False mode) that must not touch
+    the DB even for an existing user whose initials aren't set yet.
+    """
+    if user_id is not None:
+        row = await conn.fetchrow("SELECT initials FROM users WHERE id=$1", user_id)
+        if row and row["initials"]:
+            return row["initials"]
+    existing = await conn.fetch(
+        "SELECT initials FROM users WHERE firm_id=$1 AND initials IS NOT NULL", firm_id
+    )
+    initials = disambiguate_initials(generate_initials(display_name), {r["initials"] for r in existing})
+    if persist and user_id is not None:
+        await conn.execute("UPDATE users SET initials=$1 WHERE id=$2", initials, user_id)
+    return initials
+
+async def _next_client_number(conn, firm_id, initials: str) -> str:
+    rows = await conn.fetch(
+        "SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2",
+        firm_id, f"{initials}-%",
+    )
+    seq = next_sequence([r["client_number"] for r in rows], initials)
+    return format_client_number(initials, seq)
+
+async def _next_matter_number(conn, firm_id, client_number: str) -> str:
+    rows = await conn.fetch(
+        "SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2",
+        firm_id, f"{client_number}-%",
+    )
+    seq = next_sequence([r["matter_number"] for r in rows], client_number)
+    return format_matter_number(client_number, seq)
+
 def _row_to_matter(row) -> dict:
     d = dict(row)
     for k in ("id", "firm_id", "created_by", "client_id"):
@@ -2645,6 +2721,7 @@ async def create_matter(matter: MatterCreate, request: Request):
 
     client_id = None
     client_name = matter.client_name
+    matter_number = None
     async with _db_pool.acquire() as conn:
         if matter.client_id:
             try:
@@ -2652,7 +2729,7 @@ async def create_matter(matter: MatterCreate, request: Request):
             except ValueError:
                 raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
             client_row = await conn.fetchrow(
-                "SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2", client_id, FIRM_ID
+                "SELECT full_name, client_number FROM clients WHERE id=$1 AND firm_id=$2", client_id, FIRM_ID
             )
             if not client_row:
                 raise HTTPException(status_code=404, detail="Client not found")
@@ -2660,13 +2737,18 @@ async def create_matter(matter: MatterCreate, request: Request):
             # set — keep it in sync with the actual client record rather than
             # trusting a possibly-stale value passed alongside client_id.
             client_name = client_row["full_name"]
+            # Only clients that already have a client_number (post-numbering,
+            # or backfilled — see scripts/backfill_client_matter_numbers.py)
+            # get their matters numbered; NULL otherwise.
+            if client_row["client_number"]:
+                matter_number = await _next_matter_number(conn, FIRM_ID, client_row["client_number"])
 
         row = await conn.fetchrow("""
             INSERT INTO matters (id, firm_id, name, number, internal_ref, external_ref,
                                  client_name, client_id, case_parties, matter_type, status, custom_status,
                                  last_activity, created_at, created_by,
-                                 next_deadline, next_deadline_note)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                                 next_deadline, next_deadline_note, matter_number)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             RETURNING *
         """,
         mid, FIRM_ID,
@@ -2676,7 +2758,7 @@ async def create_matter(matter: MatterCreate, request: Request):
         matter.status or "Active", matter.custom_status,
         now, now,
         _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
-        parsed_deadline, matter.next_deadline_note
+        parsed_deadline, matter.next_deadline_note, matter_number
         )
     m = _row_to_matter(row)
     m["progress_notes"] = []
@@ -2689,17 +2771,21 @@ async def create_client(client: ClientCreate, request: Request):
     cid = _uuid_mod.uuid4()
     now = datetime.utcnow()
     async with _db_pool.acquire() as conn:
+        initials = await _resolve_user_initials(
+            conn, FIRM_ID, user.get("id"), user.get("display_name") or "Client"
+        )
+        client_number = await _next_client_number(conn, FIRM_ID, initials)
         row = await conn.fetchrow("""
             INSERT INTO clients (id, firm_id, full_name, email, phone,
                                  physical_address, id_or_registration_number, contact_person, notes,
-                                 created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                                 client_number, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             RETURNING *
         """,
         cid, FIRM_ID,
         client.full_name, client.email, client.phone,
         client.physical_address, client.id_or_registration_number, client.contact_person, client.notes,
-        now, now
+        client_number, now, now
         )
     return _row_to_client(row)
 
@@ -3200,6 +3286,12 @@ async def bulk_onboard_from_excel(
     listed in the response's review list, so a human can resolve it
     afterward via the existing Clients tab / matter detail relink UI —
     nothing is silently dropped.
+
+    Newly created clients/matters get client_number/matter_number assigned
+    under the uploading lawyer's initials (backend/numbering.py), same as
+    the single-record /api/clients and /api/matters endpoints. Preview mode
+    computes but never persists the numbers (or the lawyer's initials, if
+    they weren't set yet) shown in the response.
     """
     user = await get_current_user(request)
     _check_permission(user, "admin:users")
@@ -3284,14 +3376,51 @@ async def bulk_onboard_from_excel(
                         lawyer_id, FIRM_ID, lawyer_phone, lawyer_email, lawyer_name, lawyer_role, True, datetime.utcnow(),
                     )
 
+            # Initials for client numbering. Only user_id if commit actually
+            # wrote (or matched) a real users row — a not-yet-created lawyer
+            # in preview mode has no row to read/persist against.
+            # persist=commit: preview must not write anything, including a
+            # matched-existing-lawyer's not-yet-set initials.
+            lawyer_result["initials"] = lawyer_initials = await _resolve_user_initials(
+                conn, FIRM_ID,
+                existing_lawyer["id"] if existing_lawyer else (lawyer_id if commit else None),
+                existing_lawyer["display_name"] if existing_lawyer else lawyer_name,
+                persist=commit,
+            )
+            existing_client_numbers = await conn.fetch(
+                "SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2",
+                FIRM_ID, f"{lawyer_initials}-%",
+            )
+            next_client_seq = next_sequence(
+                [r["client_number"] for r in existing_client_numbers], lawyer_initials
+            )
+            matter_seq_cache = {}  # client_number -> next matter sequence, lazily loaded from DB
+
+            async def _next_matter_seq(client_number):
+                if client_number not in matter_seq_cache:
+                    mrows = await conn.fetch(
+                        "SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2",
+                        FIRM_ID, f"{client_number}-%",
+                    )
+                    matter_seq_cache[client_number] = next_sequence(
+                        [r["matter_number"] for r in mrows], client_number
+                    )
+                seq = matter_seq_cache[client_number]
+                matter_seq_cache[client_number] = seq + 1
+                return seq
+
             # ── Candidate pool for client-name matching: existing DB
             # clients, growing as new clients are resolved within this
             # same upload (so a repeated near-identical name later in the
             # same form matches the one just created, not a fresh one).
+            # client_number rides along for matched candidates so their
+            # matters can be numbered too — match_client_name() only reads
+            # "full_name", so the extra key is harmless.
             existing_client_rows = await conn.fetch(
-                "SELECT id, full_name FROM clients WHERE firm_id=$1", FIRM_ID
+                "SELECT id, full_name, client_number FROM clients WHERE firm_id=$1", FIRM_ID
             )
-            pool = [{"id": str(r["id"]), "full_name": r["full_name"]} for r in existing_client_rows]
+            pool = [{"id": str(r["id"]), "full_name": r["full_name"], "client_number": r["client_number"]}
+                    for r in existing_client_rows]
 
             clients_created, clients_matched, clients_review = [], [], []
             matters_created, matters_unlinked = [], []
@@ -3299,30 +3428,35 @@ async def bulk_onboard_from_excel(
 
             for block in blocks:
                 match = match_client_name(block["name"], pool)
+                client_number_for_block = None
 
                 if match["status"] == "matched":
                     client_id = _uuid_mod.UUID(match["candidate"]["id"])
+                    client_number_for_block = match["candidate"].get("client_number")
                     clients_matched.append({
                         "row": block["row"], "name": block["name"],
                         "matched_client_id": match["candidate"]["id"],
                         "matched_client_name": match["candidate"]["full_name"],
+                        "matched_client_number": client_number_for_block,
                     })
                 elif match["status"] == "no_match":
                     new_id = _uuid_mod.uuid4()
                     client_id = new_id
+                    client_number_for_block = format_client_number(lawyer_initials, next_client_seq)
+                    next_client_seq += 1
                     clients_created.append({
                         "row": block["row"], "name": block["name"], "client_id": str(new_id),
-                        "contact_person": block["contact_person"],
+                        "contact_person": block["contact_person"], "client_number": client_number_for_block,
                     })
                     if commit:
                         await conn.execute(
                             """INSERT INTO clients (id, firm_id, full_name, email, phone, contact_person,
-                                                    created_at, updated_at)
-                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                                                    client_number, created_at, updated_at)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
                             new_id, FIRM_ID, block["name"], block["email"], block["phone"],
-                            block["contact_person"], now, now,
+                            block["contact_person"], client_number_for_block, now, now,
                         )
-                    pool.append({"id": str(new_id), "full_name": block["name"]})
+                    pool.append({"id": str(new_id), "full_name": block["name"], "client_number": client_number_for_block})
                 else:  # ambiguous — never guess; matters below stay unlinked
                     client_id = None
                     clients_review.append({
@@ -3331,15 +3465,20 @@ async def bulk_onboard_from_excel(
 
                 for matter_text in block["matters"]:
                     matter_id = _uuid_mod.uuid4()
+                    matter_number = (
+                        format_matter_number(client_number_for_block, await _next_matter_seq(client_number_for_block))
+                        if client_number_for_block else None
+                    )
                     entry = {"row": block["row"], "client_name": block["name"],
-                             "name": matter_text, "matter_id": str(matter_id)}
+                             "name": matter_text, "matter_id": str(matter_id), "matter_number": matter_number}
                     (matters_created if client_id is not None else matters_unlinked).append(entry)
                     if commit:
                         await conn.execute(
                             """INSERT INTO matters (id, firm_id, name, client_name, client_id, status,
-                                                    created_by, created_at, last_activity)
-                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+                                                    created_by, created_at, last_activity, matter_number)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
                             matter_id, FIRM_ID, matter_text, block["name"], client_id, "Active", lawyer_id, now, now,
+                            matter_number,
                         )
 
     return {
@@ -6876,6 +7015,50 @@ EVENT_TYPE_LABELS = {
 def _escape_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+_CASE_REF_SEPARATOR = " — "
+
+def extract_case_reference(text: Optional[str]) -> Optional[str]:
+    """
+    Pulls a leading court/case reference out of matter free text, following
+    the onboarding template's "Reference/Case No. — description" convention
+    (see bulk_onboard_from_excel above). There's no dedicated case-number
+    column on matters — number/internal_ref/external_ref are all generic
+    free-text refs used for other things — so this parses it out of the
+    text instead of adding one.
+
+    Requires a digit in the candidate: not every matter's text actually
+    follows the convention (some pre-date it, or use the leading segment as
+    a party/description label instead of a reference), so a purely
+    alphabetic leading segment is treated as "no reference found" rather
+    than displayed as if it were one.
+    """
+    if not text or _CASE_REF_SEPARATOR not in text:
+        return None
+    head = text.split(_CASE_REF_SEPARATOR, 1)[0].strip()
+    if not head or not any(ch.isdigit() for ch in head):
+        return None
+    return head
+
+def _matter_identity_prefix(e: dict) -> str:
+    """
+    Builds the "{matter_number} ({case_number}) — {client_name}" lead-in for
+    a reminder line, e.g. "NGM-007-02 (HC 300/26) — Huang Li Qiang". Any
+    piece that isn't available is omitted gracefully (never a literal
+    "None" or a dangling separator) — returns "" if nothing is available at
+    all, letting the caller fall back to the event's own display text.
+    """
+    parts = []
+    if e.get("matter_number"):
+        bit = e["matter_number"]
+        if e.get("case_number"):
+            bit += f" ({e['case_number']})"
+        parts.append(bit)
+    elif e.get("case_number"):
+        parts.append(f"({e['case_number']})")
+    if e.get("resolved_client_name"):
+        parts.append(e["resolved_client_name"])
+    return " — ".join(parts)
+
 def build_reminder_email_body(events: list) -> tuple:
     """Returns (plain_text_body, html_body). Events must have a 'days_until' field."""
     if not events:
@@ -6890,10 +7073,15 @@ def build_reminder_email_body(events: list) -> tuple:
 
     def fmt_text(e):
         bits = [EVENT_TYPE_LABELS.get(e.get("event_type"), "Event") + ":", e.get("title", "")]
-        if e.get("time"):        bits.append(f"at {e['time']}")
-        if e.get("court"):       bits.append(f"\u2014 {e['court']}")
-        if e.get("matter_name"): bits.append(f"({e['matter_name']})")
-        return " ".join(bits)
+        if e.get("time"):  bits.append(f"at {e['time']}")
+        if e.get("court"): bits.append(f"\u2014 {e['court']}")
+        body = " ".join(bits)
+        prefix = _matter_identity_prefix(e)
+        if prefix:
+            return f"{prefix}: {body}"
+        if e.get("matter_name"):  # no linked matter/client \u2014 old trailing display, unchanged
+            return f"{body} ({e['matter_name']})"
+        return body
 
     text_lines = ["Good morning. Here is your Mutemo Desk reminder summary:\n"]
     if today_items:
@@ -6919,14 +7107,20 @@ def build_reminder_email_body(events: list) -> tuple:
     def fmt_html(e):
         type_chip = EVENT_TYPE_LABELS.get(e.get("event_type"), "Event")
         meta = []
-        if e.get("time"):        meta.append(e["time"])
-        if e.get("court"):       meta.append(_escape_html(e["court"]))
-        if e.get("matter_name"): meta.append(_escape_html(e["matter_name"]))
+        if e.get("time"):  meta.append(e["time"])
+        if e.get("court"): meta.append(_escape_html(e["court"]))
+        prefix = _matter_identity_prefix(e)
+        if prefix:
+            title_html = f'{_escape_html(prefix)}: {_escape_html(e.get("title",""))}'
+        else:
+            if e.get("matter_name"):  # no linked matter/client \u2014 old meta-line display, unchanged
+                meta.append(_escape_html(e["matter_name"]))
+            title_html = _escape_html(e.get("title", ""))
         meta_str = " \u00b7 ".join(meta)
         return (
             f'<div style="padding:8px 0;border-bottom:1px solid #e8e4da">'
             f'<span style="font-size:11px;font-weight:700;color:#b8922a;text-transform:uppercase;letter-spacing:0.5px">{type_chip}</span><br/>'
-            f'<strong>{_escape_html(e.get("title",""))}</strong><br/>'
+            f'<strong>{title_html}</strong><br/>'
             f'<span style="font-size:13px;color:#6b6b64">{meta_str}</span>'
             f'</div>'
         )
@@ -7563,15 +7757,30 @@ async def _maybe_send_reminder():
     if settings.get("last_run_date") == today:
         return
 
-    # Collect upcoming events (next 30 days, including today)
+    # Collect upcoming events (next 30 days, including today). LEFT JOINs to
+    # matters/clients (via calendar_events.matter_id, when a calendar event
+    # is actually linked to one) resolve matter_number/case_number/client
+    # name for the new reminder-line format — a plain event with no linked
+    # matter (e.g. a staff meeting) simply gets NULLs here and falls back to
+    # its own free-text matter_name in build_reminder_email_body, unchanged.
     async with _db_pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT * FROM calendar_events
-            WHERE firm_id=$1 AND date >= $2 AND date <= $3
-            ORDER BY date ASC, time ASC NULLS LAST
+            SELECT ce.*, m.matter_number AS _joined_matter_number, m.name AS _joined_matter_full_name,
+                   m.client_name AS _joined_matter_client_name, c.full_name AS _joined_client_full_name
+            FROM calendar_events ce
+            LEFT JOIN matters m ON m.id = ce.matter_id
+            LEFT JOIN clients c ON c.id = m.client_id
+            WHERE ce.firm_id=$1 AND ce.date >= $2 AND ce.date <= $3
+            ORDER BY ce.date ASC, ce.time ASC NULLS LAST
         """, FIRM_ID, today, today + timedelta(days=30))
 
-    events = [_row_to_event(r) for r in rows]
+    events = []
+    for r in rows:
+        e = _row_to_event(r)
+        e["matter_number"] = r["_joined_matter_number"]
+        e["case_number"] = extract_case_reference(r["_joined_matter_full_name"])
+        e["resolved_client_name"] = r["_joined_client_full_name"] or r["_joined_matter_client_name"]
+        events.append(e)
 
     # Matter-level critical deadlines, converted into the same event shape
     # so they reuse the existing rendering logic in build_reminder_email_body
@@ -7581,10 +7790,13 @@ async def _maybe_send_reminder():
     # lived on the matter list without also surfacing here.
     async with _db_pool.acquire() as conn:
         deadline_rows = await conn.fetch("""
-            SELECT id, name, next_deadline, next_deadline_note FROM matters
-            WHERE firm_id=$1 AND next_deadline >= $2 AND next_deadline <= $3
-              AND status != 'Closed'
-            ORDER BY next_deadline ASC
+            SELECT m.id, m.name, m.next_deadline, m.next_deadline_note, m.matter_number,
+                   m.client_name AS matter_client_name, c.full_name AS client_full_name
+            FROM matters m
+            LEFT JOIN clients c ON c.id = m.client_id
+            WHERE m.firm_id=$1 AND m.next_deadline >= $2 AND m.next_deadline <= $3
+              AND m.status != 'Closed'
+            ORDER BY m.next_deadline ASC
         """, FIRM_ID, today, today + timedelta(days=30))
     for r in deadline_rows:
         events.append({
@@ -7592,6 +7804,9 @@ async def _maybe_send_reminder():
             "title": r["next_deadline_note"] or f"Matter deadline: {r['name']}",
             "date": str(r["next_deadline"]),
             "matter_name": r["name"],
+            "matter_number": r["matter_number"],
+            "case_number": extract_case_reference(r["name"]),
+            "resolved_client_name": r["client_full_name"] or r["matter_client_name"],
             "time": None,
             "court": None,
         })

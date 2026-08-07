@@ -14,6 +14,7 @@ touches `request`).
 
 import asyncio
 import io
+import uuid
 
 import openpyxl
 import pytest
@@ -100,18 +101,35 @@ class FakeConnection:
                 if u["firm_id"] == firm_id and u["phone"] == phone:
                     return dict(u)
             return None
+        if q.startswith("SELECT initials FROM users WHERE id=$1"):
+            for u in self.users:
+                if u["id"] == args[0]:
+                    return {"initials": u.get("initials")}
+            return None
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
     async def fetch(self, query, *args):
         q = " ".join(query.split())
-        if q.startswith("SELECT id, full_name FROM clients WHERE firm_id=$1"):
+        if q.startswith("SELECT id, full_name, client_number FROM clients WHERE firm_id=$1"):
             firm_id, = args
             return [dict(c) for c in self.clients if c["firm_id"] == firm_id]
+        if q.startswith("SELECT initials FROM users WHERE firm_id=$1 AND initials IS NOT NULL"):
+            firm_id, = args
+            return [{"initials": u["initials"]} for u in self.users if u["firm_id"] == firm_id and u.get("initials")]
+        if q.startswith("SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2"):
+            firm_id, pattern = args
+            prefix = pattern[:-1]  # strip trailing '%'
+            return [{"client_number": c["client_number"]} for c in self.clients
+                    if c["firm_id"] == firm_id and (c.get("client_number") or "").startswith(prefix)]
+        if q.startswith("SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2"):
+            firm_id, pattern = args
+            prefix = pattern[:-1]  # strip trailing '%'
+            return [{"matter_number": m["matter_number"]} for m in self.matters
+                    if m["firm_id"] == firm_id and (m.get("matter_number") or "").startswith(prefix)]
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
         q = " ".join(query.split())
-        cols_str = q.split("(", 1)[1].split(")", 1)[0] if "(" in q.split("VALUES")[0] else None
         if q.startswith("INSERT INTO users"):
             cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
             self.users.append(dict(zip(cols, args)))
@@ -121,6 +139,11 @@ class FakeConnection:
         elif q.startswith("INSERT INTO matters"):
             cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
             self.matters.append(dict(zip(cols, args)))
+        elif q.startswith("UPDATE users SET initials=$1 WHERE id=$2"):
+            initials, user_id = args
+            for u in self.users:
+                if u["id"] == user_id:
+                    u["initials"] = initials
         else:
             raise NotImplementedError(f"FakeConnection.execute: unhandled query: {q}")
         return "OK"
@@ -162,16 +185,21 @@ def test_clean_single_client_single_matter(monkeypatch):
     result = asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.xlsx", content), commit=True))
 
     assert result["lawyer"]["action"] == "created"
+    assert result["lawyer"]["initials"] == "TM"  # generated from "Tendai Moyo"
     assert len(result["clients"]["created"]) == 1
     assert result["clients"]["created"][0]["name"] == "Huang Li Qiang"
+    assert result["clients"]["created"][0]["client_number"] == "TM-001"
     assert len(result["matters"]["created"]) == 1
     assert result["matters"]["created"][0]["name"] == "HC 1234/26 — Debt collection"
+    assert result["matters"]["created"][0]["matter_number"] == "TM-001-01"
     assert result["clients"]["review"] == []
 
     assert len(pool.conn.users) == 1
     assert len(pool.conn.clients) == 1
     assert len(pool.conn.matters) == 1
     assert pool.conn.matters[0]["client_id"] == pool.conn.clients[0]["id"]
+    assert pool.conn.clients[0]["client_number"] == "TM-001"
+    assert pool.conn.matters[0]["matter_number"] == "TM-001-01"
 
 
 # ── multi-matter client block ────────────────────────────────────────────
@@ -198,6 +226,11 @@ def test_multi_matter_client_block(monkeypatch):
     assert len(pool.conn.matters) == 3
     assert all(str(row["client_id"]) == client_id for row in pool.conn.matters)
 
+    # Matter numbers are sequential within the one client, in upload order.
+    assert [mm["matter_number"] for mm in result["matters"]["created"]] == [
+        "TM-001-01", "TM-001-02", "TM-001-03",
+    ]
+
 
 # ── existing-user-phone match (no duplicate) ────────────────────────────
 
@@ -206,6 +239,7 @@ def test_existing_user_phone_matches_no_duplicate(monkeypatch):
     existing_users = [{
         "id": "existing-user-id", "firm_id": FIRM_ID, "phone": LAWYER["phone"],
         "display_name": "Tendai T. Moyo", "role": "partner", "email": "t.moyo@sm.co.zw",
+        "initials": "TM",
     }]
     pool = FakePool(users=existing_users)
     monkeypatch.setattr(m, "_db_pool", pool)
@@ -218,8 +252,55 @@ def test_existing_user_phone_matches_no_duplicate(monkeypatch):
     assert result["lawyer"]["action"] == "matched"
     assert result["lawyer"]["user_id"] == "existing-user-id"
     assert result["lawyer"]["display_name"] == "Tendai T. Moyo"  # existing record, not overwritten
+    assert result["lawyer"]["initials"] == "TM"  # existing initials reused, not regenerated
     assert len(pool.conn.users) == 1  # no duplicate created
     assert pool.conn.matters[0]["created_by"] == "existing-user-id"
+    assert result["clients"]["created"][0]["client_number"] == "TM-001"
+
+
+# ── matched existing client continues its own matter sequence ───────────
+
+def test_matched_existing_client_matter_numbering_continues_its_sequence(monkeypatch):
+    import backend.main as m
+    client_id = str(uuid.uuid4())
+    existing_clients = [
+        {"id": client_id, "firm_id": FIRM_ID, "full_name": "Huang Li Qiang", "client_number": "TM-005"},
+    ]
+    existing_matters = [
+        {"id": "mt1", "firm_id": FIRM_ID, "client_id": client_id, "matter_number": "TM-005-01"},
+    ]
+    pool = FakePool(clients=existing_clients, matters=existing_matters)
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_onboarding_xlsx(LAWYER, [{
+        "name": "Huang Li Qiang", "phone": "+263771234567", "email": None,
+        "matters": ["HC 2/26 — Second matter for existing client"],
+    }])
+    result = asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.xlsx", content), commit=True))
+
+    assert result["clients"]["matched"][0]["matched_client_number"] == "TM-005"
+    assert result["matters"]["created"][0]["matter_number"] == "TM-005-02"
+
+
+# ── preview mode computes but never persists numbers ─────────────────────
+
+def test_preview_shows_numbers_without_persisting_or_reserving_them(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_onboarding_xlsx(LAWYER, [{
+        "name": "Huang Li Qiang", "phone": "+263771234567", "email": None, "matters": ["HC 1/26 — Test"],
+    }])
+    result = asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.xlsx", content), commit=False))
+
+    assert result["lawyer"]["initials"] == "TM"
+    assert result["clients"]["created"][0]["client_number"] == "TM-001"
+    assert result["matters"]["created"][0]["matter_number"] == "TM-001-01"
+    # Preview must not write anything, including the lawyer's initials.
+    assert pool.conn.users == []
+    assert pool.conn.clients == []
+    assert pool.conn.matters == []
 
 
 # ── ambiguous client name lands in review, not auto-merged ──────────────
@@ -227,8 +308,8 @@ def test_existing_user_phone_matches_no_duplicate(monkeypatch):
 def test_ambiguous_client_name_lands_in_review_not_auto_merged(monkeypatch):
     import backend.main as m
     existing_clients = [
-        {"id": "c1", "firm_id": FIRM_ID, "full_name": "John Moyo"},
-        {"id": "c2", "firm_id": FIRM_ID, "full_name": "Jon Moyo"},
+        {"id": "c1", "firm_id": FIRM_ID, "full_name": "John Moyo", "client_number": "TM-001"},
+        {"id": "c2", "firm_id": FIRM_ID, "full_name": "Jon Moyo", "client_number": "TM-002"},
     ]
     pool = FakePool(clients=existing_clients)
     monkeypatch.setattr(m, "_db_pool", pool)

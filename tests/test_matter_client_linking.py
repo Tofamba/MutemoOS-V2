@@ -39,7 +39,17 @@ class FakeConnection:
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
 
+        if q.startswith("SELECT full_name, client_number FROM clients WHERE id=$1 AND firm_id=$2"):
+            # create_matter's lookup — includes client_number so it can
+            # number the new matter under that client.
+            for c in self.clients:
+                if c["id"] == args[0] and c["firm_id"] == args[1]:
+                    return {"full_name": c["full_name"], "client_number": c.get("client_number")}
+            return None
+
         if q.startswith("SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2"):
+            # update_matter's lookup — client_number isn't relevant there
+            # (matter_number is only assigned at creation, not on relink).
             for c in self.clients:
                 if c["id"] == args[0] and c["firm_id"] == args[1]:
                     return {"full_name": c["full_name"]}
@@ -85,6 +95,10 @@ class FakeConnection:
         q = " ".join(query.split())
         if q.startswith("SELECT * FROM progress_notes"):
             return []
+        if q.startswith("SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2"):
+            prefix = args[1][:-1]  # strip trailing '%'
+            return [{"matter_number": m["matter_number"]} for m in self.matters
+                    if m["firm_id"] == args[0] and (m.get("matter_number") or "").startswith(prefix)]
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
@@ -114,11 +128,12 @@ class FakePool:
         return _FakeAcquireCtx(self.conn)
 
 
-def _client_row(client_id, full_name, firm_id=FIRM_ID):
+def _client_row(client_id, full_name, firm_id=FIRM_ID, client_number=None):
     return {
         "id": client_id, "firm_id": firm_id, "full_name": full_name, "email": None,
         "phone": None, "physical_address": None, "id_or_registration_number": None,
         "notes": None, "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+        "client_number": client_number,
     }
 
 
@@ -184,6 +199,60 @@ def test_create_matter_legacy_client_name_only_still_works(monkeypatch):
 
     assert result["client_name"] == "Free Text Client"
     assert result.get("client_id") is None
+
+
+def test_create_matter_with_numbered_client_assigns_first_matter_number(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    pool = FakePool(clients=[_client_row(client_id, "John Moyo", client_number="NGM-007")])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Moyo v Dube", client_id=str(client_id))
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result["matter_number"] == "NGM-007-01"
+
+
+def test_create_matter_numbers_sequentially_within_the_same_client(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    existing_matter = {
+        "id": uuid.uuid4(), "firm_id": FIRM_ID, "client_id": client_id, "matter_number": "NGM-007-01",
+    }
+    pool = FakePool(clients=[_client_row(client_id, "John Moyo", client_number="NGM-007")],
+                     matters=[existing_matter])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Moyo Estate Matter", client_id=str(client_id))
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result["matter_number"] == "NGM-007-02"
+
+
+def test_create_matter_without_client_number_leaves_matter_number_blank(monkeypatch):
+    """Linked to a real client, but that client predates numbering (or
+    hasn't been backfilled yet) — matter_number stays NULL rather than
+    guessing a prefix."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    pool = FakePool(clients=[_client_row(client_id, "John Moyo")])  # client_number=None
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Moyo v Dube", client_id=str(client_id))
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result.get("matter_number") is None
+
+
+def test_create_matter_without_client_id_leaves_matter_number_blank(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Estate of X", client_name="Free Text Client")
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result.get("matter_number") is None
 
 
 def test_create_matter_also_stores_case_parties(monkeypatch):

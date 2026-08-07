@@ -2038,7 +2038,10 @@ function renderClientsList(filtered = null) {
       <div class="matter-row" onclick="openClientDetail('${c.id}')">
         <div class="matter-icon">👤</div>
         <div class="matter-expand">
-          <div class="matter-name">${escHtml(c.full_name)}</div>
+          <div class="matter-name">
+            ${c.client_number ? `<span style="color:var(--ink3);font-size:0.75rem;font-weight:600;margin-right:6px">${escHtml(c.client_number)}</span>` : ''}
+            ${escHtml(c.full_name)}
+          </div>
           <div class="matter-meta">
             <span class="chip chip-gray">${count} matter${count !== 1 ? 's' : ''}</span>
             ${c.email ? `<span style="font-size:0.7rem;color:var(--ink3)">${escHtml(c.email)}</span>` : ''}
@@ -2105,7 +2108,10 @@ function renderClientDetailContent(client) {
       <div style="padding:1.1rem 1.25rem">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
           <div>
-            <h2 style="margin:0 0 4px">${escHtml(client.full_name)}</h2>
+            <h2 style="margin:0 0 4px">
+              ${client.client_number ? `<span style="color:var(--ink3);font-size:0.85rem;font-weight:600;margin-right:8px">${escHtml(client.client_number)}</span>` : ''}
+              ${escHtml(client.full_name)}
+            </h2>
             <span class="chip chip-gray">${clientMatters.length} matter${clientMatters.length !== 1 ? 's' : ''}</span>
           </div>
           <button class="btn btn-outline btn-sm" onclick="openClientModal('${client.id}')">✎ Edit</button>
@@ -2152,6 +2158,7 @@ function renderClientDetailContent(client) {
                 ${escHtml(m.name)}
               </div>
               <div class="matter-meta">
+                ${m.matter_number ? `<span class="chip chip-blue" title="Matter number">${escHtml(m.matter_number)}</span>` : ''}
                 <span class="chip ${statusColor}">${escHtml(status)}</span>
                 ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
               </div>
@@ -2440,6 +2447,7 @@ function renderMattersList(filtered = null) {
             ${escHtml(m.name)}
           </div>
           <div class="matter-meta">
+            ${m.matter_number ? `<span class="chip chip-blue" title="Matter number">${escHtml(m.matter_number)}</span>` : ''}
             ${extRef ? `<span class="chip chip-blue" title="External reference">${escHtml(extRef)}</span>` : ''}
             ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
             <span class="chip ${statusColor}">${escHtml(status)}</span>

@@ -35,12 +35,19 @@ from fastapi import HTTPException
 
 
 class FakeConnection:
-    def __init__(self, clients, matters):
+    def __init__(self, clients, matters, users=None):
         self.clients = clients
         self.matters = matters
+        self.users = users if users is not None else []
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
+
+        if q.startswith("SELECT initials FROM users WHERE id=$1"):
+            for u in self.users:
+                if u["id"] == args[0]:
+                    return {"initials": u.get("initials")}
+            return None
 
         if q.startswith("INSERT INTO clients"):
             # Column list read straight out of the query rather than
@@ -90,6 +97,14 @@ class FakeConnection:
             rows.sort(key=lambda m: (m.get("last_activity") is None, m.get("last_activity"), m.get("created_at")), reverse=True)
             return [dict(r) for r in rows]
 
+        if q.startswith("SELECT initials FROM users WHERE firm_id=$1 AND initials IS NOT NULL"):
+            return [{"initials": u["initials"]} for u in self.users if u.get("initials")]
+
+        if q.startswith("SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2"):
+            prefix = args[1][:-1]  # strip trailing '%'
+            return [{"client_number": c["client_number"]} for c in self.clients
+                    if c["firm_id"] == args[0] and (c.get("client_number") or "").startswith(prefix)]
+
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
@@ -108,8 +123,12 @@ class _FakeAcquireCtx:
 
 
 class FakePool:
-    def __init__(self, clients=None, matters=None):
-        self.conn = FakeConnection(clients if clients is not None else [], matters if matters is not None else [])
+    def __init__(self, clients=None, matters=None, users=None):
+        self.conn = FakeConnection(
+            clients if clients is not None else [],
+            matters if matters is not None else [],
+            users if users is not None else [],
+        )
 
     def acquire(self):
         return _FakeAcquireCtx(self.conn)
@@ -144,6 +163,46 @@ def test_create_client_returns_stringified_ids_and_all_fields(monkeypatch):
     assert result["firm_id"] == str(FIRM_ID)
     assert result["created_at"] is not None
     assert len(pool.conn.clients) == 1
+
+
+def test_create_client_assigns_first_client_number_under_creating_users_initials(monkeypatch):
+    """AUTH_ENABLED is False here, so get_current_user() returns the
+    synthetic dev user whose display_name is literally "NGM" — generate_initials
+    passes that through unchanged (see tests/test_numbering.py)."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(create_client(ClientCreate(full_name="John Moyo"), None))
+
+    assert result["client_number"] == "NGM-001"
+
+
+def test_create_client_numbers_sequentially_for_the_same_prefix(monkeypatch):
+    import backend.main as m
+    existing = [{
+        "id": uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Existing Client", "client_number": "NGM-006",
+    }]
+    pool = FakePool(clients=existing)
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(create_client(ClientCreate(full_name="John Moyo"), None))
+
+    assert result["client_number"] == "NGM-007"
+
+
+def test_create_client_number_prefix_ignores_other_firms_numbers(monkeypatch):
+    import backend.main as m
+    other_firm = uuid.uuid4()
+    existing = [{
+        "id": uuid.uuid4(), "firm_id": other_firm, "full_name": "Other Firm's Client", "client_number": "NGM-099",
+    }]
+    pool = FakePool(clients=existing)
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(create_client(ClientCreate(full_name="John Moyo"), None))
+
+    assert result["client_number"] == "NGM-001"
 
 
 # ── list_clients ─────────────────────────────────────────────────────────
