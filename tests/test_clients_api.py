@@ -43,12 +43,11 @@ class FakeConnection:
         q = " ".join(query.split())
 
         if q.startswith("INSERT INTO clients"):
-            row = {
-                "id": args[0], "firm_id": args[1], "full_name": args[2],
-                "email": args[3], "phone": args[4], "physical_address": args[5],
-                "id_or_registration_number": args[6], "notes": args[7],
-                "created_at": args[8], "updated_at": args[9],
-            }
+            # Column list read straight out of the query rather than
+            # hardcoded — keeps this fake correct automatically as columns
+            # are added to create_client's INSERT (e.g. contact_person).
+            cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
+            row = dict(zip(cols, args))
             self.clients.append(row)
             return dict(row)
 
@@ -267,3 +266,46 @@ def test_update_client_rejects_empty_update(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(update_client(str(uuid.uuid4()), ClientUpdate(), None))
     assert exc_info.value.status_code == 400
+
+
+# ── contact_person (corporate/entity clients only) ──────────────────────────
+
+def test_create_client_with_contact_person_for_a_company(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientCreate(full_name="Vengesai Enterprises", contact_person="Jane Muzenda (Company Secretary)")
+    result = asyncio.run(create_client(req, None))
+
+    assert result["contact_person"] == "Jane Muzenda (Company Secretary)"
+    assert pool.conn.clients[0]["contact_person"] == "Jane Muzenda (Company Secretary)"
+
+
+def test_create_client_without_contact_person_for_an_individual(monkeypatch):
+    """The common case — individuals leave this blank."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientCreate(full_name="John Moyo")
+    result = asyncio.run(create_client(req, None))
+
+    assert result["contact_person"] is None
+
+
+def test_update_client_can_set_contact_person(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client_row = {
+        "id": client_id, "firm_id": FIRM_ID, "full_name": "Vengesai Enterprises", "email": None,
+        "phone": None, "physical_address": None, "id_or_registration_number": None,
+        "contact_person": None, "notes": None,
+        "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+    }
+    pool = FakePool(clients=[client_row])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(update_client(str(client_id), ClientUpdate(contact_person="New Contact"), None))
+
+    assert result["contact_person"] == "New Contact"

@@ -11,6 +11,7 @@ Covers the two cases the migration script's design hinges on:
 
 from backend.client_migration import (
     group_client_names,
+    match_client_name,
     normalize_name,
     split_review_group_by_exact_name,
 )
@@ -196,3 +197,51 @@ def test_split_preserves_first_appearance_order():
     ]
     result = split_review_group_by_exact_name(members)
     assert [r["full_name"] for r in result] == ["Pastor Linda", "Pastor Charlotte"]
+
+
+# ── match_client_name ────────────────────────────────────────────────────
+# Used by the bulk-onboarding endpoint to check a new client name from an
+# uploaded form against existing clients (and clients already resolved
+# earlier in the same upload) before creating a duplicate.
+
+def test_match_client_name_no_candidates_is_no_match():
+    assert match_client_name("Huang Li Qiang", []) == {"status": "no_match"}
+
+
+def test_match_client_name_no_similar_candidate_is_no_match():
+    candidates = [{"id": "c1", "full_name": "Peter Ndlovu"}]
+    assert match_client_name("Vengesai Enterprises", candidates) == {"status": "no_match"}
+
+
+def test_match_client_name_exact_existing_name_matches():
+    candidates = [{"id": "c1", "full_name": "Huang Li Qiang"}]
+    result = match_client_name("Huang Li Qiang", candidates)
+    assert result == {"status": "matched", "candidate": {"id": "c1", "full_name": "Huang Li Qiang"}}
+
+
+def test_match_client_name_near_variant_matches_single_candidate():
+    """Same fuzzy tolerance as the migration script's own grouping."""
+    candidates = [{"id": "c1", "full_name": "Huang Li Qiang"}]
+    result = match_client_name("Mr. Huang Li Qiang", candidates)
+    assert result["status"] == "matched"
+    assert result["candidate"]["id"] == "c1"
+
+
+def test_match_client_name_two_similar_candidates_is_ambiguous_not_guessed():
+    candidates = [
+        {"id": "c1", "full_name": "John Moyo"},
+        {"id": "c2", "full_name": "Jon Moyo"},
+    ]
+    result = match_client_name("J. Moyo", candidates)
+    assert result["status"] == "ambiguous"
+    ids = {c["id"] for c in result["candidates"]}
+    assert ids == {"c1", "c2"}
+
+
+def test_match_client_name_unrelated_candidates_do_not_cause_false_ambiguity():
+    candidates = [
+        {"id": "c1", "full_name": "Peter Ndlovu"},
+        {"id": "c2", "full_name": "Vengesai Enterprises"},
+    ]
+    result = match_client_name("Huang Li Qiang", candidates)
+    assert result == {"status": "no_match"}

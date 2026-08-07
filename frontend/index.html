@@ -705,6 +705,10 @@ select{cursor:pointer}
         </div>
       </div>
       <div class="form-group">
+        <label>Contact Person <span style="font-weight:400;color:var(--ink3)">(companies/entities only)</span></label>
+        <input type="text" id="cm-contact-person" placeholder="e.g. Jane Muzenda (Company Secretary)"/>
+      </div>
+      <div class="form-group">
         <label>Physical Address</label>
         <input type="text" id="cm-address" placeholder="e.g. 12 Baines Avenue, Harare"/>
       </div>
@@ -2039,6 +2043,7 @@ function renderClientsList(filtered = null) {
             <span class="chip chip-gray">${count} matter${count !== 1 ? 's' : ''}</span>
             ${c.email ? `<span style="font-size:0.7rem;color:var(--ink3)">${escHtml(c.email)}</span>` : ''}
             ${c.phone ? `<span style="font-size:0.7rem;color:var(--ink3)">${escHtml(c.phone)}</span>` : ''}
+            ${c.contact_person ? `<span style="font-size:0.7rem;color:var(--ink3)">c/o ${escHtml(c.contact_person)}</span>` : ''}
           </div>
         </div>
         <div class="matter-actions">
@@ -2108,6 +2113,7 @@ function renderClientDetailContent(client) {
         <div style="margin-top:1rem;display:grid;grid-template-columns:1fr 1fr;gap:0.85rem">
           ${_clientDetailField('EMAIL', client.email)}
           ${_clientDetailField('PHONE', client.phone)}
+          ${_clientDetailField('CONTACT PERSON', client.contact_person)}
           <div style="grid-column:1/-1">${_clientDetailField('ADDRESS', client.physical_address)}</div>
           ${_clientDetailField('ID / REGISTRATION NUMBER', client.id_or_registration_number)}
         </div>
@@ -2240,6 +2246,7 @@ function openClientModal(clientId = null) {
   document.getElementById('cm-full-name').value = client?.full_name || '';
   document.getElementById('cm-email').value = client?.email || '';
   document.getElementById('cm-phone').value = client?.phone || '';
+  document.getElementById('cm-contact-person').value = client?.contact_person || '';
   document.getElementById('cm-address').value = client?.physical_address || '';
   document.getElementById('cm-id-number').value = client?.id_or_registration_number || '';
   document.getElementById('cm-notes').value = client?.notes || '';
@@ -2268,6 +2275,7 @@ async function submitClientForm() {
     full_name: fullName,
     email: document.getElementById('cm-email').value.trim() || null,
     phone: document.getElementById('cm-phone').value.trim() || null,
+    contact_person: document.getElementById('cm-contact-person').value.trim() || null,
     physical_address: document.getElementById('cm-address').value.trim() || null,
     id_or_registration_number: document.getElementById('cm-id-number').value.trim() || null,
     notes: document.getElementById('cm-notes').value.trim() || null,

@@ -164,3 +164,44 @@ def split_review_group_by_exact_name(members: list) -> list:
         }
         for key in order
     ]
+
+
+def match_client_name(name: str, candidates: list) -> dict:
+    """
+    Matches a single new client name against a pool of candidate existing
+    clients — e.g. clients already in the DB, plus (for a caller processing
+    several new names in one batch, such as a bulk-onboarding upload)
+    clients already created/matched earlier in that same batch, so a
+    repeated near-identical name within one upload reuses the same client
+    rather than creating a near-duplicate.
+
+    Reuses normalize_name/_similarity — the same fuzzy-matching primitives
+    group_client_names() uses for batch clustering — but for a different
+    shape: one name against a known candidate pool, not clustering an
+    unordered batch of matter client_names against each other.
+
+    candidates: list of {"id": ..., "full_name": ...}
+
+    Returns one of:
+        {"status": "no_match"}
+        {"status": "matched", "candidate": {"id", "full_name"}}
+        {"status": "ambiguous", "candidates": [{"id", "full_name"}, ...]}
+
+    "ambiguous" means 2+ candidates score at or above SIMILARITY_THRESHOLD
+    — genuinely unclear which (if any) is the same person/entity. Callers
+    must not guess; surface it for human review, same as review_groups
+    from group_client_names().
+    """
+    norm = normalize_name(name)
+    scored = []
+    for c in candidates:
+        score = _similarity(norm, normalize_name(c["full_name"]))
+        if score >= SIMILARITY_THRESHOLD:
+            scored.append((score, c))
+    scored.sort(key=lambda x: -x[0])
+
+    if not scored:
+        return {"status": "no_match"}
+    if len(scored) == 1:
+        return {"status": "matched", "candidate": scored[0][1]}
+    return {"status": "ambiguous", "candidates": [c for _, c in scored]}

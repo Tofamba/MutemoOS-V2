@@ -32,6 +32,7 @@ import hmac
 from datetime import datetime, timedelta, date
 from enum import Enum
 from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent
+from backend.client_migration import match_client_name
 from backend.deadline_engine import try_compute_deadline
 from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
 from backend.authority_ranker import rerank
@@ -179,12 +180,17 @@ async def run_migrations():
             phone                       TEXT,
             physical_address            TEXT,
             id_or_registration_number   TEXT,
+            contact_person              TEXT,
             notes                       TEXT,
             created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_clients_firm ON clients(firm_id);
         CREATE INDEX IF NOT EXISTS idx_clients_name_lower ON clients(firm_id, lower(full_name));
+        -- Corporate/entity clients only — who to actually contact there.
+        -- Left blank for individual clients (the client themselves is the
+        -- contact).
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS contact_person TEXT;
 
         -- client_id: who the firm has an actual client relationship with.
         -- case_parties: free text for everyone else named in the matter
@@ -2140,6 +2146,7 @@ class ClientCreate(BaseModel):
     phone: Optional[str] = None
     physical_address: Optional[str] = None
     id_or_registration_number: Optional[str] = None
+    contact_person: Optional[str] = None  # corporate/entity clients only — blank for individuals
     notes: Optional[str] = None
 
 class ClientUpdate(BaseModel):
@@ -2148,6 +2155,7 @@ class ClientUpdate(BaseModel):
     phone: Optional[str] = None
     physical_address: Optional[str] = None
     id_or_registration_number: Optional[str] = None
+    contact_person: Optional[str] = None
     notes: Optional[str] = None
 
 class ProgressNote(BaseModel):
@@ -2683,14 +2691,14 @@ async def create_client(client: ClientCreate, request: Request):
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO clients (id, firm_id, full_name, email, phone,
-                                 physical_address, id_or_registration_number, notes,
+                                 physical_address, id_or_registration_number, contact_person, notes,
                                  created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
             RETURNING *
         """,
         cid, FIRM_ID,
         client.full_name, client.email, client.phone,
-        client.physical_address, client.id_or_registration_number, client.notes,
+        client.physical_address, client.id_or_registration_number, client.contact_person, client.notes,
         now, now
         )
     return _row_to_client(row)
@@ -3141,6 +3149,213 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
             })
 
     return {"created": len(created), "skipped": len(skipped), "matters": created, "skipped_details": skipped}
+
+# ── Lawyer/Client/Matter Onboarding (bulk Excel upload) ─────────────────────
+# Fixed layout, matching Sawyer_Mkushi_Client_Database_Form.xlsx exactly —
+# unlike bulk_import_matters above, this is deliberately NOT a flexible
+# header-alias parser. The form's cell positions are the source of truth:
+#   B3/B4/B5/B6  — lawyer Name / Phone / Email / Role ("Partner"/"Associate")
+#   Row 11       — column headers (not parsed — position-based, see below)
+#   Row 12+      — one row per matter. Column A (+B/C/D) filled only on a
+#                  client's first row, blank on subsequent matter rows for
+#                  that same client. Column D is Contact Person — companies/
+#                  entities only, blank for individuals. Column E is one
+#                  matter's free-text "Reference/Case No. — description",
+#                  stored as-is.
+
+def _cell_str(ws, coord: str) -> str:
+    v = ws[coord].value
+    return str(v).strip() if v is not None else ""
+
+
+@app.post("/api/onboarding/bulk-upload")
+async def bulk_onboard_from_excel(
+    request: Request,
+    file: UploadFile = File(...),
+    commit: bool = Form(False),
+):
+    """
+    Onboards a lawyer plus their existing client base from a filled copy of
+    the firm's Client Database Excel form in one upload.
+
+    Preview-first, matching this project's migrate_clients.py report/--yes
+    convention: commit=False (the default) parses, matches, and returns the
+    exact plan without writing anything. Re-submit the SAME file with
+    commit=True to actually apply it. This uses a request parameter rather
+    than a two-step job-store flow (parse once server-side, commit later)
+    — simpler, and parsing is idempotent given the same file, so there's no
+    need to persist in-progress state between the preview and commit calls.
+    KNOWN LIMITATION: unlike migrate_clients.py (idempotent via a
+    client_id IS NULL filter), this endpoint has no built-in guard against
+    being committed twice with the same file — that would create duplicate
+    matters. Review the preview, then commit once.
+
+    Client name matching reuses match_client_name() (backend/client_migration.py)
+    — the same fuzzy-matching primitives migrate_clients.py's own grouping
+    uses. A name that's ambiguous against existing clients (or against
+    another client already resolved earlier in this same upload) is NEVER
+    auto-merged or guessed: its matters are still created (client_id left
+    NULL, client_name set to the raw uploaded name — the same "legacy"
+    state every pre-Client-entity matter is already in) and the name is
+    listed in the response's review list, so a human can resolve it
+    afterward via the existing Clients tab / matter detail relink UI —
+    nothing is silently dropped.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "admin:users")
+
+    filename = file.filename or "upload.xlsx"
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=422, detail="Only .xlsx files are supported for this form.")
+
+    content = await file.read()
+    import openpyxl, io as _io
+    try:
+        wb = openpyxl.load_workbook(_io.BytesIO(content), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Could not read Excel file: {e}")
+    ws = wb.active
+
+    # ── Header block: lawyer info ────────────────────────────────────────
+    lawyer_name = _cell_str(ws, "B3")
+    lawyer_phone = _cell_str(ws, "B4")
+    lawyer_email = _cell_str(ws, "B5") or None
+    lawyer_role_raw = _cell_str(ws, "B6")
+    lawyer_role = {"partner": "partner", "associate": "associate"}.get(lawyer_role_raw.lower())
+
+    header_errors = []
+    if not lawyer_name:
+        header_errors.append("Missing lawyer name (cell B3).")
+    if not lawyer_phone:
+        header_errors.append("Missing lawyer phone number (cell B4).")
+    if not lawyer_role:
+        header_errors.append(f'Lawyer role (cell B6) must be "Partner" or "Associate" — got {lawyer_role_raw!r}.')
+    if header_errors:
+        raise HTTPException(status_code=422, detail="; ".join(header_errors))
+
+    # ── Client/matter rows ────────────────────────────────────────────────
+    # One block per client: {"row", "name", "phone", "email", "contact_person", "matters": [text, ...]}
+    blocks = []
+    row_errors = []
+    current = None
+    for row_idx in range(12, ws.max_row + 1):
+        name = _cell_str(ws, f"A{row_idx}")
+        phone = _cell_str(ws, f"B{row_idx}") or None
+        email = _cell_str(ws, f"C{row_idx}") or None
+        contact_person = _cell_str(ws, f"D{row_idx}") or None
+        matter_text = _cell_str(ws, f"E{row_idx}")
+
+        if name:
+            current = {"row": row_idx, "name": name, "phone": phone, "email": email,
+                       "contact_person": contact_person, "matters": []}
+            blocks.append(current)
+        if matter_text:
+            if current is None:
+                row_errors.append(f"Row {row_idx}: matter text with no client established yet — skipped.")
+                continue
+            current["matters"].append(matter_text)
+
+    if not blocks:
+        raise HTTPException(status_code=422, detail="No client rows found starting at row 12.")
+
+    async with _db_pool.acquire() as conn:
+        async with conn.transaction():
+            # ── Lawyer: match existing by phone, or create ─────────────────
+            existing_lawyer = await conn.fetchrow(
+                "SELECT * FROM users WHERE firm_id=$1 AND phone=$2", FIRM_ID, lawyer_phone
+            )
+            if existing_lawyer:
+                lawyer_id = existing_lawyer["id"]
+                lawyer_result = {
+                    "action": "matched", "user_id": str(lawyer_id),
+                    "display_name": existing_lawyer["display_name"], "phone": lawyer_phone,
+                    "role": existing_lawyer["role"],
+                }
+            else:
+                lawyer_id = _uuid_mod.uuid4()
+                lawyer_result = {
+                    "action": "created" if commit else "would_create", "user_id": str(lawyer_id),
+                    "display_name": lawyer_name, "phone": lawyer_phone, "role": lawyer_role,
+                }
+                if commit:
+                    await conn.execute(
+                        """INSERT INTO users (id, firm_id, phone, email, display_name, role, is_active, created_at)
+                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                        lawyer_id, FIRM_ID, lawyer_phone, lawyer_email, lawyer_name, lawyer_role, True, datetime.utcnow(),
+                    )
+
+            # ── Candidate pool for client-name matching: existing DB
+            # clients, growing as new clients are resolved within this
+            # same upload (so a repeated near-identical name later in the
+            # same form matches the one just created, not a fresh one).
+            existing_client_rows = await conn.fetch(
+                "SELECT id, full_name FROM clients WHERE firm_id=$1", FIRM_ID
+            )
+            pool = [{"id": str(r["id"]), "full_name": r["full_name"]} for r in existing_client_rows]
+
+            clients_created, clients_matched, clients_review = [], [], []
+            matters_created, matters_unlinked = [], []
+            now = datetime.utcnow()
+
+            for block in blocks:
+                match = match_client_name(block["name"], pool)
+
+                if match["status"] == "matched":
+                    client_id = _uuid_mod.UUID(match["candidate"]["id"])
+                    clients_matched.append({
+                        "row": block["row"], "name": block["name"],
+                        "matched_client_id": match["candidate"]["id"],
+                        "matched_client_name": match["candidate"]["full_name"],
+                    })
+                elif match["status"] == "no_match":
+                    new_id = _uuid_mod.uuid4()
+                    client_id = new_id
+                    clients_created.append({
+                        "row": block["row"], "name": block["name"], "client_id": str(new_id),
+                        "contact_person": block["contact_person"],
+                    })
+                    if commit:
+                        await conn.execute(
+                            """INSERT INTO clients (id, firm_id, full_name, email, phone, contact_person,
+                                                    created_at, updated_at)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                            new_id, FIRM_ID, block["name"], block["email"], block["phone"],
+                            block["contact_person"], now, now,
+                        )
+                    pool.append({"id": str(new_id), "full_name": block["name"]})
+                else:  # ambiguous — never guess; matters below stay unlinked
+                    client_id = None
+                    clients_review.append({
+                        "row": block["row"], "name": block["name"], "candidates": match["candidates"],
+                    })
+
+                for matter_text in block["matters"]:
+                    matter_id = _uuid_mod.uuid4()
+                    entry = {"row": block["row"], "client_name": block["name"],
+                             "name": matter_text, "matter_id": str(matter_id)}
+                    (matters_created if client_id is not None else matters_unlinked).append(entry)
+                    if commit:
+                        await conn.execute(
+                            """INSERT INTO matters (id, firm_id, name, client_name, client_id, status,
+                                                    created_by, created_at, last_activity)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+                            matter_id, FIRM_ID, matter_text, block["name"], client_id, "Active", lawyer_id, now, now,
+                        )
+
+    return {
+        "committed": commit,
+        "lawyer": lawyer_result,
+        "clients": {
+            "created": clients_created,
+            "matched": clients_matched,
+            "review": clients_review,
+        },
+        "matters": {
+            "created": matters_created,
+            "created_unlinked_pending_review": matters_unlinked,
+        },
+        "errors": row_errors,
+    }
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 
