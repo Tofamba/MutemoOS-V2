@@ -540,6 +540,23 @@ async def run_migrations():
         );
         CREATE INDEX IF NOT EXISTS idx_audit_logs_firm ON audit_logs(firm_id);
         CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id);
+
+        -- RBZ compliance export audit trail — a dedicated table rather than
+        -- another audit_logs row: report_history needs structured
+        -- client_count/matter_count columns for the history table the
+        -- frontend shows partners, not a generic JSONB blob to parse back
+        -- out every time that's displayed.
+        CREATE TABLE IF NOT EXISTS report_history (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id             UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            report_type         TEXT NOT NULL DEFAULT 'rbz_compliance_export',
+            generated_by        UUID REFERENCES users(id) ON DELETE SET NULL,
+            generated_by_name   TEXT NOT NULL,
+            client_count        INT NOT NULL,
+            matter_count        INT NOT NULL,
+            generated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_report_history_firm ON report_history(firm_id, generated_at DESC);
         """)
 
         # Seed Nyari's firm if not present
@@ -601,6 +618,13 @@ PERMISSIONS = {
     "admin:settings":       {"admin", "partner"},
     "admin:users":          {"admin", "partner"},
     "admin:reindex":        {"admin"},
+    # Reports — "Partner role only, 403 for Associates" in the spec, but
+    # scoped {"admin", "partner"} like every other partner-tier permission
+    # above rather than partner-excluding-admin: there's no existing
+    # partner-only-excluding-admin precedent, and ROLE_WEIGHTS treats admin
+    # as senior to partner, so locking admin out would be inconsistent with
+    # every other permission in this table.
+    "reports:rbz_compliance": {"admin", "partner"},
 }
 
 def _check_permission(user: dict, permission: str):
@@ -1105,13 +1129,13 @@ async def get_current_user(request: Request) -> Optional[dict]:
     """Return the current user dict, or None if not authenticated."""
     if not AUTH_ENABLED:
         # Return a synthetic partner user when auth is disabled (dev/demo mode)
-        return {"id": None, "firm_id": FIRM_ID, "phone": None, "role": "partner", "display_name": "NGM"}
+        return {"id": None, "firm_id": FIRM_ID, "phone": None, "email": None, "role": "partner", "display_name": "NGM"}
     token = request.cookies.get("mutemo_session")
     if not token or not _db_pool:
         return None
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT u.id, u.firm_id, u.phone, u.role, u.display_name
+            SELECT u.id, u.firm_id, u.phone, u.email, u.role, u.display_name
             FROM sessions s JOIN users u ON s.user_id = u.id
             WHERE s.token=$1 AND s.expires_at > NOW()
         """, token)
@@ -2244,6 +2268,9 @@ class Attendee(BaseModel):
 class CalendarInviteRequest(BaseModel):
     attendees: List[Attendee]
     invite_message: Optional[str] = None
+
+class CalendarInviteResponseRequest(BaseModel):
+    status: str  # "accepted" or "declined"
 
 class CalendarEventUpdate(BaseModel):
     title: Optional[str] = None
@@ -3495,6 +3522,85 @@ async def bulk_onboard_from_excel(
         },
         "errors": row_errors,
     }
+
+# ── Reports (RBZ compliance export) ─────────────────────────────────────────
+# Partner-tier only (see PERMISSIONS["reports:rbz_compliance"]). Firm-wide —
+# deliberately ignores the panel_lawyer scoping list_matters applies, since
+# a compliance export exists precisely to show everything, not one lawyer's
+# subset. Every generation is logged to report_history (who/when/counts),
+# including a zero-client run, so the firm can show a habit of regular
+# generation rather than a one-off produced right before an inspection.
+
+@app.get("/api/reports/rbz-compliance-export")
+async def export_rbz_compliance_report(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "reports:rbz_compliance")
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT c.id AS client_id, c.client_number, c.full_name AS client_name, c.contact_person,
+                   c.phone, c.email,
+                   m.matter_number, m.status AS matter_status
+            FROM clients c
+            LEFT JOIN matters m ON m.client_id = c.id
+            WHERE c.firm_id=$1
+            ORDER BY c.full_name ASC, m.created_at ASC
+        """, FIRM_ID)
+
+        client_count = len({r["client_id"] for r in rows})
+        # matter_status (not matter_number) signals a real joined matter row
+        # vs. the LEFT JOIN's all-NULL placeholder for a client with no
+        # matters — matter_number can legitimately be NULL on a real,
+        # not-yet-backfilled matter, so it isn't a safe "row exists" check.
+        matter_count = len([r for r in rows if r["matter_status"] is not None])
+
+        await conn.execute("""
+            INSERT INTO report_history (firm_id, report_type, generated_by, generated_by_name,
+                                        client_count, matter_count)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        FIRM_ID, "rbz_compliance_export",
+        _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+        user.get("display_name") or "Unknown", client_count, matter_count)
+
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Client Number", "Client Name", "Contact Person", "Phone", "Email",
+                      "Matter Number", "Matter Status"])
+    for r in rows:
+        writer.writerow([
+            r["client_number"] or "", r["client_name"] or "", r["contact_person"] or "",
+            r["phone"] or "", r["email"] or "",
+            r["matter_number"] or "", r["matter_status"] or "",
+        ])
+
+    filename = f"rbz_compliance_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+@app.get("/api/reports/history")
+async def list_report_history(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "reports:rbz_compliance")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM report_history WHERE firm_id=$1 ORDER BY generated_at DESC LIMIT 100",
+            FIRM_ID
+        )
+    result = []
+    for r in rows:
+        d = dict(r)
+        for k in ("id", "firm_id", "generated_by"):
+            if d.get(k):
+                d[k] = str(d[k])
+        if d.get("generated_at"):
+            d["generated_at"] = d["generated_at"].isoformat()
+        result.append(d)
+    return result
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 
@@ -6565,17 +6671,144 @@ async def export_document_docx(req: ExportDocumentDocxRequest, request: Request)
     )
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
+#
+# Visibility rule: a calendar event is visible only to its creator and to
+# invited attendees who have accepted — not to the firm at large, and not
+# to a role (e.g. partner) just by virtue of that role. See list_calendar
+# and export_calendar_ics below, and _calendar_visibility_clause().
+#
+# attendees is a JSONB array of {email, name, user_id, status}. user_id is
+# only stamped when the invited email matches an existing firm user's
+# account email (_resolve_attendee_users) — an attendee who isn't a firm
+# user (opposing counsel, a client, etc.) stays user_id=None/status=None
+# and is purely an ICS-invite recipient, same as before this feature.
+# status starts "pending" and only ever changes via
+# POST /api/calendar/{id}/respond — there's no other way for it to become
+# "accepted": the ICS Accept/Decline buttons an attendee's own mail client
+# renders are cosmetic RSVP headers that go back to their mail server, not
+# to this app.
+
+async def _resolve_attendee_users(conn, firm_id, attendees: list) -> list:
+    """
+    Stamps user_id + status='pending' onto each attendee dict whose email
+    matches an existing firm user's account email (case-insensitive).
+    Non-matching attendees (external parties) are returned unchanged aside
+    from explicit user_id=None/status=None keys, so every attendee has a
+    consistent shape regardless of match.
+    """
+    if not attendees:
+        return []
+    emails = [a["email"].lower() for a in attendees if a.get("email")]
+    rows = await conn.fetch(
+        "SELECT id, email FROM users WHERE firm_id=$1 AND lower(email) = ANY($2::text[])",
+        firm_id, emails,
+    )
+    by_email = {r["email"].lower(): str(r["id"]) for r in rows if r["email"]}
+    resolved = []
+    for a in attendees:
+        matched_id = by_email.get((a.get("email") or "").lower())
+        resolved.append({
+            "email": a.get("email"), "name": a.get("name"),
+            "user_id": matched_id, "status": "pending" if matched_id else None,
+        })
+    return resolved
+
+def _calendar_visibility_clause(user: dict) -> tuple:
+    """
+    Returns (sql_fragment, params) implementing the visibility rule above:
+    created_by = you, OR an attendee entry with your user_id and
+    status='accepted'. A user with no real id (the synthetic
+    AUTH_ENABLED=False dev user — see get_current_user) has no identity to
+    scope by, so it falls back to the firm-wide view, matching how that
+    synthetic user is already treated as a stand-in admin elsewhere.
+    """
+    user_id = user.get("id") if user else None
+    if not user_id:
+        return "firm_id=$1", [FIRM_ID]
+    return (
+        "firm_id=$1 AND (created_by=$2 OR EXISTS ("
+        "SELECT 1 FROM jsonb_array_elements(attendees) att "
+        "WHERE att->>'user_id' = $2::text AND att->>'status' = 'accepted'"
+        "))",
+        [FIRM_ID, _uuid_mod.UUID(str(user_id))],
+    )
 
 @app.get("/api/calendar")
 async def list_calendar(request: Request):
     user = await get_current_user(request)
     _check_permission(user, "calendar:read")
+    where, params = _calendar_visibility_clause(user)
     async with _db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM calendar_events WHERE firm_id=$1 ORDER BY date ASC, time ASC NULLS LAST",
-            FIRM_ID
+            f"SELECT * FROM calendar_events WHERE {where} ORDER BY date ASC, time ASC NULLS LAST",
+            *params
         )
     return [_row_to_event(r) for r in rows]
+
+@app.get("/api/calendar/pending-invites")
+async def list_pending_calendar_invites(request: Request):
+    """Events the current user is invited to but hasn't responded to yet —
+    intentionally excluded from list_calendar above (not a confirmed event
+    on your calendar until you accept), but still need to be discoverable
+    somewhere so an invite isn't just silently unreachable."""
+    user = await get_current_user(request)
+    _check_permission(user, "calendar:read")
+    user_id = user.get("id") if user else None
+    if not user_id:
+        return []
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM calendar_events
+            WHERE firm_id=$1 AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements(attendees) att
+                WHERE att->>'user_id' = $2::text AND att->>'status' = 'pending'
+            )
+            ORDER BY date ASC, time ASC NULLS LAST
+            """,
+            FIRM_ID, str(user_id),
+        )
+    return [_row_to_event(r) for r in rows]
+
+@app.post("/api/calendar/{event_id}/respond")
+async def respond_to_calendar_invite(event_id: str, resp: CalendarInviteResponseRequest, request: Request):
+    """Accept or decline your own invite on an event — the only thing that
+    can ever move an attendee's status off 'pending' (see module note
+    above). Matches by the current user's own account email against the
+    event's attendee entries, so it also self-heals an attendee entry that
+    predates this feature (no user_id stamped yet)."""
+    user = await get_current_user(request)
+    _check_permission(user, "calendar:read")
+    if resp.status not in ("accepted", "declined"):
+        raise HTTPException(status_code=422, detail="status must be 'accepted' or 'declined'")
+    user_email = (user.get("email") or "").lower() if user else ""
+    if not user_email:
+        raise HTTPException(status_code=400, detail="Your account has no email on file to match against invites.")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM calendar_events WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(event_id), FIRM_ID
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        event = _row_to_event(row)
+        attendees = event.get("attendees") or []
+        matched = False
+        for a in attendees:
+            if (a.get("email") or "").lower() == user_email:
+                a["status"] = resp.status
+                a["user_id"] = str(user["id"])
+                matched = True
+        if not matched:
+            raise HTTPException(status_code=403, detail="You are not an attendee on this event.")
+
+        updated_row = await conn.fetchrow(
+            "UPDATE calendar_events SET attendees=$1::jsonb WHERE id=$2 RETURNING *",
+            json.dumps(attendees), _uuid_mod.UUID(event_id)
+        )
+    return _row_to_event(updated_row)
 
 @app.post("/api/calendar")
 async def add_calendar_event(event: CalendarEvent, background_tasks: BackgroundTasks, request: Request):
@@ -6603,6 +6836,7 @@ async def add_calendar_event(event: CalendarEvent, background_tasks: BackgroundT
     attendees_list = [a.dict() for a in event.attendees] if event.attendees else []
 
     async with _db_pool.acquire() as conn:
+        attendees_list = await _resolve_attendee_users(conn, FIRM_ID, attendees_list)
         row = await conn.fetchrow("""
             INSERT INTO calendar_events (firm_id, matter_id, title, date, time, event_type, court, matter_name, notes, attendees, created_by)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11) RETURNING *
@@ -6646,6 +6880,7 @@ async def invite_to_calendar_event(event_id: str, req: CalendarInviteRequest, ba
         new_attendees = [a.dict() for a in req.attendees if a.email.lower() not in existing_emails]
         if not new_attendees:
             return {"added": [], "message": "All provided attendees are already on this event"}
+        new_attendees = await _resolve_attendee_users(conn, FIRM_ID, new_attendees)
 
         merged_attendees = existing_attendees + new_attendees
         updated_row = await conn.fetchrow(
@@ -6775,10 +7010,11 @@ async def delete_calendar_event(event_id: str, background_tasks: BackgroundTasks
 async def export_calendar_ics(request: Request):
     user = await get_current_user(request)
     _check_permission(user, "calendar:read")
+    where, params = _calendar_visibility_clause(user)
     async with _db_pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM calendar_events WHERE firm_id=$1 ORDER BY date ASC",
-            FIRM_ID
+            f"SELECT * FROM calendar_events WHERE {where} ORDER BY date ASC",
+            *params
         )
     events = [_row_to_event(r) for r in rows]
     lines = [

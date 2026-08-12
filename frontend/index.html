@@ -340,6 +340,7 @@ select{cursor:pointer}
   <button class="nav-btn" id="nav-legalupdates" onclick="showTab('legalupdates')">⚖ Legal Updates</button>
   <button class="nav-btn" id="nav-zlr" onclick="showTab('zlr')">📚 Case Law Index</button>
   <button class="nav-btn" id="nav-users" onclick="showTab('users')" data-role-hide="secretary,associate">👥 Users</button>
+  <button class="nav-btn" id="nav-reports" onclick="showTab('reports')" data-role-hide="secretary,associate">📊 Reports</button>
 </nav>
 
 <main class="main">
@@ -918,6 +919,15 @@ select{cursor:pointer}
     </div>
 
     <div>
+      <div id="cal-pending-invites-section" style="display:none">
+        <div class="section-head">
+          <h2>Invites Awaiting Your Response</h2>
+          <p>Not on your calendar until you accept.</p>
+        </div>
+        <div id="cal-pending-invites"></div>
+        <hr class="divider"/>
+      </div>
+
       <div class="section-head">
         <h2>Upcoming Events</h2>
         <p>Sorted by date. Court hearings are highlighted.</p>
@@ -1543,6 +1553,28 @@ select{cursor:pointer}
           <div id="invites-list" style="font-size:0.85rem;color:var(--ink3)">Loading…</div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div id="tab-reports" style="display:none">
+    <div class="section-head">
+      <h2>📊 Reports</h2>
+      <p>RBZ compliance export of all clients and matters. Partner access only.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">⬇ RBZ Compliance Export</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Downloads a CSV of every client (client number, name, contact person, phone/email) and their matters (matter number, status), firm-wide.
+      </p>
+      <div id="reports-export-status" style="margin-top:0.5rem;font-size:0.85rem"></div>
+      <button class="btn btn-primary" onclick="generateComplianceExport()" style="margin-top:0.5rem">⬇ Generate Export</button>
+    </div>
+
+    <div class="card" style="margin-top:1rem">
+      <div class="card-title">🕘 Report History</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Every export generated, so the firm can show a record of regular reporting.</p>
+      <div id="report-history-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
     </div>
   </div>
 
@@ -2315,7 +2347,7 @@ async function submitClientForm() {
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users'].forEach(t => {
+  ['vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
@@ -2325,6 +2357,7 @@ function showTab(tab) {
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
+  if (tab === 'reports') loadReportHistory();
 }
 
 // ── Matters ───────────────────────────────────────────────────────────────────
@@ -3524,6 +3557,54 @@ async function renderCalendar() {
 
   renderEventList('cal-upcoming', upcoming, true);
   renderEventList('cal-all', all, false);
+  await renderPendingInvites();
+}
+
+async function renderPendingInvites() {
+  const section = document.getElementById('cal-pending-invites-section');
+  let invites = [];
+  try {
+    const res = await fetch(`${API}/api/calendar/pending-invites`);
+    if (res.ok) invites = await res.json();
+  } catch(e) { invites = []; }
+
+  if (!invites.length) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = 'block';
+
+  document.getElementById('cal-pending-invites').innerHTML = invites.map(e => {
+    const d = new Date(e.date + 'T12:00:00');
+    const dateLabel = d.toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
+    return `<div class="cal-event event-type-${e.event_type}">
+      <div class="cal-details">
+        <div class="cal-title">${escHtml(e.title)}</div>
+        <div class="cal-meta">
+          ${dateLabel}${e.time ? ` · <strong>${e.time}</strong>` : ''}
+          ${e.court ? ` · ${escHtml(e.court)}` : ''}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0">
+        <button class="btn btn-sm btn-primary" onclick="respondToCalendarInvite('${e.id}', 'accepted')">✓ Accept</button>
+        <button class="btn btn-sm btn-outline" onclick="respondToCalendarInvite('${e.id}', 'declined')">✕ Decline</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function respondToCalendarInvite(eventId, status) {
+  try {
+    const res = await fetch(`${API}/api/calendar/${eventId}/respond`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status})
+    });
+    if (!res.ok) throw new Error('Failed to respond to invite');
+    await renderCalendar();
+  } catch(e) {
+    showCalStatus(`Error: ${e.message}`, 'error');
+  }
 }
 
 function renderEventList(elId, events, showEmpty) {
@@ -5379,6 +5460,73 @@ async function cancelInvite(inviteId) {
     await fetch(`${API}/api/admin/invites/${inviteId}`, {method: 'DELETE'});
     loadInvites();
   } catch(e) { showInviteStatus('Could not cancel invite.', 'error'); }
+}
+
+// ── Reports (RBZ compliance export) ─────────────────────────────────────────
+
+async function generateComplianceExport() {
+  const statusEl = document.getElementById('reports-export-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/rbz-compliance-export`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'rbz_compliance_export.csv';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ Export downloaded.';
+    statusEl.style.color = 'var(--green)';
+    loadReportHistory();
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+async function loadReportHistory() {
+  const el = document.getElementById('report-history-list');
+  try {
+    const res = await fetch(`${API}/api/reports/history`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load report history.</em>'; return; }
+    const history = await res.json();
+    if (!history.length) { el.innerHTML = '<em>No reports generated yet.</em>'; return; }
+    el.innerHTML = `
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
+            <th style="padding:6px 8px 6px 0">Generated</th>
+            <th style="padding:6px 8px">By</th>
+            <th style="padding:6px 8px">Clients</th>
+            <th style="padding:6px 8px">Matters</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${history.map(h => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px 6px 0">${h.generated_at ? h.generated_at.replace('T',' ').slice(0,19) : ''}</td>
+              <td style="padding:6px 8px">${escHtml(h.generated_by_name)}</td>
+              <td style="padding:6px 8px">${h.client_count}</td>
+              <td style="padding:6px 8px">${h.matter_count}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch(e) { el.innerHTML = '<em>Error loading report history.</em>'; }
 }
 
 function showInviteStatus(msg, type) {
