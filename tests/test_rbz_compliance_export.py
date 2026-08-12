@@ -2,6 +2,10 @@
 Unit tests for the RBZ compliance export feature (backend/main.py):
   - GET /api/reports/rbz-compliance-export — CSV of all clients+matters,
     firm-wide, restricted to partner-tier roles (admin/partner).
+  - GET /api/reports/rbz-compliance-export-pdf — the same data/restriction,
+    a second output format rather than a separate feature. Verified via
+    pdfplumber (already a dependency elsewhere in this codebase for OCR/
+    extraction) rather than adding a PDF-parsing test-only dependency.
   - Every generation is logged to report_history (who, when, counts) —
     a genuine audit trail, not just a one-off produced on demand.
   - GET /api/reports/history — the log itself.
@@ -21,10 +25,16 @@ import io
 import uuid
 from datetime import datetime, timezone
 
+import pdfplumber
 import pytest
 from fastapi import HTTPException
 
-from backend.main import FIRM_ID, export_rbz_compliance_report, list_report_history
+from backend.main import (
+    FIRM_ID,
+    export_rbz_compliance_report,
+    export_rbz_compliance_report_pdf,
+    list_report_history,
+)
 
 
 class FakeConnection:
@@ -128,6 +138,11 @@ def _fake_request():
 def _csv_rows(response):
     text = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
     return list(csv.reader(io.StringIO(text)))
+
+
+def _pdf_text(response):
+    with pdfplumber.open(io.BytesIO(response.body)) as pdf:
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
 # ── permission gate ──────────────────────────────────────────────────────
@@ -261,3 +276,100 @@ def test_zero_clients_export_does_not_error(monkeypatch):
     assert len(pool.conn.report_history) == 1
     assert pool.conn.report_history[0]["client_count"] == 0
     assert pool.conn.report_history[0]["matter_count"] == 0
+
+
+# ── PDF format: same permission gate, same data, second output format ────
+
+def test_pdf_associate_gets_403(monkeypatch):
+    import backend.main as m
+    associate = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "email": "a@sm.co.zw",
+                 "role": "associate", "display_name": "Assoc Person"}
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, associate)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(export_rbz_compliance_report_pdf(_fake_request()))
+    assert exc_info.value.status_code == 403
+
+
+def test_pdf_partner_succeeds_with_expected_content(monkeypatch):
+    import backend.main as m
+    huang = _client("Huang Li Qiang", client_number="NGM-001", phone="+263771234567")
+    vengesai = _client("Vengesai Enterprises", client_number="NGM-002",
+                        contact_person="Jane Muzenda", email="info@vengesai.co.zw")
+    matters = [
+        _matter(huang["id"], "NGM-001-01", status="Active"),
+        _matter(huang["id"], "NGM-001-02", status="Closed"),
+    ]
+    pool = FakePool(clients=[huang, vengesai], matters=matters)
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    response = asyncio.run(export_rbz_compliance_report_pdf(_fake_request()))
+
+    assert response.media_type == "application/pdf"
+    assert "attachment" in response.headers["Content-Disposition"]
+    assert response.headers["Content-Disposition"].endswith('.pdf"')
+
+    text = _pdf_text(response)
+    assert "Sawyer & Mkushi" in text  # firm name header
+    assert "RBZ Compliance Export" in text
+    assert "NGM-001" in text and "Huang Li Qiang" in text
+    assert "NGM-001-01" in text and "Active" in text
+    assert "NGM-001-02" in text and "Closed" in text
+    assert "NGM-002" in text and "Vengesai Enterprises" in text
+    assert "Jane Muzenda" in text
+
+
+def test_pdf_report_history_records_correct_user_and_counts_and_format(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "email": "p@sm.co.zw",
+               "role": "partner", "display_name": "Ostern Mutero"}
+    huang = _client("Huang Li Qiang", client_number="NGM-001")
+    matters = [_matter(huang["id"], "NGM-001-01"), _matter(huang["id"], "NGM-001-02")]
+    pool = FakePool(clients=[huang], matters=matters)
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    asyncio.run(export_rbz_compliance_report_pdf(_fake_request()))
+
+    assert len(pool.conn.report_history) == 1
+    entry = pool.conn.report_history[0]
+    assert entry["generated_by_name"] == "Ostern Mutero"
+    assert entry["client_count"] == 1
+    assert entry["matter_count"] == 2
+    assert entry["report_type"] == "rbz_compliance_export_pdf"  # distinct from the CSV's report_type
+
+    history = asyncio.run(list_report_history(_fake_request()))
+    assert history[0]["report_type"] == "rbz_compliance_export_pdf"
+
+
+def test_pdf_zero_clients_export_does_not_error(monkeypatch):
+    import backend.main as m
+    pool = FakePool()  # no clients, no matters
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    response = asyncio.run(export_rbz_compliance_report_pdf(_fake_request()))
+
+    text = _pdf_text(response)
+    assert "No clients on file." in text
+
+    assert len(pool.conn.report_history) == 1
+    assert pool.conn.report_history[0]["client_count"] == 0
+    assert pool.conn.report_history[0]["matter_count"] == 0
+
+
+def test_pdf_handles_em_dashes_and_non_ascii_without_crashing(monkeypatch):
+    """Matter free text commonly contains em-dashes (the onboarding
+    template's own convention is "Reference — description") — fpdf2's core
+    font is latin-1 only, so this must not crash on that or on other
+    non-ASCII text (e.g. an accented client name)."""
+    import backend.main as m
+    client = _client("Müller Trading — Zimbabwe", client_number="NGM-001")
+    matters = [_matter(client["id"], "NGM-001-01", status="Active — under review")]
+    pool = FakePool(clients=[client], matters=matters)
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    response = asyncio.run(export_rbz_compliance_report_pdf(_fake_request()))
+    text = _pdf_text(response)
+    assert "NGM-001" in text  # didn't crash; something rendered

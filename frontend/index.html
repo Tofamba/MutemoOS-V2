@@ -1565,10 +1565,13 @@ select{cursor:pointer}
     <div class="card">
       <div class="card-title">⬇ RBZ Compliance Export</div>
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
-        Downloads a CSV of every client (client number, name, contact person, phone/email) and their matters (matter number, status), firm-wide.
+        Every client (client number, name, contact person, phone/email) and their matters (matter number, status), firm-wide. Available as CSV or PDF — same data either way.
       </p>
       <div id="reports-export-status" style="margin-top:0.5rem;font-size:0.85rem"></div>
-      <button class="btn btn-primary" onclick="generateComplianceExport()" style="margin-top:0.5rem">⬇ Generate Export</button>
+      <div style="display:flex;gap:8px;margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="generateComplianceExport('csv')">⬇ Generate CSV</button>
+        <button class="btn btn-outline" onclick="generateComplianceExport('pdf')">⬇ Generate PDF</button>
+      </div>
     </div>
 
     <div class="card" style="margin-top:1rem">
@@ -5464,12 +5467,13 @@ async function cancelInvite(inviteId) {
 
 // ── Reports (RBZ compliance export) ─────────────────────────────────────────
 
-async function generateComplianceExport() {
+async function generateComplianceExport(format) {
   const statusEl = document.getElementById('reports-export-status');
   statusEl.textContent = 'Generating…';
   statusEl.style.color = '';
   try {
-    const res = await fetch(`${API}/api/reports/rbz-compliance-export`);
+    const endpoint = format === 'pdf' ? 'rbz-compliance-export-pdf' : 'rbz-compliance-export';
+    const res = await fetch(`${API}/api/reports/${endpoint}`);
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.detail || 'Failed to generate export');
@@ -5477,7 +5481,7 @@ async function generateComplianceExport() {
     const blob = await res.blob();
     const disposition = res.headers.get('Content-Disposition') || '';
     const match = disposition.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : 'rbz_compliance_export.csv';
+    const filename = match ? match[1] : `rbz_compliance_export.${format === 'pdf' ? 'pdf' : 'csv'}`;
 
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -5510,6 +5514,7 @@ async function loadReportHistory() {
           <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
             <th style="padding:6px 8px 6px 0">Generated</th>
             <th style="padding:6px 8px">By</th>
+            <th style="padding:6px 8px">Format</th>
             <th style="padding:6px 8px">Clients</th>
             <th style="padding:6px 8px">Matters</th>
           </tr>
@@ -5519,6 +5524,7 @@ async function loadReportHistory() {
             <tr style="border-bottom:1px solid var(--border)">
               <td style="padding:6px 8px 6px 0">${h.generated_at ? h.generated_at.replace('T',' ').slice(0,19) : ''}</td>
               <td style="padding:6px 8px">${escHtml(h.generated_by_name)}</td>
+              <td style="padding:6px 8px">${h.report_type === 'rbz_compliance_export_pdf' ? 'PDF' : 'CSV'}</td>
               <td style="padding:6px 8px">${h.client_count}</td>
               <td style="padding:6px 8px">${h.matter_count}</td>
             </tr>

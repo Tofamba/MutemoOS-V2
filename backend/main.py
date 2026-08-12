@@ -3531,37 +3531,48 @@ async def bulk_onboard_from_excel(
 # including a zero-client run, so the firm can show a habit of regular
 # generation rather than a one-off produced right before an inspection.
 
+async def _fetch_rbz_compliance_rows(conn) -> list:
+    """Firm-wide clients + their linked matters, one row per matter (or one
+    placeholder row for a client with none) — the shared dataset behind
+    both export formats below."""
+    return await conn.fetch("""
+        SELECT c.id AS client_id, c.client_number, c.full_name AS client_name, c.contact_person,
+               c.phone, c.email,
+               m.matter_number, m.status AS matter_status
+        FROM clients c
+        LEFT JOIN matters m ON m.client_id = c.id
+        WHERE c.firm_id=$1
+        ORDER BY c.full_name ASC, m.created_at ASC
+    """, FIRM_ID)
+
+def _rbz_compliance_counts(rows: list) -> tuple:
+    client_count = len({r["client_id"] for r in rows})
+    # matter_status (not matter_number) signals a real joined matter row vs.
+    # the LEFT JOIN's all-NULL placeholder for a client with no matters —
+    # matter_number can legitimately be NULL on a real, not-yet-backfilled
+    # matter, so it isn't a safe "row exists" check.
+    matter_count = len([r for r in rows if r["matter_status"] is not None])
+    return client_count, matter_count
+
+async def _log_rbz_compliance_report(conn, user: dict, report_type: str, client_count: int, matter_count: int) -> None:
+    await conn.execute("""
+        INSERT INTO report_history (firm_id, report_type, generated_by, generated_by_name,
+                                    client_count, matter_count)
+        VALUES ($1, $2, $3, $4, $5, $6)
+    """,
+    FIRM_ID, report_type,
+    _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+    user.get("display_name") or "Unknown", client_count, matter_count)
+
 @app.get("/api/reports/rbz-compliance-export")
 async def export_rbz_compliance_report(request: Request):
     user = await get_current_user(request)
     _check_permission(user, "reports:rbz_compliance")
 
     async with _db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT c.id AS client_id, c.client_number, c.full_name AS client_name, c.contact_person,
-                   c.phone, c.email,
-                   m.matter_number, m.status AS matter_status
-            FROM clients c
-            LEFT JOIN matters m ON m.client_id = c.id
-            WHERE c.firm_id=$1
-            ORDER BY c.full_name ASC, m.created_at ASC
-        """, FIRM_ID)
-
-        client_count = len({r["client_id"] for r in rows})
-        # matter_status (not matter_number) signals a real joined matter row
-        # vs. the LEFT JOIN's all-NULL placeholder for a client with no
-        # matters — matter_number can legitimately be NULL on a real,
-        # not-yet-backfilled matter, so it isn't a safe "row exists" check.
-        matter_count = len([r for r in rows if r["matter_status"] is not None])
-
-        await conn.execute("""
-            INSERT INTO report_history (firm_id, report_type, generated_by, generated_by_name,
-                                        client_count, matter_count)
-            VALUES ($1, $2, $3, $4, $5, $6)
-        """,
-        FIRM_ID, "rbz_compliance_export",
-        _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
-        user.get("display_name") or "Unknown", client_count, matter_count)
+        rows = await _fetch_rbz_compliance_rows(conn)
+        client_count, matter_count = _rbz_compliance_counts(rows)
+        await _log_rbz_compliance_report(conn, user, "rbz_compliance_export", client_count, matter_count)
 
     import csv, io as _io
     buf = _io.StringIO()
@@ -3581,6 +3592,102 @@ async def export_rbz_compliance_report(request: Request):
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
+@app.get("/api/reports/rbz-compliance-export-pdf")
+async def export_rbz_compliance_report_pdf(request: Request):
+    """
+    Same data and access restriction as the CSV export above — a second
+    output format, not a separate feature. Deliberately plain: a readable
+    table, not a designed document. fpdf2 (pure Python, no system
+    dependencies like weasyprint/wkhtmltopdf would need) was the only PDF
+    library added for this — nothing else in the codebase generates PDFs
+    (pdfplumber, already a dependency, only reads them).
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:rbz_compliance")
+
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_rbz_compliance_rows(conn)
+        client_count, matter_count = _rbz_compliance_counts(rows)
+        await _log_rbz_compliance_report(conn, user, "rbz_compliance_export_pdf", client_count, matter_count)
+
+    pdf_bytes = _build_rbz_compliance_pdf(rows)
+
+    filename = f"rbz_compliance_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+def _build_rbz_compliance_pdf(rows: list) -> bytes:
+    """
+    Groups the flat client+matter rows (already ordered by client, then by
+    matter created_at — see _fetch_rbz_compliance_rows) into one block per
+    client: a header line with client_number/name/contact person/phone/
+    email, then that client's matters listed underneath. Deliberately
+    simple — one readable table, no per-page styling beyond a title.
+    """
+    from fpdf import FPDF
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "RBZ Compliance Export", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    if not rows:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, "No clients on file.", new_x="LMARGIN", new_y="NEXT")
+        return bytes(pdf.output())
+
+    current_client_id = None
+    for r in rows:
+        if r["client_id"] != current_client_id:
+            current_client_id = r["client_id"]
+            pdf.ln(3)
+            pdf.set_font("Helvetica", "B", 11)
+            header = f"{r['client_number']} - {r['client_name']}" if r["client_number"] else r["client_name"]
+            pdf.cell(0, 6, _pdf_safe(header), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("Helvetica", "", 9)
+            contact_bits = [b for b in (r["contact_person"], r["phone"], r["email"]) if b]
+            if contact_bits:
+                pdf.cell(0, 5, _pdf_safe("  " + " | ".join(contact_bits)), new_x="LMARGIN", new_y="NEXT")
+
+        if r["matter_status"] is not None:
+            pdf.set_font("Helvetica", "", 9)
+            matter_label = r["matter_number"] or "(unnumbered)"
+            pdf.cell(0, 5, _pdf_safe(f"    - {matter_label}: {r['matter_status']}"), new_x="LMARGIN", new_y="NEXT")
+
+    return bytes(pdf.output())
+
+def _pdf_safe(text: str) -> str:
+    """
+    fpdf2's core Helvetica font is latin-1 only — a bundled Unicode font
+    would be needed to render arbitrary characters, which is more weight
+    than this deliberately simple export calls for. Common punctuation
+    that free-text matter descriptions/names use (em/en dashes, curly
+    quotes — the onboarding template's own examples use em-dashes) gets a
+    plain-ASCII substitute; anything else outside latin-1 (e.g. an
+    accented name) degrades to "?" via latin-1's replace mode rather than
+    crashing the whole export over one character.
+    """
+    if not text:
+        return ""
+    substitutions = {
+        "—": "-", "–": "-",       # em dash, en dash
+        "‘": "'", "’": "'",       # curly single quotes
+        "“": '"', "”": '"',       # curly double quotes
+        "…": "...",                    # ellipsis
+    }
+    for char, replacement in substitutions.items():
+        text = text.replace(char, replacement)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
 
 @app.get("/api/reports/history")
 async def list_report_history(request: Request):
