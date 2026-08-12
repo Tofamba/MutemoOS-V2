@@ -169,7 +169,7 @@ def test_search_with_document_503s_when_not_ready_without_creating_a_job(monkeyp
 
     upload = FakeUploadFile("lease.pdf", b"not read")
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(search_with_document(None, upload, "does this lease renew automatically?"))
+        asyncio.run(search_with_document(None, [upload], "does this lease renew automatically?"))
     assert exc_info.value.status_code == 503
     assert m._search_jobs == jobs_before  # no job left behind
 
@@ -181,7 +181,7 @@ def test_search_with_document_proceeds_past_guard_once_ready(monkeypatch):
     upload = FakeUploadFile("lease.pdf", b"lease body text")
     # Job creation itself doesn't touch the DB before spawning the
     # background task, so reaching this point (not 503) is the proof here.
-    result = asyncio.run(search_with_document(None, upload, "does this lease renew automatically?"))
+    result = asyncio.run(search_with_document(None, [upload], "does this lease renew automatically?"))
     assert "job_id" in result
     assert result["status"] == "pending"
     del m._search_jobs[result["job_id"]]  # don't leak state into other tests

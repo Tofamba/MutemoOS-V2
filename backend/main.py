@@ -5327,10 +5327,59 @@ class JobStatus(str, Enum):
 _search_jobs: dict[str, dict] = {}
 _SEARCH_JOB_MAX_AGE = timedelta(minutes=30)
 
+def _extract_attached_document_text(content: bytes, filename: str) -> tuple:
+    """
+    Extracts text from one ad-hoc attached document, exactly the same way
+    for every file in a multi-file attach — one file's extraction failure
+    (corrupt PDF, unreadable photo) fails the whole query rather than
+    silently dropping that document from consideration, same fail-fast
+    behavior as the original single-file path. Returns (doc_text, ocr_confidence).
+    """
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    ocr_confidence = None
+    try:
+        if ext == "pdf":
+            doc_text, _, _, ocr_confidence = extract_pdf_text(content)
+        elif ext in ("docx", "doc"):
+            doc_text = extract_docx_text(content)
+        elif ext in ("jpg", "jpeg", "png", "webp"):
+            doc_text, ocr_confidence = ocr_image_bytes(content, ext)
+            if not doc_text:
+                raise ValueError(
+                    f'Could not read text from "{filename}". Make sure the photo is clear, '
+                    "well-lit, and the document fills most of the frame."
+                )
+        else:
+            doc_text = content.decode("utf-8", errors="replace")
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f'Could not read "{filename}": {e}')
+
+    if not doc_text or not doc_text.strip():
+        raise ValueError(f'No readable text found in "{filename}".')
+
+    return doc_text, ocr_confidence
+
+def _combine_attached_documents(docs: list) -> tuple:
+    """
+    docs: list of {"filename", "text"} dicts (already extracted/truncated).
+    A single document is passed through unlabeled — exactly the prompt
+    shape the original single-file path always sent, so that behavior is
+    unchanged. Two or more get a clear "=== DOCUMENT: filename ===" header
+    each, so the model can attribute a fact to the specific document it
+    came from instead of an undifferentiated blob. Returns
+    (combined_text, combined_name) for synthesise_answer_sync.
+    """
+    if len(docs) == 1:
+        return docs[0]["text"], docs[0]["filename"]
+    combined_text = "\n\n".join(f"=== DOCUMENT: {d['filename']} ===\n{d['text']}" for d in docs)
+    combined_name = ", ".join(d["filename"] for d in docs)
+    return combined_text, combined_name
+
 async def _run_document_search_job(
     job_id: str,
-    content: bytes,
-    filename: str,
+    files: list,
     query: str,
     user: dict,
     matter_id: Optional[str],
@@ -5340,36 +5389,20 @@ async def _run_document_search_job(
     _search_jobs[job_id]["status"] = JobStatus.RUNNING
     print(f"[search_job:{job_id}] STARTED")
     try:
-        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-        ocr_confidence = None
-
-        try:
-            if ext == "pdf":
-                doc_text, _, _, ocr_confidence = extract_pdf_text(content)
-            elif ext in ("docx", "doc"):
-                doc_text = extract_docx_text(content)
-            elif ext in ("jpg", "jpeg", "png", "webp"):
-                doc_text, ocr_confidence = ocr_image_bytes(content, ext)
-                if not doc_text:
-                    raise ValueError(
-                        "Could not read text from this image. Make sure the photo is clear, "
-                        "well-lit, and the document fills most of the frame."
-                    )
-            else:
-                doc_text = content.decode("utf-8", errors="replace")
-        except ValueError:
-            raise
-        except Exception as e:
-            raise ValueError(f"Could not read document: {e}")
-
-        if not doc_text or not doc_text.strip():
-            raise ValueError("No readable text found in the uploaded document.")
+        docs = []
+        for f in files:
+            doc_text, ocr_confidence = _extract_attached_document_text(f["content"], f["filename"])
+            truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
+            if truncated:
+                doc_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+            docs.append({
+                "filename": f["filename"], "text": doc_text, "truncated": truncated,
+                "char_count": len(doc_text), "ocr_confidence": ocr_confidence,
+            })
 
         print(f"[search_job:{job_id}] OCR_COMPLETE")
 
-        truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
-        if truncated:
-            doc_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+        doc_text, filename = _combine_attached_documents(docs)
 
         req = SearchRequest(
             query=query, matter_id=matter_id, limit=limit,
@@ -5447,11 +5480,14 @@ async def _run_document_search_job(
         result = {
             "answer": answer,
             "results": all_results,
-            "attached_document": {
-                "filename": filename, "truncated": truncated, "char_count": len(doc_text),
-                "ocr_confidence": ocr_confidence,
-                "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
-            },
+            "attached_documents": [
+                {
+                    "filename": d["filename"], "truncated": d["truncated"], "char_count": d["char_count"],
+                    "ocr_confidence": d["ocr_confidence"],
+                    "low_confidence": d["ocr_confidence"] is not None and d["ocr_confidence"] < 80,
+                }
+                for d in docs
+            ],
             **grounding,
         }
 
@@ -5471,20 +5507,25 @@ async def _run_document_search_job(
 @app.post("/api/search/document", status_code=202)
 async def search_with_document(
     request: Request,
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(...),
     query: str = Form(...),
     matter_id: Optional[str] = Form(None),
     include_legal_updates: bool = Form(True),
     limit: int = Form(8),
 ):
     """
-    Search Vault, extended: upload a document ad-hoc (lease, contract,
-    affidavit, etc.) and ask a question about it. The document is analyzed
-    directly — not permanently stored or indexed, since this is a one-off
-    query, not a matter document — and the answer is grounded in both the
-    document's own text and the firm's existing indexed knowledge (firm
-    precedent, legal updates, ZLR judgments), same as a normal Search Vault
-    query.
+    Search Vault, extended: upload one or more documents ad-hoc (lease,
+    contract, affidavit, etc.) and ask a question that spans them — e.g.
+    applying a question of law to facts drawn from several uploaded
+    documents at once. Each document is analyzed directly and kept clearly
+    labeled by filename in what's sent to the model, so the answer can
+    attribute a fact to the specific document it came from rather than
+    treating them as one undifferentiated blob (see
+    _combine_attached_documents). Nothing is permanently stored or
+    indexed, same as a single-file attach — this is a one-off query, not
+    matter documents — and the answer is grounded in both the attached
+    documents and the firm's existing indexed knowledge (firm precedent,
+    legal updates, ZLR judgments), same as a normal Search Vault query.
 
     Runs as a fire-and-poll background job rather than a single synchronous
     request/response — the pipeline can run long enough to trip Cloudflare's
@@ -5495,13 +5536,18 @@ async def search_with_document(
     _check_permission(user, "search")
     _require_retrieval_ready()
 
+    if not files:
+        raise HTTPException(status_code=422, detail="At least one file is required.")
+
     now = datetime.utcnow()
     for jid, job in list(_search_jobs.items()):
         if now - datetime.fromisoformat(job["created_at"]) > _SEARCH_JOB_MAX_AGE:
             del _search_jobs[jid]
 
-    content = await file.read()
-    filename = file.filename or "document"
+    # Read every file's content upfront — UploadFile objects are tied to
+    # this request/response cycle and must not be relied on after it ends
+    # (same reasoning as job_user below).
+    job_files = [{"filename": f.filename or "document", "content": await f.read()} for f in files]
 
     job_id = str(_uuid_mod.uuid4())
 
@@ -5525,7 +5571,7 @@ async def search_with_document(
 
     asyncio.create_task(
         _run_document_search_job(
-            job_id, content, filename, query, job_user, matter_id, include_legal_updates, limit,
+            job_id, job_files, query, job_user, matter_id, include_legal_updates, limit,
         )
     )
 

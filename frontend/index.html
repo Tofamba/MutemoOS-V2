@@ -498,9 +498,9 @@ select{cursor:pointer}
         </div>
       </div>
       <div class="form-group" style="margin-bottom:0.75rem">
-        <label style="font-size:0.8rem;color:var(--ink3)">Attach a document (optional) — get an opinion grounded in the document itself, e.g. "Is this lease agreement proper?" A clear phone photo of a paper document works too.</label>
-        <input type="file" id="search-attach-file" accept=".pdf,.docx,.doc,.txt,.jpg,.jpeg,.png,.webp" onchange="updateSearchAttachLabel()"/>
-        <div id="search-attach-label" style="font-size:0.75rem;color:var(--ink3);margin-top:2px"></div>
+        <label style="font-size:0.8rem;color:var(--ink3)">Attach one or more documents (optional) — get an opinion grounded in the documents themselves, e.g. "Is this lease agreement proper?" or apply a question of law across several uploaded facts at once. A clear phone photo of a paper document works too.</label>
+        <input type="file" id="search-attach-file" accept=".pdf,.docx,.doc,.txt,.jpg,.jpeg,.png,.webp" multiple onchange="addSearchAttachedFiles(event)"/>
+        <div id="search-attach-chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px"></div>
       </div>
       <button class="btn btn-primary" onclick="doSearch()" id="search-btn" style="margin-top:0">
         🔍 Search Vault
@@ -3032,11 +3032,41 @@ function showVaultStatus(msg, type) {
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
-function updateSearchAttachLabel() {
-  const fileInput = document.getElementById('search-attach-file');
-  const label = document.getElementById('search-attach-label');
-  const file = fileInput.files[0];
-  label.textContent = file ? `📎 ${file.name} will be attached to this search.` : '';
+
+// Holds the set of files attached to the next search — a plain <input
+// type=file multiple> resets its own .files to whatever was just picked,
+// so selecting a second file (in a separate dialog interaction) would
+// silently replace the first rather than add to it. This array is the
+// actual source of truth; the input element is just how new files get in.
+let searchAttachedFiles = [];
+
+function addSearchAttachedFiles(event) {
+  const newFiles = Array.from(event.target.files || []);
+  for (const f of newFiles) {
+    // De-dupe by name+size — re-picking the same file (e.g. after removing
+    // it) shouldn't produce a duplicate chip.
+    if (!searchAttachedFiles.some(existing => existing.name === f.name && existing.size === f.size)) {
+      searchAttachedFiles.push(f);
+    }
+  }
+  event.target.value = '';  // allow picking the same filename again later
+  renderSearchAttachChips();
+}
+
+function removeSearchAttachedFile(index) {
+  searchAttachedFiles.splice(index, 1);
+  renderSearchAttachChips();
+}
+
+function renderSearchAttachChips() {
+  const el = document.getElementById('search-attach-chips');
+  el.innerHTML = searchAttachedFiles.map((f, i) => `
+    <span style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px;background:var(--paper2);border:1px solid var(--border);border-radius:12px;font-size:0.75rem;color:var(--ink2)">
+      📎 ${escHtml(f.name)}
+      <button type="button" onclick="removeSearchAttachedFile(${i})" title="Remove"
+        style="background:none;border:none;cursor:pointer;color:var(--ink3);font-size:0.85rem;line-height:1;padding:0">✕</button>
+    </span>
+  `).join('');
 }
 
 let _searchPollToken = 0;
@@ -3053,12 +3083,11 @@ async function doSearch() {
   // Superseding the token stops any poll loop still running from a
   // previous submission (see pollDocumentSearchJob) so only one drives the UI.
   const myToken = ++_searchPollToken;
-  const attachedFile = document.getElementById('search-attach-file').files[0];
 
   try {
-    if (attachedFile) {
+    if (searchAttachedFiles.length) {
       const formData = new FormData();
-      formData.append('file', attachedFile);
+      for (const f of searchAttachedFiles) formData.append('files', f);
       formData.append('query', query);
       formData.append('include_legal_updates', 'true');
       formData.append('limit', '8');
@@ -3241,9 +3270,10 @@ function renderSearchResults(data, query) {
         ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">✓ ${escHtml(data.grounding_note)}</div>`
         : '';
     }
-    const attachedBadge = data.attached_document
-      ? `<div style="margin-bottom:0.5rem;font-size:0.75rem;color:var(--ink3)">📎 Analyzing: <strong>${escHtml(data.attached_document.filename)}</strong>${data.attached_document.truncated ? ' (document was long — analysis based on the first portion)' : ''}
-          ${data.attached_document.low_confidence ? `<br><span style="color:#a15c00">⚠ Low OCR confidence (${data.attached_document.ocr_confidence}%) — this photo may have been misread in places (e.g. digits/letters). Verify anything numeric or exact against the original before relying on it.</span>` : ''}
+    const attachedBadge = (data.attached_documents && data.attached_documents.length)
+      ? `<div style="margin-bottom:0.5rem;font-size:0.75rem;color:var(--ink3)">
+          📎 Analyzing: ${data.attached_documents.map(d => `<strong>${escHtml(d.filename)}</strong>${d.truncated ? ' (long — first portion only)' : ''}`).join(', ')}
+          ${data.attached_documents.filter(d => d.low_confidence).map(d => `<br><span style="color:#a15c00">⚠ Low OCR confidence (${d.ocr_confidence}%) in "${escHtml(d.filename)}" — this photo may have been misread in places (e.g. digits/letters). Verify anything numeric or exact against the original before relying on it.</span>`).join('')}
         </div>`
       : '';
     html += `<div class="ai-answer">
