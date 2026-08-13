@@ -46,18 +46,25 @@ from backend.docx_export import paragraphs_from_plain_text, paragraphs_from_html
 try:
     import boto3
     from botocore.exceptions import ClientError
-    _r2_client = boto3.client(
-        "s3",
-        endpoint_url=os.environ.get("R2_ENDPOINT", ""),
-        aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
-        aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
-        region_name="auto",
-    )
     R2_BUCKET = os.environ.get("R2_BUCKET", "mutemoos-documents")
     R2_ENABLED = bool(os.environ.get("R2_ENDPOINT") and os.environ.get("R2_ACCESS_KEY_ID"))
     if R2_ENABLED:
+        # boto3.client() raises ValueError immediately on an empty
+        # endpoint_url rather than failing lazily on first use, so this
+        # must only run once R2_ENABLED is already known true — a
+        # deployment with boto3 installed but no R2_* vars set (e.g. a
+        # staging environment, or a future firm not using R2 yet) would
+        # otherwise crash the whole app at import time.
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=os.environ.get("R2_ENDPOINT", ""),
+            aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
+            aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+            region_name="auto",
+        )
         print(f"[r2] R2 storage enabled — bucket: {R2_BUCKET}")
     else:
+        _r2_client = None
         print("[r2] R2 not configured — file storage disabled")
 except ImportError:
     _r2_client = None
