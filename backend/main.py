@@ -37,27 +37,37 @@ from backend.numbering import (
     generate_initials, disambiguate_initials, next_sequence,
     format_client_number, format_matter_number,
 )
+from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text
+from backend.conveyancing import CONVEYANCING_MILESTONES
 from backend.deadline_engine import try_compute_deadline
 from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
 from backend.authority_ranker import rerank
 from backend.docx_export import paragraphs_from_plain_text, paragraphs_from_html, build_docx_bytes
 
 # ── R2 / S3-compatible object storage ─────────────────────────────────────────
+# R2 is optional — a deployment (e.g. a staging environment, or a future
+# firm that doesn't need document storage in R2 yet) may have boto3
+# installed but no R2_* vars set. boto3.client() raises ValueError
+# immediately on an empty endpoint_url rather than failing lazily on first
+# use, so the client must only be constructed once R2_ENABLED is already
+# known true — constructing it unconditionally crashed the whole app at
+# import time on any deployment missing R2 config.
 try:
     import boto3
     from botocore.exceptions import ClientError
-    _r2_client = boto3.client(
-        "s3",
-        endpoint_url=os.environ.get("R2_ENDPOINT", ""),
-        aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
-        aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
-        region_name="auto",
-    )
     R2_BUCKET = os.environ.get("R2_BUCKET", "mutemoos-documents")
     R2_ENABLED = bool(os.environ.get("R2_ENDPOINT") and os.environ.get("R2_ACCESS_KEY_ID"))
     if R2_ENABLED:
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=os.environ.get("R2_ENDPOINT", ""),
+            aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
+            aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+            region_name="auto",
+        )
         print(f"[r2] R2 storage enabled — bucket: {R2_BUCKET}")
     else:
+        _r2_client = None
         print("[r2] R2 not configured — file storage disabled")
 except ImportError:
     _r2_client = None
@@ -219,6 +229,15 @@ async def run_migrations():
         ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_number TEXT;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_firm_number
             ON clients(firm_id, client_number) WHERE client_number IS NOT NULL;
+        -- Which lawyer created this client — the "My Clients" default-view
+        -- filter's actual join key (client_number's initials prefix is a
+        -- point-in-time formatted string, not reliably reversible to a
+        -- specific users.id on collision/disambiguation, so it's not used
+        -- for this). NULL for clients created before this column existed,
+        -- or created while AUTH_ENABLED is False (get_current_user()
+        -- returns a synthetic user with no real id in that case) — see
+        -- scripts/backfill_client_ownership.py for best-effort backfill.
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id);
 
         -- client_id: who the firm has an actual client relationship with.
         -- case_parties: free text for everyone else named in the matter
@@ -236,6 +255,38 @@ async def run_migrations():
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS matter_number TEXT;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_matters_firm_number
             ON matters(firm_id, matter_number) WHERE matter_number IS NOT NULL;
+
+        -- Fixed practice-area category (backend/practice_areas.py's
+        -- PRACTICE_AREAS list) — nullable until backfilled (see
+        -- scripts/backfill_practice_areas.py). No DB CHECK constraint,
+        -- same convention as matters.status: enforced at the Pydantic/API
+        -- layer (MatterCreate/MatterUpdate validators), not the schema.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS practice_area TEXT;
+        CREATE INDEX IF NOT EXISTS idx_matters_practice_area ON matters(firm_id, practice_area);
+
+        -- Fee tracking — the firm's own professional fees, manually entered.
+        -- Explicitly NOT trust accounting: Sawyer & Mkushi's accounts
+        -- department has its own separate system of record for client
+        -- funds held in trust, and this must not become a second source of
+        -- truth for that. Nullable, no default.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS amount_billed NUMERIC(14,2);
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS amount_received NUMERIC(14,2);
+
+        -- Conveyancing-specific fields (backend/conveyancing.py's
+        -- CONVEYANCING_MILESTONES list) — only meaningful/shown when
+        -- practice_area = 'Conveyancing/Property', but not hard-gated at
+        -- write time (a matter's practice_area can be corrected later, and
+        -- we don't want to reject or silently drop already-entered data).
+        -- conveyancing_purchase_price is a reference fact for reporting
+        -- only, not a balance or funds held.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_milestone TEXT;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_property_address TEXT;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_title_deed_number TEXT;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_purchase_price NUMERIC(14,2);
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_other_conveyancer_contact TEXT;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_transfer_date DATE;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_rates_clearance_expiry DATE;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_bond_registration_deadline DATE;
 
         CREATE TABLE IF NOT EXISTS progress_notes (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -625,6 +676,7 @@ PERMISSIONS = {
     # as senior to partner, so locking admin out would be inconsistent with
     # every other permission in this table.
     "reports:rbz_compliance": {"admin", "partner"},
+    "reports:practice_area_breakdown": {"admin", "partner"},
 }
 
 def _check_permission(user: dict, permission: str):
@@ -1113,15 +1165,15 @@ async def auth_status(request: Request):
         async with _db_pool.acquire() as conn:
             await conn.execute("DELETE FROM sessions WHERE expires_at < NOW()")
             row = await conn.fetchrow("""
-                SELECT s.token, u.phone, u.role, u.display_name
+                SELECT s.token, u.id, u.phone, u.role, u.display_name, u.initials
                 FROM sessions s JOIN users u ON s.user_id = u.id
                 WHERE s.token=$1 AND s.expires_at > NOW()
             """, token)
             if row:
                 return {
                     "auth_enabled": True, "authenticated": True,
-                    "phone": row["phone"], "role": row["role"],
-                    "display_name": row["display_name"]
+                    "id": str(row["id"]), "phone": row["phone"], "role": row["role"],
+                    "display_name": row["display_name"], "initials": row["initials"]
                 }
     return {"auth_enabled": True, "authenticated": False}
 
@@ -2179,6 +2231,7 @@ class MatterCreate(BaseModel):
     internal_ref: Optional[str] = None
     external_ref: Optional[str] = None
     matter_type: Optional[str] = None
+    practice_area: Optional[str] = None  # validated against PRACTICE_AREAS in create_matter/update_matter
     status: Optional[str] = "Active"
     client_name: Optional[str] = None
     client_id: Optional[str] = None
@@ -2192,6 +2245,7 @@ class MatterUpdate(BaseModel):
     internal_ref: Optional[str] = None
     external_ref: Optional[str] = None
     matter_type: Optional[str] = None
+    practice_area: Optional[str] = None
     status: Optional[str] = None
     client_name: Optional[str] = None
     client_id: Optional[str] = None
@@ -2199,6 +2253,24 @@ class MatterUpdate(BaseModel):
     custom_status: Optional[str] = None
     next_deadline: Optional[str] = None       # ISO date string, e.g. "2026-08-15"
     next_deadline_note: Optional[str] = None
+    # Fee tracking — the firm's own professional fees only, manually
+    # entered. Not trust accounting; see the schema comment in
+    # run_migrations() for why this must not become a second source of
+    # truth for client funds held in trust.
+    amount_billed: Optional[float] = None
+    amount_received: Optional[float] = None
+    # Conveyancing-specific (backend/conveyancing.py's CONVEYANCING_MILESTONES)
+    # — accepted regardless of the matter's current practice_area; the
+    # practice_area === 'Conveyancing/Property' check that gates whether
+    # this section is shown is a frontend display condition only.
+    conveyancing_milestone: Optional[str] = None
+    conveyancing_property_address: Optional[str] = None
+    conveyancing_title_deed_number: Optional[str] = None
+    conveyancing_purchase_price: Optional[float] = None  # reference fact only — not a balance or funds held
+    conveyancing_other_conveyancer_contact: Optional[str] = None
+    conveyancing_transfer_date: Optional[str] = None                # ISO date string
+    conveyancing_rates_clearance_expiry: Optional[str] = None       # ISO date string
+    conveyancing_bond_registration_deadline: Optional[str] = None   # ISO date string
 
 class ClientCreate(BaseModel):
     full_name: str
@@ -2350,6 +2422,56 @@ async def _next_matter_number(conn, firm_id, client_number: str) -> str:
     seq = next_sequence([r["matter_number"] for r in rows], client_number)
     return format_matter_number(client_number, seq)
 
+_CONVEYANCING_DATE_EVENT_TITLES = {
+    "conveyancing_transfer_date": "Conveyancing: Transfer Date",
+    "conveyancing_rates_clearance_expiry": "Conveyancing: Rates Clearance Expiry",
+    "conveyancing_bond_registration_deadline": "Conveyancing: Bond Registration Deadline",
+}
+
+async def _sync_conveyancing_calendar_events(conn, matter, touched_fields):
+    """
+    Keeps calendar_events in sync with a matter's conveyancing key dates —
+    this is what "feeding into the existing deadline/calendar system"
+    means concretely: a set date shows up in GET /api/calendar, the daily
+    reminder digest, and the client detail view's upcoming-deadlines list
+    for free, with no separate conveyancing-aware code needed there.
+
+    Upserts one calendar_events row per touched field, keyed on
+    (matter_id, source='conveyancing_sync', title) so a re-save updates
+    rather than duplicates. `matter` is the raw asyncpg Record from the
+    UPDATE ... RETURNING * in update_matter() (real UUID/date types, not
+    yet through _row_to_matter()'s JSON-safe conversion).
+
+    The delete-when-cleared branch below is defensive/idempotent rather
+    than reachable today: update_matter()'s PATCH, like every other
+    Optional field on MatterUpdate, filters out None values before this
+    is ever called (matching this API's existing convention — there is no
+    "explicitly clear a field" path for anything else here either), so in
+    practice `matter[field]` is never None for a field that made it into
+    touched_fields. Kept correct in case that ever changes.
+    """
+    for field in touched_fields:
+        title = _CONVEYANCING_DATE_EVENT_TITLES[field]
+        value = matter[field]
+        existing = await conn.fetchrow(
+            "SELECT id FROM calendar_events WHERE matter_id=$1 AND source='conveyancing_sync' AND title=$2",
+            matter["id"], title,
+        )
+        if value is None:
+            if existing:
+                await conn.execute("DELETE FROM calendar_events WHERE id=$1", existing["id"])
+            continue
+        if existing:
+            await conn.execute("UPDATE calendar_events SET date=$1 WHERE id=$2", value, existing["id"])
+        else:
+            await conn.execute(
+                """INSERT INTO calendar_events
+                       (id, firm_id, matter_id, title, date, event_type, matter_name, source)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                _uuid_mod.uuid4(), matter["firm_id"], matter["id"], title, value,
+                "deadline", matter["name"], "conveyancing_sync",
+            )
+
 def _row_to_matter(row) -> dict:
     d = dict(row)
     for k in ("id", "firm_id", "created_by", "client_id"):
@@ -2360,11 +2482,27 @@ def _row_to_matter(row) -> dict:
             d[k] = d[k].isoformat()
     if d.get("next_deadline"):
         d["next_deadline"] = d["next_deadline"].isoformat()
+    for k in ("conveyancing_transfer_date", "conveyancing_rates_clearance_expiry",
+              "conveyancing_bond_registration_deadline"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    # asyncpg returns NUMERIC as Decimal — cast explicitly rather than
+    # relying on the default JSON encoder's handling of it.
+    for k in ("amount_billed", "amount_received", "conveyancing_purchase_price"):
+        if d.get(k) is not None:
+            d[k] = float(d[k])
+    # Computed here (not stored) so there's exactly one place this
+    # arithmetic lives, rather than duplicating "billed minus received" in
+    # frontend JS too. None when neither figure has been entered yet.
+    if d.get("amount_billed") is not None or d.get("amount_received") is not None:
+        d["fee_balance"] = (d.get("amount_billed") or 0.0) - (d.get("amount_received") or 0.0)
+    else:
+        d["fee_balance"] = None
     return d
 
 def _row_to_client(row) -> dict:
     d = dict(row)
-    for k in ("id", "firm_id"):
+    for k in ("id", "firm_id", "created_by"):
         if d.get(k):
             d[k] = str(d[k])
     for k in ("created_at", "updated_at"):
@@ -2737,6 +2875,8 @@ async def check_matter_conflict(name: str = "", client_name: str = "", request: 
 async def create_matter(matter: MatterCreate, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "matter:create")
+    if matter.practice_area and matter.practice_area not in PRACTICE_AREAS:
+        raise HTTPException(status_code=422, detail=f"practice_area must be one of: {', '.join(PRACTICE_AREAS)}")
     mid = _uuid_mod.uuid4()
     now = datetime.utcnow()
     parsed_deadline = None
@@ -2774,8 +2914,8 @@ async def create_matter(matter: MatterCreate, request: Request):
             INSERT INTO matters (id, firm_id, name, number, internal_ref, external_ref,
                                  client_name, client_id, case_parties, matter_type, status, custom_status,
                                  last_activity, created_at, created_by,
-                                 next_deadline, next_deadline_note, matter_number)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                                 next_deadline, next_deadline_note, matter_number, practice_area)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
             RETURNING *
         """,
         mid, FIRM_ID,
@@ -2785,7 +2925,7 @@ async def create_matter(matter: MatterCreate, request: Request):
         matter.status or "Active", matter.custom_status,
         now, now,
         _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
-        parsed_deadline, matter.next_deadline_note, matter_number
+        parsed_deadline, matter.next_deadline_note, matter_number, matter.practice_area
         )
     m = _row_to_matter(row)
     m["progress_notes"] = []
@@ -2805,14 +2945,14 @@ async def create_client(client: ClientCreate, request: Request):
         row = await conn.fetchrow("""
             INSERT INTO clients (id, firm_id, full_name, email, phone,
                                  physical_address, id_or_registration_number, contact_person, notes,
-                                 client_number, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                                 client_number, created_by, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             RETURNING *
         """,
         cid, FIRM_ID,
         client.full_name, client.email, client.phone,
         client.physical_address, client.id_or_registration_number, client.contact_person, client.notes,
-        client_number, now, now
+        client_number, _uuid_mod.UUID(str(user["id"])) if user.get("id") else None, now, now
         )
     return _row_to_client(row)
 
@@ -2843,8 +2983,46 @@ async def get_client(client_id: str, request: Request):
             "ORDER BY last_activity DESC NULLS LAST, created_at DESC",
             cid, FIRM_ID
         )
+        matter_ids = [m["id"] for m in matter_rows]
+
+        # Batched (not N+1) across every matter this client has — progress
+        # notes and documents feed the client detail view's "recent
+        # activity" feed, calendar events feed its "upcoming deadlines"
+        # list alongside each matter's own next_deadline (already embedded
+        # via _row_to_matter below, no extra query needed for that part).
+        notes_by_matter, docs_by_matter, calendar_events = {}, {}, []
+        if matter_ids:
+            note_rows = await conn.fetch(
+                "SELECT * FROM progress_notes WHERE matter_id = ANY($1) ORDER BY created_at DESC",
+                matter_ids
+            )
+            for n in note_rows:
+                notes_by_matter.setdefault(str(n["matter_id"]), []).append(_row_to_note(n))
+
+            doc_rows = await conn.fetch(
+                "SELECT * FROM documents WHERE matter_id = ANY($1) AND status='complete' "
+                "ORDER BY uploaded_at DESC",
+                matter_ids
+            )
+            for doc in doc_rows:
+                docs_by_matter.setdefault(str(doc["matter_id"]), []).append(_row_to_doc(doc))
+
+            event_rows = await conn.fetch(
+                "SELECT * FROM calendar_events WHERE matter_id = ANY($1) AND date >= CURRENT_DATE "
+                "ORDER BY date ASC",
+                matter_ids
+            )
+            calendar_events = [_row_to_event(e) for e in event_rows]
+
     c = _row_to_client(row)
-    c["matters"] = [_row_to_matter(m) for m in matter_rows]
+    c["matters"] = []
+    for m in matter_rows:
+        md = _row_to_matter(m)
+        mid = str(m["id"])
+        md["progress_notes"] = notes_by_matter.get(mid, [])
+        md["documents"] = docs_by_matter.get(mid, [])
+        c["matters"].append(md)
+    c["calendar_events"] = calendar_events
     return c
 
 @app.patch("/api/clients/{client_id}")
@@ -2893,6 +3071,8 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
     fields = {k: v for k, v in update.dict().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if "practice_area" in fields and fields["practice_area"] not in PRACTICE_AREAS:
+        raise HTTPException(status_code=422, detail=f"practice_area must be one of: {', '.join(PRACTICE_AREAS)}")
     if "next_deadline" in fields:
         # asyncpg is strict about type matching for DATE columns — a raw
         # Python str isn't reliably accepted the way it might be with a
@@ -2902,6 +3082,21 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             fields["next_deadline"] = date.fromisoformat(fields["next_deadline"])
         except ValueError:
             raise HTTPException(status_code=400, detail="next_deadline must be in YYYY-MM-DD format")
+    if "conveyancing_milestone" in fields and fields["conveyancing_milestone"] not in CONVEYANCING_MILESTONES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"conveyancing_milestone must be one of: {', '.join(CONVEYANCING_MILESTONES)}"
+        )
+    conveyancing_date_fields = (
+        "conveyancing_transfer_date", "conveyancing_rates_clearance_expiry",
+        "conveyancing_bond_registration_deadline",
+    )
+    for k in conveyancing_date_fields:
+        if k in fields:
+            try:
+                fields[k] = date.fromisoformat(fields[k])
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"{k} must be in YYYY-MM-DD format")
     fields["last_activity"] = datetime.utcnow()
 
     async with _db_pool.acquire() as conn:
@@ -2931,6 +3126,10 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
         )
     if not row:
         raise HTTPException(status_code=404, detail="Matter not found")
+    touched_date_fields = [k for k in conveyancing_date_fields if k in fields]
+    if touched_date_fields:
+        async with _db_pool.acquire() as conn:
+            await _sync_conveyancing_calendar_events(conn, row, touched_date_fields)
     m = _row_to_matter(row)
     async with _db_pool.acquire() as conn:
         note_rows = await conn.fetch(
@@ -3496,16 +3695,25 @@ async def bulk_onboard_from_excel(
                         format_matter_number(client_number_for_block, await _next_matter_seq(client_number_for_block))
                         if client_number_for_block else None
                     )
+                    # Opportunistic, best-effort — never blocks the upload.
+                    # Only a confident single-category keyword match is
+                    # applied; ambiguous/no-match rows are simply left
+                    # NULL, same as any matter created without a
+                    # practice_area today (covered by the backfill script,
+                    # not guessed here).
+                    classification = classify_practice_area(extract_classification_text(matter_text))
+                    practice_area = classification.get("practice_area") if classification["status"] == "matched" else None
                     entry = {"row": block["row"], "client_name": block["name"],
-                             "name": matter_text, "matter_id": str(matter_id), "matter_number": matter_number}
+                             "name": matter_text, "matter_id": str(matter_id), "matter_number": matter_number,
+                             "practice_area": practice_area}
                     (matters_created if client_id is not None else matters_unlinked).append(entry)
                     if commit:
                         await conn.execute(
                             """INSERT INTO matters (id, firm_id, name, client_name, client_id, status,
-                                                    created_by, created_at, last_activity, matter_number)
-                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                                                    created_by, created_at, last_activity, matter_number, practice_area)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
                             matter_id, FIRM_ID, matter_text, block["name"], client_id, "Active", lawyer_id, now, now,
-                            matter_number,
+                            matter_number, practice_area,
                         )
 
     return {
@@ -3708,6 +3916,28 @@ async def list_report_history(request: Request):
             d["generated_at"] = d["generated_at"].isoformat()
         result.append(d)
     return result
+
+@app.get("/api/reports/practice-area-breakdown")
+async def practice_area_breakdown(request: Request):
+    """
+    Partner-facing breakdown: matter count per practice_area, firm-wide.
+    Matters without a practice_area yet (not backfilled — see
+    scripts/backfill_practice_areas.py — or created before this feature)
+    are grouped under "Uncategorized" rather than silently excluded from
+    the total.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:practice_area_breakdown")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT practice_area, COUNT(*) AS matter_count FROM matters "
+            "WHERE firm_id=$1 GROUP BY practice_area ORDER BY matter_count DESC",
+            FIRM_ID
+        )
+    return [
+        {"practice_area": r["practice_area"] or "Uncategorized", "matter_count": r["matter_count"]}
+        for r in rows
+    ]
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 

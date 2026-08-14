@@ -192,6 +192,8 @@ def test_clean_single_client_single_matter(monkeypatch):
     assert len(result["matters"]["created"]) == 1
     assert result["matters"]["created"][0]["name"] == "HC 1234/26 — Debt collection"
     assert result["matters"]["created"][0]["matter_number"] == "TM-001-01"
+    # Opportunistic, best-effort classification from the matter description.
+    assert result["matters"]["created"][0]["practice_area"] == "Debt Collection"
     assert result["clients"]["review"] == []
 
     assert len(pool.conn.users) == 1
@@ -200,6 +202,29 @@ def test_clean_single_client_single_matter(monkeypatch):
     assert pool.conn.matters[0]["client_id"] == pool.conn.clients[0]["id"]
     assert pool.conn.clients[0]["client_number"] == "TM-001"
     assert pool.conn.matters[0]["matter_number"] == "TM-001-01"
+    assert pool.conn.matters[0]["practice_area"] == "Debt Collection"
+
+
+# ── opportunistic practice_area classification ───────────────────────────
+
+def test_ambiguous_or_unrecognized_matter_text_leaves_practice_area_null(monkeypatch):
+    """Best-effort only — never guesses, and never blocks the upload."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_onboarding_xlsx(LAWYER, [{
+        "name": "Huang Li Qiang", "phone": "+263771234567", "email": None,
+        "matters": [
+            "Mukweva and Paswa Civil — Debt collection/fraud",  # ambiguous: Debt Collection vs Criminal
+            "Moyo v Dube — Hearing on Rule Nisi",                # no keyword match at all
+        ],
+    }])
+    result = asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.xlsx", content), commit=True))
+
+    assert len(result["matters"]["created"]) == 2
+    assert all(mm["practice_area"] is None for mm in result["matters"]["created"])
+    assert all(row["practice_area"] is None for row in pool.conn.matters)
 
 
 # ── multi-matter client block ────────────────────────────────────────────

@@ -105,6 +105,17 @@ class FakeConnection:
             return [{"client_number": c["client_number"]} for c in self.clients
                     if c["firm_id"] == args[0] and (c.get("client_number") or "").startswith(prefix)]
 
+        # get_client()'s richness additions (notes/documents/calendar events
+        # per matter) — this file doesn't exercise that data, only that
+        # get_client() still returns the right matters; see
+        # tests/test_client_detail_richness.py for real coverage of these.
+        if q.startswith("SELECT * FROM progress_notes WHERE matter_id = ANY($1)"):
+            return []
+        if q.startswith("SELECT * FROM documents WHERE matter_id = ANY($1)"):
+            return []
+        if q.startswith("SELECT * FROM calendar_events WHERE matter_id = ANY($1)"):
+            return []
+
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):

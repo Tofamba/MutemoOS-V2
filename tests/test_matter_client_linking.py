@@ -266,6 +266,79 @@ def test_create_matter_also_stores_case_parties(monkeypatch):
     assert result["case_parties"] == "Chikwanha's company (Zenith Pvt Ltd)"
 
 
+# ── practice_area (fixed category set) ───────────────────────────────────
+
+def test_create_matter_accepts_a_valid_practice_area(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Moyo v Dube", practice_area="Family/Matrimonial")
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result["practice_area"] == "Family/Matrimonial"
+
+
+def test_create_matter_without_practice_area_leaves_it_null(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Moyo v Dube")
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result.get("practice_area") is None
+
+
+def test_create_matter_rejects_a_practice_area_outside_the_fixed_list(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Moyo v Dube", practice_area="Not A Real Category")
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(create_matter(req, _fake_request()))
+    assert exc_info.value.status_code == 422
+
+
+def test_update_matter_accepts_a_valid_practice_area(monkeypatch):
+    import backend.main as m
+    matter_id = uuid.uuid4()
+    existing_matter = {
+        "id": matter_id, "firm_id": FIRM_ID, "name": "Estate of X", "number": None,
+        "internal_ref": None, "external_ref": None, "client_name": None, "client_id": None,
+        "case_parties": None, "matter_type": None, "practice_area": None, "status": "Active",
+        "custom_status": None, "document_count": 0, "last_activity": None,
+        "created_at": datetime.now(timezone.utc), "created_by": None,
+        "next_deadline": None, "next_deadline_note": None,
+    }
+    pool = FakePool(matters=[existing_matter])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(update_matter(str(matter_id), MatterUpdate(practice_area="Trust"), _fake_request()))
+
+    assert result["practice_area"] == "Trust"
+
+
+def test_update_matter_rejects_a_practice_area_outside_the_fixed_list(monkeypatch):
+    import backend.main as m
+    matter_id = uuid.uuid4()
+    existing_matter = {
+        "id": matter_id, "firm_id": FIRM_ID, "name": "Estate of X", "number": None,
+        "internal_ref": None, "external_ref": None, "client_name": None, "client_id": None,
+        "case_parties": None, "matter_type": None, "practice_area": None, "status": "Active",
+        "custom_status": None, "document_count": 0, "last_activity": None,
+        "created_at": datetime.now(timezone.utc), "created_by": None,
+        "next_deadline": None, "next_deadline_note": None,
+    }
+    pool = FakePool(matters=[existing_matter])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(update_matter(str(matter_id), MatterUpdate(practice_area="Made Up"), _fake_request()))
+    assert exc_info.value.status_code == 422
+
+
 # ── update_matter ────────────────────────────────────────────────────────
 
 def test_update_matter_with_client_id_syncs_client_name(monkeypatch):

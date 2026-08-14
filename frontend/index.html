@@ -60,6 +60,11 @@
      direct children other than #print-area instead. */
   #tab-draft > *:not(#draft-step3),
   #draft-step3 > *:not(#print-area),
+  /* #tab-search's own query/filter/attach card and the loading/empty-state
+     divs are UI chrome, not part of the exported document — same
+     ancestor-aware pattern as #tab-draft above, keeping only the print
+     header and the results themselves. */
+  #tab-search > *:not(#search-print-header):not(#search-results),
   #search-print-btn,
   .result-actions,
   .use-precedent-btn { display: none !important; }
@@ -78,9 +83,36 @@
     border: 1px solid #ccc !important;
     border-radius: 0 !important;
     page-break-inside: avoid;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
   .ai-answer-text { font-size: 11pt; line-height: 1.6; white-space: pre-wrap; }
-  .result-card { border: 1px solid #ddd !important; page-break-inside: avoid; margin-bottom: 8pt; }
+  /* renderAnswerHtml() emits a flat sequence of <p> and .conclusion-block
+     divs (which themselves may contain a <blockquote>) directly inside
+     .ai-answer-text — avoid breaking any of them mid-element. */
+  .ai-answer-text > p,
+  .ai-answer-text blockquote,
+  .ai-answer-text .conclusion-block {
+    page-break-inside: avoid;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .ai-answer-label { page-break-after: avoid; }
+  /* Quoted authority set apart from analysis text — indent/italic/border
+     survive print even if the browser suppresses background colors
+     (the badge fill colors above may not render depending on the user's
+     "print background graphics" setting, so this can't rely on color alone). */
+  .ai-answer-text blockquote {
+    margin-left: 0.85rem;
+    padding-left: 0.75rem;
+    border-left: 2px solid #999;
+    font-style: italic;
+    font-size: 10.5pt;
+  }
+  /* Was .result-card — no element in the app actually has that class
+     (the real class is .search-result, see frontend/index.html:224);
+     this rule never applied to a single source card. */
+  .search-result { border: 1px solid #ddd !important; page-break-inside: avoid; margin-bottom: 8pt; }
 
   /* Print header */
   #search-print-header { display: block !important; }
@@ -331,9 +363,9 @@ select{cursor:pointer}
 <!-- Nav -->
 <nav class="nav">
   <button class="nav-btn" id="nav-vault" onclick="showTab('vault')">📁 Vault</button>
-  <button class="nav-btn active" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
+  <button class="nav-btn" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
-  <button class="nav-btn" id="nav-clients" onclick="showTab('clients')">👤 Clients</button>
+  <button class="nav-btn active" id="nav-clients" onclick="showTab('clients')">👤 Clients</button>
   <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft Document</button>
   <button class="nav-btn" id="nav-contract-review" onclick="showTab('contract-review')" data-role-hide="secretary">📋 Contract Review</button>
   <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge" id="cal-badge" style="display:none">0</span></button>
@@ -422,6 +454,12 @@ select{cursor:pointer}
               <option value="other">Other</option>
             </select>
           </div>
+          <div class="form-group">
+            <label>Practice Area</label>
+            <select id="new-matter-practice-area">
+              <option value="">— Select —</option>
+            </select>
+          </div>
           <button class="btn btn-outline btn-sm" onclick="createMatterFromVault()" style="width:100%">+ Create Matter</button>
         </div>
       </div>
@@ -454,7 +492,7 @@ select{cursor:pointer}
 </div>
 
 <!-- ═══════════════ SEARCH TAB ═══════════════ -->
-<div id="tab-search">
+<div id="tab-search" style="display:none">
   <div class="section-head">
     <h2>🔍 Search Vault</h2>
     <p>Ask in plain English. Mutemo Desk searches your entire document history and synthesises an answer. For legislation, search by topic or content — not section numbers.</p>
@@ -619,6 +657,12 @@ select{cursor:pointer}
           </select>
         </div>
       </div>
+      <div class="form-group">
+        <label>Practice Area</label>
+        <select id="nm-practice-area">
+          <option value="">— Select —</option>
+        </select>
+      </div>
       <div id="nm-status-msg" class="status" style="margin-bottom:0.5rem"></div>
       <button class="btn btn-primary" style="width:100%" onclick="submitNewMatter()">Create Matter</button>
     </div>
@@ -658,7 +702,7 @@ select{cursor:pointer}
 </div>
 
 <!-- ═══════════════ CLIENTS TAB ═══════════════ -->
-<div id="tab-clients" style="display:none">
+<div id="tab-clients">
   <div id="clients-list-view">
     <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div>
@@ -666,6 +710,17 @@ select{cursor:pointer}
         <p>Everyone the firm has a client relationship with, and every matter linked to them.</p>
       </div>
       <button class="btn btn-primary" onclick="openClientModal()" style="white-space:nowrap;margin-top:0.25rem">+ New Client</button>
+    </div>
+
+    <div style="display:flex;gap:8px;margin-bottom:0.75rem;flex-wrap:wrap">
+      <button id="clients-scope-mine" onclick="setClientsScope('mine')"
+        style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+        👤 My Clients <span id="clients-scope-mine-count" style="font-weight:400;opacity:0.8"></span>
+      </button>
+      <button id="clients-scope-all" onclick="setClientsScope('all')"
+        style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+        🏢 All Clients <span id="clients-scope-all-count" style="font-weight:400;opacity:0.8"></span>
+      </button>
     </div>
 
     <div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center">
@@ -1579,6 +1634,12 @@ select{cursor:pointer}
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Every export generated, so the firm can show a record of regular reporting.</p>
       <div id="report-history-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
     </div>
+
+    <div class="card" style="margin-top:1rem">
+      <div class="card-title">📂 Matters by Practice Area</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Firm-wide matter count per practice area.</p>
+      <div id="practice-area-breakdown-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+    </div>
   </div>
 
 </main>
@@ -1599,10 +1660,11 @@ let precedentContext = null;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
+  populatePracticeAreaSelects();
   await loadMatters();
   await loadClients();
   renderCalendar();
-  showTab('search');
+  showTab('clients');
   checkUserIdentity();
 }
 
@@ -1662,6 +1724,10 @@ async function checkAuthAndBoot() {
     if (!data.auth_enabled || data.authenticated) {
       window._userRole = data.role || 'partner';
       window._userDisplayName = data.display_name || '';
+      // null whenever AUTH_ENABLED is False (synthetic dev/demo user) or no
+      // real session exists yet — "My Clients" falls back to "All Clients"
+      // in that case rather than showing an empty tab (see renderClientsList).
+      window._userId = data.id || null;
       applyRoleUI(window._userRole);
       document.getElementById('login-overlay').style.display = 'none';
       document.getElementById('main-app').style.display = 'block';
@@ -1674,6 +1740,7 @@ async function checkAuthAndBoot() {
     // If the status check itself fails, default to showing the app
     // (covers the auth-disabled / no-Twilio-configured case)
     window._userRole = 'partner';
+    window._userId = null;
     document.getElementById('login-overlay').style.display = 'none';
     document.getElementById('main-app').style.display = 'block';
     init();
@@ -1834,6 +1901,7 @@ function closeNewMatterModal() {
   document.getElementById('nm-client-select').value = '';
   _nmSelectedClientId = null;
   document.getElementById('nm-type').value = '';
+  document.getElementById('nm-practice-area').value = '';
   document.getElementById('nm-status').value = 'Active';
   document.getElementById('nm-status-msg').className = 'status';
   document.getElementById('nm-status-msg').textContent = '';
@@ -1908,6 +1976,7 @@ async function submitNewMatter() {
         case_parties: document.getElementById('nm-case-parties').value.trim() || null,
         status: document.getElementById('nm-status').value || 'Active',
         matter_type: document.getElementById('nm-type').value || null,
+        practice_area: document.getElementById('nm-practice-area').value || null,
         next_deadline: document.getElementById('nm-deadline').value || null,
         next_deadline_note: document.getElementById('nm-deadline-note').value.trim() || null,
       })
@@ -2009,6 +2078,29 @@ function sortedClientsList() {
   return [...clients].sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
 }
 
+// 'mine' | 'all' | null (unset — renderClientsList() picks the default on
+// first render: 'mine' when we know who's logged in, 'all' when we don't,
+// e.g. AUTH_ENABLED is False and every session is the same synthetic user
+// with no real id — see window._userId in checkAuthAndBoot()).
+let _clientsScope = null;
+
+// created_by-based, not a permission change — GET /api/clients already
+// returns the full firm list to anyone with client:read; this only
+// changes which subset of the already-loaded list is the default view.
+function scopedClientsList() {
+  const sorted = sortedClientsList();
+  if (_clientsScope !== 'mine') return sorted;
+  if (!window._userId) return []; // no real session id to match against
+  return sorted.filter(c => c.created_by === window._userId);
+}
+
+function setClientsScope(scope) {
+  _clientsScope = scope;
+  const searchBox = document.getElementById('clients-search');
+  if (searchBox) searchBox.value = '';
+  renderClientsList();
+}
+
 const _clientLabel = c => c.full_name;
 
 function populateClientSelects() {
@@ -2048,10 +2140,32 @@ function renderClientsList(filtered = null) {
   const countEl = document.getElementById('clients-count');
   if (!el) return;
 
-  const sorted = sortedClientsList();
+  // First render only: default to 'mine' when we can actually tell who's
+  // logged in, 'all' otherwise (AUTH_ENABLED False -> every session is the
+  // same synthetic user with no real id) — degrades to today's full-list
+  // behavior rather than opening on an empty tab.
+  if (_clientsScope === null) _clientsScope = window._userId ? 'mine' : 'all';
+
+  const mineCount = window._userId ? clients.filter(c => c.created_by === window._userId).length : 0;
+  const allCount = clients.length;
+  const mineBtn = document.getElementById('clients-scope-mine');
+  const allBtn = document.getElementById('clients-scope-all');
+  [[mineBtn, 'mine'], [allBtn, 'all']].forEach(([btn, scope]) => {
+    if (!btn) return;
+    const active = _clientsScope === scope;
+    btn.style.background = active ? 'var(--green)' : 'var(--paper2)';
+    btn.style.color = active ? 'white' : 'var(--ink2)';
+    btn.style.borderColor = active ? 'var(--green)' : 'var(--border)';
+  });
+  const mineCountEl = document.getElementById('clients-scope-mine-count');
+  const allCountEl = document.getElementById('clients-scope-all-count');
+  if (mineCountEl) mineCountEl.textContent = `(${mineCount})`;
+  if (allCountEl) allCountEl.textContent = `(${allCount})`;
+
+  const scoped = scopedClientsList();
   const isSearching = filtered !== null;
-  const displayList = isSearching ? filtered : sorted;
-  const total = clients.length;
+  const displayList = isSearching ? filtered : scoped;
+  const total = scoped.length;
 
   if (countEl) {
     countEl.textContent = isSearching
@@ -2060,9 +2174,15 @@ function renderClientsList(filtered = null) {
   }
 
   if (!displayList.length) {
-    el.innerHTML = isSearching
-      ? '<div class="empty-state"><p>No clients match your search.</p></div>'
-      : '<div class="empty-state"><div class="icon">👤</div><p>No clients yet. Add one, or link one while creating a matter.</p></div>';
+    if (isSearching) {
+      el.innerHTML = '<div class="empty-state"><p>No clients match your search.</p></div>';
+    } else if (_clientsScope === 'mine' && !window._userId) {
+      el.innerHTML = '<div class="empty-state"><div class="icon">👤</div><p>Per-lawyer ownership isn\'t available until login is enabled for this firm — switch to "All Clients" to see everyone.</p></div>';
+    } else if (_clientsScope === 'mine') {
+      el.innerHTML = '<div class="empty-state"><div class="icon">👤</div><p>No clients under your account yet. Add one, or switch to "All Clients" to see the rest of the firm\'s.</p></div>';
+    } else {
+      el.innerHTML = '<div class="empty-state"><div class="icon">👤</div><p>No clients yet. Add one, or link one while creating a matter.</p></div>';
+    }
     return;
   }
 
@@ -2098,7 +2218,7 @@ function filterClients(query) {
     return;
   }
   const q = query.toLowerCase();
-  const filtered = sortedClientsList().filter(c =>
+  const filtered = scopedClientsList().filter(c =>
     (c.full_name || '').toLowerCase().includes(q) ||
     (c.email || '').toLowerCase().includes(q) ||
     (c.phone || '').toLowerCase().includes(q) ||
@@ -2136,6 +2256,95 @@ async function openClientDetail(id) {
   }
 }
 
+// Merges each matter's own next_deadline with the client-level
+// calendar_events (already scoped to this client's matters and to
+// date >= today by GET /api/clients/{id}), sorted soonest-first.
+function _clientUpcomingDeadlinesHtml(client) {
+  const clientMatters = client.matters || [];
+  const events = client.calendar_events || [];
+  const items = [];
+  clientMatters.forEach(m => {
+    if (m.next_deadline) {
+      items.push({ date: m.next_deadline, matterId: m.id, label: m.name, chip: deadlineChipHtml(m), note: m.next_deadline_note });
+    }
+  });
+  events.forEach(e => {
+    items.push({ date: e.date, matterId: e.matter_id, label: e.title, chip: `<span class="chip chip-blue">${escHtml(e.date)}</span>`, note: e.court || e.matter_name || '' });
+  });
+  if (!items.length) {
+    return '<p style="font-size:0.8rem;color:var(--ink3)">No upcoming deadlines or calendar events across this client\'s matters.</p>';
+  }
+  items.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  return items.map(it => `
+    <div class="matter-item">
+      <div class="matter-row" ${it.matterId ? `onclick="goToMatter('${it.matterId}')"` : ''}>
+        <div class="matter-icon">⏰</div>
+        <div class="matter-expand">
+          <div class="matter-name">${escHtml(it.label || '')}</div>
+          <div class="matter-meta">${it.chip}${it.note ? `<span style="font-size:0.7rem;color:var(--ink3)">${escHtml(it.note)}</span>` : ''}</div>
+        </div>
+        <div class="matter-actions"><span style="color:var(--ink3);font-size:0.8rem">→</span></div>
+      </div>
+    </div>`).join('');
+}
+
+// Flattens progress notes + documents across every matter this client
+// has into one feed, most recent first — reuses the exact .note-item/
+// .doc-item markup the Matter detail panel already uses (index.html
+// renderMatterPanel), just tagged with which matter each item is from.
+function _clientRecentActivityHtml(client) {
+  const clientMatters = client.matters || [];
+  const items = [];
+  clientMatters.forEach(m => {
+    (m.progress_notes || []).forEach(n => items.push({ type: 'note', matterId: m.id, matterName: m.name, data: n, ts: n.created_at }));
+    (m.documents || []).forEach(d => items.push({ type: 'document', matterId: m.id, matterName: m.name, data: d, ts: d.uploaded_at }));
+  });
+  if (!items.length) {
+    return '<p style="font-size:0.8rem;color:var(--ink3)">No notes or documents yet across this client\'s matters.</p>';
+  }
+  items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  return items.slice(0, 8).map(it => {
+    if (it.type === 'note') {
+      const n = it.data;
+      return `
+        <div class="note-item" style="cursor:pointer" onclick="goToMatter('${it.matterId}')">
+          <div class="note-text">${escHtml(n.text)}</div>
+          <div class="note-footer"><span>🖊 ${escHtml(n.author || '')} · ${escHtml(it.matterName)} · ${(n.created_at||'').slice(0,10)}</span></div>
+        </div>`;
+    }
+    const d = it.data;
+    return `
+      <div class="doc-item" style="cursor:pointer" onclick="goToMatter('${it.matterId}')">
+        <div class="doc-icon">📄</div>
+        <div style="flex:1;min-width:0">
+          <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
+          <div class="doc-meta" style="margin-top:2px">
+            <span class="chip chip-gray">${escHtml(it.matterName)}</span>
+            <span style="font-size:0.7rem;color:var(--ink3)">${(d.uploaded_at||'').slice(0,10)}</span>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// Client-side aggregation from data GET /api/clients/{id} already
+// returns per matter — same computation shape as clientMatterCount().
+function _clientPracticeAreaBreakdownHtml(client) {
+  const clientMatters = client.matters || [];
+  if (!clientMatters.length) {
+    return '<p style="font-size:0.8rem;color:var(--ink3)">No matters yet.</p>';
+  }
+  const counts = {};
+  clientMatters.forEach(m => {
+    const key = m.practice_area || 'Uncategorized';
+    counts[key] = (counts[key] || 0) + 1;
+  });
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return `<div style="display:flex;flex-wrap:wrap;gap:6px">
+    ${entries.map(([area, count]) => `<span class="chip chip-gold">${escHtml(area)} <span style="font-weight:400;opacity:0.8">(${count})</span></span>`).join('')}
+  </div>`;
+}
+
 function renderClientDetailContent(client) {
   const clientMatters = client.matters || [];
   return `
@@ -2161,6 +2370,9 @@ function renderClientDetailContent(client) {
         <div style="margin-top:0.85rem">${_clientDetailField('NOTES', client.notes)}</div>
       </div>
     </div>
+
+    <div class="matter-section-title" style="margin:1.1rem 0 0.5rem">⏰ UPCOMING DEADLINES</div>
+    ${_clientUpcomingDeadlinesHtml(client)}
 
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin:1.1rem 0 0.5rem">
       <div class="matter-section-title" style="margin:0">📂 MATTERS (${clientMatters.length})</div>
@@ -2195,13 +2407,21 @@ function renderClientDetailContent(client) {
               <div class="matter-meta">
                 ${m.matter_number ? `<span class="chip chip-blue" title="Matter number">${escHtml(m.matter_number)}</span>` : ''}
                 <span class="chip ${statusColor}">${escHtml(status)}</span>
+                ${m.practice_area ? `<span class="chip chip-gold">${escHtml(m.practice_area)}</span>` : ''}
                 ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
+                ${deadlineChipHtml(m)}
               </div>
             </div>
             <div class="matter-actions"><span style="color:var(--ink3);font-size:0.8rem">→</span></div>
           </div>
         </div>`;
       }).join('')}
+
+    <div class="matter-section-title" style="margin:1.1rem 0 0.5rem">🕐 RECENT ACTIVITY</div>
+    ${_clientRecentActivityHtml(client)}
+
+    <div class="matter-section-title" style="margin:1.1rem 0 0.5rem">📊 PRACTICE AREA BREAKDOWN</div>
+    ${_clientPracticeAreaBreakdownHtml(client)}
   `;
 }
 
@@ -2360,7 +2580,7 @@ function showTab(tab) {
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
-  if (tab === 'reports') loadReportHistory();
+  if (tab === 'reports') { loadReportHistory(); loadPracticeAreaBreakdown(); }
 }
 
 // ── Matters ───────────────────────────────────────────────────────────────────
@@ -2378,6 +2598,7 @@ async function createMatterFromVault() {
         client_name: document.getElementById('new-matter-client').value.trim() || null,
         status: document.getElementById('new-matter-status').value || 'Active',
         matter_type: document.getElementById('new-matter-type').value || null,
+        practice_area: document.getElementById('new-matter-practice-area').value || null,
       })
     });
     const m = await res.json();
@@ -2392,6 +2613,7 @@ async function createMatterFromVault() {
     });
     document.getElementById('new-matter-status').value = 'Active';
     document.getElementById('new-matter-type').value = '';
+    document.getElementById('new-matter-practice-area').value = '';
     showVaultStatus(`Matter "${m.name}" created.`, 'success');
   } catch(e) { showVaultStatus('Could not create matter.', 'error'); }
 }
@@ -2407,6 +2629,41 @@ const STATUS_COLORS = {
   'On Hold': 'chip-gray',
   'Closed': 'chip-red',
 };
+
+// Single source of truth for the fixed practice-area list, matching
+// backend/practice_areas.py's PRACTICE_AREAS exactly — populated into
+// both New Matter forms' <select> elements at load time (see
+// populatePracticeAreaSelects()) rather than duplicating the <option>
+// list as raw HTML in each form, which is exactly how matter_type ended
+// up with three separately-drifted option lists across this file.
+const PRACTICE_AREAS = [
+  'Litigation', 'Conveyancing/Property', 'Estate/Inheritance',
+  'Family/Matrimonial', 'Trust', 'Company/Commercial', 'Labour',
+  'Debt Collection', 'Criminal', 'Other',
+];
+
+// Must match backend/conveyancing.py's CONVEYANCING_MILESTONES exactly —
+// same "single source of truth, mirrored" convention as PRACTICE_AREAS
+// above. Only shown/used when a matter's practice_area is exactly
+// 'Conveyancing/Property'.
+const CONVEYANCING_MILESTONES = [
+  'Agreement of Sale Signed', 'Deposit Paid', 'Rates Clearance Obtained',
+  'Capital Gains Tax Clearance Obtained', 'Documents Lodged with Deeds Registry',
+  'Deeds Registered', 'Transfer Complete',
+];
+
+function populatePracticeAreaSelects() {
+  ['new-matter-practice-area', 'nm-practice-area'].forEach(id => {
+    const select = document.getElementById(id);
+    if (!select) return;
+    for (const area of PRACTICE_AREAS) {
+      const opt = document.createElement('option');
+      opt.value = area;
+      opt.textContent = area;
+      select.appendChild(opt);
+    }
+  });
+}
 
 function deadlineChipHtml(m) {
   if (!m.next_deadline) return '';
@@ -2485,6 +2742,7 @@ function renderMattersList(filtered = null) {
           <div class="matter-meta">
             ${m.matter_number ? `<span class="chip chip-blue" title="Matter number">${escHtml(m.matter_number)}</span>` : ''}
             ${extRef ? `<span class="chip chip-blue" title="External reference">${escHtml(extRef)}</span>` : ''}
+            ${m.practice_area ? `<span class="chip chip-gold">${escHtml(m.practice_area)}</span>` : ''}
             ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
             <span class="chip ${statusColor}">${escHtml(status)}</span>
             ${deadlineChipHtml(m)}
@@ -2582,6 +2840,96 @@ async function renderMatterPanel(id) {
           </div>
         </div>
       </div>
+
+      <!-- Fees billed / received — the firm's own professional fees only,
+           never client funds held in trust (see the schema comment in
+           run_migrations() for why this matters). -->
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">💰 Fees billed / received</div>
+        <p style="font-size:0.72rem;color:var(--ink3);margin:-4px 0 8px">The firm's own professional fees — not client funds held in trust.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:60px">BILLED</label>
+            <input type="number" step="0.01" min="0" value="${matter.amount_billed ?? ''}"
+              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterFieldAndRefresh('${id}','amount_billed',this.value)" placeholder="0.00"/>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:60px">RECEIVED</label>
+            <input type="number" step="0.01" min="0" value="${matter.amount_received ?? ''}"
+              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterFieldAndRefresh('${id}','amount_received',this.value)" placeholder="0.00"/>
+          </div>
+          ${(matter.fee_balance !== null && matter.fee_balance !== undefined) ? `<span class="chip ${matter.fee_balance > 0 ? 'chip-gold' : 'chip-green'}">Balance (billed − received): ${matter.fee_balance.toFixed(2)}</span>` : ''}
+        </div>
+      </div>
+
+      ${matter.practice_area === 'Conveyancing/Property' ? `
+      <!-- Conveyancing — only shown for practice_area = 'Conveyancing/Property' -->
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">🏠 Conveyancing</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
+          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:70px">MILESTONE</label>
+          <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+                  onchange="updateMatterFieldAndRefresh('${id}','conveyancing_milestone',this.value)">
+            <option value="">— Select —</option>
+            ${CONVEYANCING_MILESTONES.map(s =>
+              `<option value="${s}" ${s === matter.conveyancing_milestone ? 'selected' : ''}>${s}</option>`
+            ).join('')}
+          </select>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:100px">PROPERTY ADDRESS</label>
+            <input type="text" value="${escHtml(matter.conveyancing_property_address || '')}"
+              style="width:220px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="updateMatterField('${id}','conveyancing_property_address',this.value)" placeholder="e.g. Stand 245 Borrowdale"/>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:100px">TITLE DEED NO.</label>
+            <input type="text" value="${escHtml(matter.conveyancing_title_deed_number || '')}"
+              style="width:140px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="updateMatterField('${id}','conveyancing_title_deed_number',this.value)"/>
+          </div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:100px" title="Reference only — not a balance or funds held">PURCHASE PRICE</label>
+            <input type="number" step="0.01" min="0" value="${matter.conveyancing_purchase_price ?? ''}"
+              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterField('${id}','conveyancing_purchase_price',this.value)" placeholder="0.00"/>
+            <span style="font-size:0.68rem;color:var(--ink3)">(reference only — not a balance or funds held)</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
+          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:100px">OTHER SIDE'S CONVEYANCER / AGENT</label>
+          <input type="text" value="${escHtml(matter.conveyancing_other_conveyancer_contact || '')}"
+            style="flex:1;min-width:180px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+            onchange="updateMatterField('${id}','conveyancing_other_conveyancer_contact',this.value)" placeholder="Name and contact details"/>
+        </div>
+        <p style="font-size:0.7rem;color:var(--ink3);margin:8px 0 4px">Key dates — feed into the Calendar tab and the daily reminder digest automatically.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:110px">TRANSFER DATE</label>
+            <input type="date" value="${matter.conveyancing_transfer_date || ''}"
+              style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterField('${id}','conveyancing_transfer_date',this.value)"/>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:110px">RATES CLEARANCE EXPIRY</label>
+            <input type="date" value="${matter.conveyancing_rates_clearance_expiry || ''}"
+              style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterField('${id}','conveyancing_rates_clearance_expiry',this.value)"/>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:110px">BOND REGISTRATION DEADLINE</label>
+            <input type="date" value="${matter.conveyancing_bond_registration_deadline || ''}"
+              style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterField('${id}','conveyancing_bond_registration_deadline',this.value)"/>
+          </div>
+        </div>
+      </div>
+      ` : ''}
 
       <!-- Progress Notes -->
       <div class="matter-section">
@@ -2730,26 +3078,43 @@ async function onMatterClientSelectChange(matterId) {
 }
 
 async function updateMatterField(matterId, field, value) {
+  let updated = null;
   if (value === '__custom__') {
     value = prompt('Enter custom status:');
     if (!value) return;
     // Store as custom_status and set status to the custom value
-    await fetch(`${API}/api/matters/${matterId}`, {
+    const res = await fetch(`${API}/api/matters/${matterId}`, {
       method: 'PATCH',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ status: value, custom_status: value })
     });
+    updated = await res.json().catch(() => null);
   } else {
-    await fetch(`${API}/api/matters/${matterId}`, {
+    const res = await fetch(`${API}/api/matters/${matterId}`, {
       method: 'PATCH',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ [field]: value })
     });
+    updated = await res.json().catch(() => null);
   }
-  // Update local cache
+  // Merge the full server response (not just the one field) into the local
+  // cache — picks up server-computed fields too, e.g. fee_balance, which
+  // this endpoint never accepts as input and only ever returns.
   const m = matters.find(m => m.id === matterId);
-  if (m) m[field] = value;
+  if (m) {
+    if (updated && !updated.detail) Object.assign(m, updated);
+    else m[field] = value;
+  }
   renderMattersList();
+}
+
+// Same as updateMatterField, but also re-renders the currently-open matter
+// panel afterward — for fields whose displayed value depends on a
+// server-computed result (e.g. fee_balance) rather than just echoing back
+// what was typed.
+async function updateMatterFieldAndRefresh(matterId, field, value) {
+  await updateMatterField(matterId, field, value);
+  renderMatterPanel(matterId);
 }
 
 // Central handler for setting/changing a matter's client_id — used by both
@@ -3201,7 +3566,11 @@ function pollDocumentSearchJob(jobId, query, myToken) {
 function printSearchResults() {
   // Set print header details
   const query = document.getElementById('search-query').value.trim();
-  document.getElementById('search-print-query').textContent = `Query: "${query}"`;
+  // Cap the printed query line — a long pasted fact pattern used to print
+  // in full, pushing the actual analysis off page 1 entirely.
+  const QUERY_PRINT_MAX = 220;
+  const queryLine = query.length > QUERY_PRINT_MAX ? query.slice(0, QUERY_PRINT_MAX).trim() + '…' : query;
+  document.getElementById('search-print-query').textContent = `Re: "${queryLine}"`;
   document.getElementById('search-print-date').textContent =
     `Generated: ${new Date().toLocaleDateString('en-ZW', {day:'numeric', month:'long', year:'numeric', hour:'2-digit', minute:'2-digit'})}`;
   document.getElementById('search-print-header').style.display = 'block';
@@ -5563,6 +5932,39 @@ async function loadReportHistory() {
       </table>
     `;
   } catch(e) { el.innerHTML = '<em>Error loading report history.</em>'; }
+}
+
+async function loadPracticeAreaBreakdown() {
+  const el = document.getElementById('practice-area-breakdown-list');
+  try {
+    const res = await fetch(`${API}/api/reports/practice-area-breakdown`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load practice area breakdown.</em>'; return; }
+    const rows = await res.json();
+    if (!rows.length) { el.innerHTML = '<em>No matters yet.</em>'; return; }
+    const total = rows.reduce((sum, r) => sum + r.matter_count, 0);
+    el.innerHTML = `
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
+            <th style="padding:6px 8px 6px 0">Practice Area</th>
+            <th style="padding:6px 8px">Matters</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px 6px 0">${escHtml(r.practice_area)}</td>
+              <td style="padding:6px 8px">${r.matter_count}</td>
+            </tr>
+          `).join('')}
+          <tr>
+            <td style="padding:6px 8px 6px 0;font-weight:700">Total</td>
+            <td style="padding:6px 8px;font-weight:700">${total}</td>
+          </tr>
+        </tbody>
+      </table>
+    `;
+  } catch(e) { el.innerHTML = '<em>Error loading practice area breakdown.</em>'; }
 }
 
 function showInviteStatus(msg, type) {
