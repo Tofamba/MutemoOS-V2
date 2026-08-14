@@ -17,6 +17,7 @@ Built by [Tofamba Technology](https://tofamba.com), Harare, Zimbabwe.
 - [Environment Variables](#environment-variables)
 - [Document Storage (Cloudflare R2)](#document-storage-cloudflare-r2)
 - [Deployment on Railway](#deployment-on-railway)
+- [Staging Environment](#staging-environment)
 - [Migrating from v1](#migrating-from-v1)
 - [API Reference](#api-reference)
 - [Role-Based Access Control](#role-based-access-control)
@@ -67,8 +68,13 @@ A substantial round of feature and reliability work, largely driven by real use 
 - **Daily vault digest** — a separate daily email summarising new news, legislation, and judgments added to the vault
 - **OCR confidence flagging** — low-confidence OCR (e.g. a poor phone photo) is now flagged for manual review rather than silently trusted downstream
 - **Authentication overhaul** — see below; Twilio SMS OTP replaced with WhatsApp + email (Twilio later reinstated as a fallback channel, in between WhatsApp and email — see the Authentication note under Environment Variables)
+- **Client entity + bulk onboarding** — `POST /api/onboarding/bulk-upload` onboards a lawyer plus their existing client base from the firm's Client Database Excel form in one upload, matching/creating clients via fuzzy name matching and flagging ambiguous names for review rather than guessing; also added `contact_person` on clients (corporate/entity clients)
+- **Automatic client/matter numbering** — every client and matter now gets a sequential number (`{initials}-{seq}`, e.g. `NGM-007`, and `{client_number}-{seq}` for matters) under the creating lawyer's initials, surfaced in the Clients tab, matter views, and the daily reminder email
+- **RBZ compliance export** — a partner-tier-only export (CSV, plus a PDF option) of every client and matter firm-wide, with a `report_history` table logging every generation and a Reports tab to trigger it
+- **Multi-document ad-hoc search** — `POST /api/search/document` now accepts multiple attached files in one query instead of one, with a proper multi-file chip UI replacing the old single-file input
 
 **Fixed:**
+- **Calendar event visibility** — every user with `calendar:read` could see every event firm-wide regardless of invite status, and an ICS Accept/Decline response from an attendee's mail client never actually reached the app. Invites now track real accept/decline state via a new respond endpoint, and calendar views scope to creator-or-accepted-attendee only
 - **ChromaDB was not persistent** — the vector index lived on the container's ephemeral filesystem and was silently wiped on every redeploy, even though Postgres (the real source of truth for chunk text) survived. Added a persistent volume plus a startup reconciliation check that rebuilds only what's actually out of sync, rather than a full reindex on every boot
 - **Grounding-warning UI was dead code** — the frontend had a "no sources found" warning that no backend endpoint had ever actually populated, since it was originally built. A well-grounded and a zero-source answer were visually indistinguishable. Now genuinely wired up
 - **Search Vault responses were being truncated mid-sentence** — a token limit that was fine for short answers was too low for a thorough document review; raised, and a `stop_reason` check now flags truncation explicitly if it ever happens again rather than silently returning an incomplete answer
@@ -311,6 +317,44 @@ Expected response:
 
 ---
 
+## Staging Environment
+
+Every push to `main` auto-deploys to **every** firm's production service simultaneously — there is no environment between "developer's machine" and "live for all firms." A `staging` branch and service close that gap: changes land there first, get manually verified, and only then get merged to `main` to actually go live.
+
+### Where it lives
+| | |
+|---|---|
+| **Railway project** | `endearing-forgiveness` (same project as production — a separate service within it, not a separate Railway environment) |
+| **Service** | `mutemoos-staging` — own PostgreSQL (`Postgres-gKPX`) and own ChromaDB volume, fully isolated from every firm's real data. Not a read replica or shared instance of anything |
+| **URL** | `https://mutemoos-staging-production.up.railway.app` |
+| **Branch** | `staging` — auto-deploys on every push, exactly the way `main` does for production |
+
+### Pointing a tester (human or Claude Code) at it
+- **Base URL**: `https://mutemoos-staging-production.up.railway.app` — same API surface as production (see [API Reference](#api-reference))
+- **Login**: staging has no OTP channel configured (no `WHATSAPP_*`/`TWILIO_*`/email vars set), so `AUTH_ENABLED` is `False` and the app falls back to a synthetic dev user automatically — no OTP flow to fight with when poking around the UI or hitting most endpoints
+- **Admin endpoints** (`/api/admin/*`) still require the `X-Admin-Token` header — use the `MUTEMO_ADMIN_TOKEN` value from the `mutemoos-staging` service's Variables tab in the Railway dashboard
+- **Health check**: `curl https://mutemoos-staging-production.up.railway.app/api/health`
+
+### Seeded data
+Staging comes pre-loaded with a synthetic firm ("Chademana & Rusike Legal Practitioners") — 4 fictional lawyers and 10 fictional clients/matters spanning Estate/Inheritance, Conveyancing/Property, Debt Collection, Family/Matrimonial, Trust, and Labour — so testing has something realistic to work against instead of an empty database. None of it is real or derived from any real firm's data, anonymized or otherwise. Re-seeding is idempotent (existing rows are skipped, safe to re-run after a reset):
+```bash
+DATABASE_URL=<staging DB URL — Railway dashboard → Postgres-gKPX → Connect> \
+MUTEMO_FIRM_ID=9e9354da-3890-4d7d-8d5b-c265854cac8d \
+MUTEMO_FIRM_NAME="Chademana & Rusike Legal Practitioners" \
+python3 scripts/seed_staging_data.py
+```
+
+### Workflow
+1. Branch from `main` as usual (see [Contributing](#contributing))
+2. Push/merge into `staging` first — this auto-deploys `mutemoos-staging`
+3. Verify manually against the staging URL above
+4. Merge `staging` → `main` — this is the deliberate **"go live" gate**. Only this step reaches real firms' services (`MutemoOS-V2` today, and any future firm service), all of which auto-deploy from `main`
+
+### What's deliberately excluded from staging
+`ANTHROPIC_API_KEY`, `RESEND_API_KEY`, `RESEND_FROM`, and `LAWS_AFRICA_TOKEN` are wired to production's live values via Railway's `${{ServiceName.VAR}}` reference syntax — safe to share since these are stateless third-party API calls with no persisted state to cross-contaminate. Cloudflare Access and R2 credentials (`CLOUDFLARE_*`, `R2_*`) are **not** set on staging at all — sharing those would let staging actions mutate the *real* Cloudflare Access app rules or write into the *real* R2 document bucket, which defeats the point of isolation.
+
+---
+
 ## Migrating from v1
 
 If you have an existing `mutemo_state.json` from v1:
@@ -471,7 +515,7 @@ To deploy a second firm:
 
 The two instances share no data. Each has its own database, vector store, and subdomain.
 
-> The `mutemo-legal-feed` companion service already has example configuration for a second firm (Legal Corner) documented in `pusher.py`'s `FIRM_2_*` variables — worth checking there before assuming this needs to be set up from scratch.
+> `mutemo-legal-feed`'s `pusher.py` currently only supports pushing to a single firm via `MUTEMOS_FIRM_ID` — there is no existing multi-firm example there to reuse. Extending it to push to more than one firm instance is still a from-scratch task.
 
 ---
 
@@ -539,6 +583,7 @@ If you are a developer working on this codebase under contract:
 3. All API changes must update this README
 4. Test locally against a real PostgreSQL instance before pushing
 5. The migration script must remain idempotent
+6. Land your change on `staging` first and verify it there (see [Staging Environment](#staging-environment)) before merging to `main` — `main` auto-deploys straight to every real firm with no intermediate check
 
 ---
 
