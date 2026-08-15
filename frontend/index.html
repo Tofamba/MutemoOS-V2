@@ -583,91 +583,6 @@ select{cursor:pointer}
     <button class="btn btn-primary" onclick="openNewMatterModal()" style="white-space:nowrap;margin-top:0.25rem">+ New Matter</button>
   </div>
 
-  <!-- New Matter Modal -->
-  <div id="new-matter-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
-    <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
-        <div style="font-weight:700;font-size:1rem">+ New Matter</div>
-        <button onclick="closeNewMatterModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
-      </div>
-      <div class="form-group">
-        <label>Matter Name / Description *</label>
-        <input type="text" id="nm-name" placeholder="e.g. Moyo v Dube — Stand 245 Borrowdale" oninput="debouncedConflictCheck()"/>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Internal Ref</label>
-          <input type="text" id="nm-internal-ref" placeholder="NGM 1"/>
-        </div>
-        <div class="form-group">
-          <label>External Ref</label>
-          <input type="text" id="nm-external-ref" placeholder="HC 1234/26"/>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Client</label>
-        <input type="text" id="nm-client-search" placeholder="🔍 Search existing clients…"
-               oninput="filterClientOptions('nm-client-select', this.value)" style="margin-bottom:0.4rem"/>
-        <select id="nm-client-select" onchange="onNmClientSelectChange()">
-          <option value="">— Select existing client —</option>
-        </select>
-        <div style="font-size:0.72rem;color:var(--ink3);margin:0.4rem 0 0.25rem">— or type a new client's name to create one —</div>
-        <input type="text" id="nm-client" placeholder="e.g. John Moyo" oninput="onNmClientNameInput()"/>
-      </div>
-      <div id="nm-conflict-warning" style="display:none;margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600"></div>
-      <div class="form-group">
-        <label>Other Named Parties (optional)</label>
-        <textarea id="nm-case-parties" rows="2" placeholder="Co-respondents, companies, or family members named in the matter who aren't themselves a client — e.g. the client's company, or a relative cited separately"></textarea>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Next Critical Deadline (optional)</label>
-          <input type="date" id="nm-deadline"/>
-        </div>
-        <div class="form-group">
-          <label>Deadline Note</label>
-          <input type="text" id="nm-deadline-note" placeholder="e.g. 60-day rehearing deadline"/>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Matter Type</label>
-          <select id="nm-type">
-            <option value="">— Select type —</option>
-            <option value="commercial_property">Commercial Property</option>
-            <option value="residential_property">Residential Property</option>
-            <option value="employment">Employment / Labour</option>
-            <option value="family">Family / Matrimonial</option>
-            <option value="criminal">Criminal</option>
-            <option value="commercial_contract">Commercial Contract</option>
-            <option value="debt_collection">Debt Collection</option>
-            <option value="estate">Estate / Probate</option>
-            <option value="insurance">Insurance Claim</option>
-            <option value="constitutional">Constitutional</option>
-            <option value="other">Other</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Status</label>
-          <select id="nm-status">
-            <option value="Active">Active</option>
-            <option value="Awaiting Client">Awaiting Client</option>
-            <option value="Awaiting Court">Awaiting Court</option>
-            <option value="On Hold">On Hold</option>
-          </select>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Practice Area</label>
-        <select id="nm-practice-area">
-          <option value="">— Select —</option>
-        </select>
-      </div>
-      <div id="nm-status-msg" class="status" style="margin-bottom:0.5rem"></div>
-      <button class="btn btn-primary" style="width:100%" onclick="submitNewMatter()">Create Matter</button>
-    </div>
-  </div>
-
   <!-- Bulk Import -->
   <div class="card" style="margin-bottom:1rem;margin-top:1rem">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
@@ -739,47 +654,6 @@ select{cursor:pointer}
     <div id="client-detail-content"></div>
   </div>
 
-  <!-- New/Edit Client Modal -->
-  <div id="client-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
-    <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
-        <div style="font-weight:700;font-size:1rem" id="client-modal-title">+ New Client</div>
-        <button onclick="closeClientModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
-      </div>
-      <div class="form-group">
-        <label>Full Name *</label>
-        <input type="text" id="cm-full-name" placeholder="e.g. John Moyo"/>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Email</label>
-          <input type="email" id="cm-email" placeholder="john@example.com"/>
-        </div>
-        <div class="form-group">
-          <label>Phone</label>
-          <input type="text" id="cm-phone" placeholder="+263 77 123 4567"/>
-        </div>
-      </div>
-      <div class="form-group">
-        <label>Contact Person <span style="font-weight:400;color:var(--ink3)">(companies/entities only)</span></label>
-        <input type="text" id="cm-contact-person" placeholder="e.g. Jane Muzenda (Company Secretary)"/>
-      </div>
-      <div class="form-group">
-        <label>Physical Address</label>
-        <input type="text" id="cm-address" placeholder="e.g. 12 Baines Avenue, Harare"/>
-      </div>
-      <div class="form-group">
-        <label>ID / Registration Number</label>
-        <input type="text" id="cm-id-number" placeholder="National ID or company registration number"/>
-      </div>
-      <div class="form-group">
-        <label>Notes</label>
-        <textarea id="cm-notes" rows="3" placeholder="Any additional notes about this client…"></textarea>
-      </div>
-      <div id="client-modal-status" class="status" style="margin-bottom:0.5rem"></div>
-      <button class="btn btn-primary" style="width:100%" onclick="submitClientForm()">Save Client</button>
-    </div>
-  </div>
 </div>
 
 <!-- ═══════════════ CALENDAR TAB ═══════════════ -->
@@ -1505,6 +1379,143 @@ select{cursor:pointer}
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ═══════════════ NEW/EDIT CLIENT MODAL ═══════════════ -->
+<!-- Top-level for the same reason as the New Matter modal below — opened
+     from openClientModal(), whose callers include the client detail
+     view (openClientDetail() renders inside #client-detail-view, itself
+     inside #tab-clients), so it doesn't have a single "home" tab either. -->
+<div id="client-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+      <div style="font-weight:700;font-size:1rem" id="client-modal-title">+ New Client</div>
+      <button onclick="closeClientModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+    <div class="form-group">
+      <label>Full Name *</label>
+      <input type="text" id="cm-full-name" placeholder="e.g. John Moyo"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="cm-email" placeholder="john@example.com"/>
+      </div>
+      <div class="form-group">
+        <label>Phone</label>
+        <input type="text" id="cm-phone" placeholder="+263 77 123 4567"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Contact Person <span style="font-weight:400;color:var(--ink3)">(companies/entities only)</span></label>
+      <input type="text" id="cm-contact-person" placeholder="e.g. Jane Muzenda (Company Secretary)"/>
+    </div>
+    <div class="form-group">
+      <label>Physical Address</label>
+      <input type="text" id="cm-address" placeholder="e.g. 12 Baines Avenue, Harare"/>
+    </div>
+    <div class="form-group">
+      <label>ID / Registration Number</label>
+      <input type="text" id="cm-id-number" placeholder="National ID or company registration number"/>
+    </div>
+    <div class="form-group">
+      <label>Notes</label>
+      <textarea id="cm-notes" rows="3" placeholder="Any additional notes about this client…"></textarea>
+    </div>
+    <div id="client-modal-status" class="status" style="margin-bottom:0.5rem"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="submitClientForm()">Save Client</button>
+  </div>
+</div>
+
+<!-- ═══════════════ NEW MATTER MODAL ═══════════════ -->
+<!-- Top-level, not nested inside any #tab-* div — a position:fixed overlay
+     opened from outside its "home" tab (e.g. the Clients tab's "+ New
+     Matter for this Client" button) would otherwise inherit display:none
+     from a hidden ancestor tab and silently fail to render, even though
+     its own inline styles look correct. See frontend/index.html's other
+     top-level modals below for the same reasoning. -->
+<div id="new-matter-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+      <div style="font-weight:700;font-size:1rem">+ New Matter</div>
+      <button onclick="closeNewMatterModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+    <div class="form-group">
+      <label>Matter Name / Description *</label>
+      <input type="text" id="nm-name" placeholder="e.g. Moyo v Dube — Stand 245 Borrowdale" oninput="debouncedConflictCheck()"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Internal Ref</label>
+        <input type="text" id="nm-internal-ref" placeholder="NGM 1"/>
+      </div>
+      <div class="form-group">
+        <label>External Ref</label>
+        <input type="text" id="nm-external-ref" placeholder="HC 1234/26"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Client</label>
+      <input type="text" id="nm-client-search" placeholder="🔍 Search existing clients…"
+             oninput="filterClientOptions('nm-client-select', this.value)" style="margin-bottom:0.4rem"/>
+      <select id="nm-client-select" onchange="onNmClientSelectChange()">
+        <option value="">— Select existing client —</option>
+      </select>
+      <div style="font-size:0.72rem;color:var(--ink3);margin:0.4rem 0 0.25rem">— or type a new client's name to create one —</div>
+      <input type="text" id="nm-client" placeholder="e.g. John Moyo" oninput="onNmClientNameInput()"/>
+    </div>
+    <div id="nm-conflict-warning" style="display:none;margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600"></div>
+    <div class="form-group">
+      <label>Other Named Parties (optional)</label>
+      <textarea id="nm-case-parties" rows="2" placeholder="Co-respondents, companies, or family members named in the matter who aren't themselves a client — e.g. the client's company, or a relative cited separately"></textarea>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Next Critical Deadline (optional)</label>
+        <input type="date" id="nm-deadline"/>
+      </div>
+      <div class="form-group">
+        <label>Deadline Note</label>
+        <input type="text" id="nm-deadline-note" placeholder="e.g. 60-day rehearing deadline"/>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Matter Type</label>
+        <select id="nm-type">
+          <option value="">— Select type —</option>
+          <option value="commercial_property">Commercial Property</option>
+          <option value="residential_property">Residential Property</option>
+          <option value="employment">Employment / Labour</option>
+          <option value="family">Family / Matrimonial</option>
+          <option value="criminal">Criminal</option>
+          <option value="commercial_contract">Commercial Contract</option>
+          <option value="debt_collection">Debt Collection</option>
+          <option value="estate">Estate / Probate</option>
+          <option value="insurance">Insurance Claim</option>
+          <option value="constitutional">Constitutional</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Status</label>
+        <select id="nm-status">
+          <option value="Active">Active</option>
+          <option value="Awaiting Client">Awaiting Client</option>
+          <option value="Awaiting Court">Awaiting Court</option>
+          <option value="On Hold">On Hold</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Practice Area</label>
+      <select id="nm-practice-area">
+        <option value="">— Select —</option>
+      </select>
+    </div>
+    <div id="nm-status-msg" class="status" style="margin-bottom:0.5rem"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="submitNewMatter()">Create Matter</button>
   </div>
 </div>
 
