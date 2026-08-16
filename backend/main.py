@@ -873,6 +873,17 @@ def require_admin_token(request: Request):
         if token != ADMIN_TOKEN:
             raise HTTPException(status_code=403, detail="Admin access required")
 
+# ── Legal feed service token ─────────────────────────────────────────────────
+# A separate, narrowly-scoped credential for mutemo-legal-feed's own
+# machine-to-machine pushes — checked ONLY on FEED_UPLOAD_PATHS below, never
+# treated as equivalent to ADMIN_TOKEN. Previously the feed reused
+# MUTEMO_ADMIN_TOKEN, which also unlocks /api/admin/* (reindex,
+# reset-chromadb, reclassify-zlr, etc.) — a leaked feed credential had far
+# more reach than the feed itself ever needs. This token can only ever
+# write legal-updates/zlr content, nothing else.
+LEGAL_FEED_SERVICE_TOKEN = os.environ.get("LEGAL_FEED_SERVICE_TOKEN")
+FEED_UPLOAD_PATHS = ("/api/legal-updates/upload", "/api/zlr/upload")
+
 # ── OTP Authentication ────────────────────────────────────────────────────────
 # Preferred channel is WhatsApp Business Cloud API (Meta) — reuses the same
 # Meta WhatsApp Business setup already used for AlertEngine. This uses a
@@ -1238,18 +1249,26 @@ async def session_auth_middleware(request, call_next):
             if row:
                 return await call_next(request)
 
-    # A valid X-Admin-Token is also sufficient — this is how the
-    # mutemo-legal-feed pusher authenticates its machine-to-machine calls
-    # to /api/legal-updates/upload and /api/zlr/upload (it has no session
-    # cookie at all, and never will, since it isn't a logged-in user).
-    # This was a real, live regression: once AUTH_ENABLED actually started
-    # being enforced (following the invite-gating/OTP fixes), this
-    # middleware had no exemption for that header at all, meaning the
-    # daily scraper's pushes would have started silently failing with 401
-    # the moment auth was properly turned on.
+    # A valid X-Admin-Token is also sufficient for general admin tooling
+    # (curl + MUTEMO_ADMIN_TOKEN against /api/admin/* etc. — see
+    # require_admin_token() below). This was a real, live regression once:
+    # when AUTH_ENABLED actually started being enforced (following the
+    # invite-gating/OTP fixes), this middleware had no token exemption at
+    # all, meaning any token-based caller started getting a silent 401 the
+    # moment auth was properly turned on.
     admin_token_header = request.headers.get("X-Admin-Token", "")
     if ADMIN_TOKEN and admin_token_header == ADMIN_TOKEN:
         return await call_next(request)
+
+    # mutemo-legal-feed's pusher authenticates its machine-to-machine calls
+    # with its own dedicated LEGAL_FEED_SERVICE_TOKEN (X-Feed-Service-Token
+    # header) — deliberately NOT the general admin token, and deliberately
+    # only exempted for its two actual upload paths, so a leaked feed
+    # credential can never reach /api/admin/* or anything else.
+    if request.url.path in FEED_UPLOAD_PATHS and LEGAL_FEED_SERVICE_TOKEN:
+        feed_token_header = request.headers.get("X-Feed-Service-Token", "")
+        if feed_token_header == LEGAL_FEED_SERVICE_TOKEN:
+            return await call_next(request)
 
     return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
@@ -4253,9 +4272,9 @@ async def upload_legal_update(
     request: Request = None,
 ):
     if request:
-        admin_token_header = request.headers.get("X-Admin-Token", "")
-        if not (ADMIN_TOKEN and admin_token_header == ADMIN_TOKEN):
-            # Not a valid admin-token call (the pusher's normal path) — fall
+        feed_token_header = request.headers.get("X-Feed-Service-Token", "")
+        if not (LEGAL_FEED_SERVICE_TOKEN and feed_token_header == LEGAL_FEED_SERVICE_TOKEN):
+            # Not a valid feed-token call (the pusher's normal path) — fall
             # back to requiring a genuine logged-in user, same as before.
             user = await get_current_user(request)
             _check_permission(user, "legal:upload")
@@ -5028,8 +5047,8 @@ async def upload_zlr_document(
     request: Request = None,
 ):
     if request:
-        admin_token_header = request.headers.get("X-Admin-Token", "")
-        if not (ADMIN_TOKEN and admin_token_header == ADMIN_TOKEN):
+        feed_token_header = request.headers.get("X-Feed-Service-Token", "")
+        if not (LEGAL_FEED_SERVICE_TOKEN and feed_token_header == LEGAL_FEED_SERVICE_TOKEN):
             user = await get_current_user(request)
             _check_permission(user, "legal:upload")
 
