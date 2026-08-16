@@ -15,5 +15,4 @@ Pillow==11.0.0
 resend==2.5.1
 twilio==9.3.7
 PyYAML==6.0.3
-
-boto3 
+boto3==1.43.72
