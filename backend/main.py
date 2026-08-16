@@ -750,7 +750,7 @@ async def lifespan(app: FastAPI):
         await _db_pool.close()
         print("[db] connection pool closed")
 
-app = FastAPI(title="Mutemo Desk", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Mutemo Desk", version="2.1.0", lifespan=lifespan)
 
 # ── AlertEngine instrumentation ───────────────────────────────────────────────
 try:
@@ -2630,7 +2630,7 @@ async def health():
     status = "ok" if (deps["anthropic_key"] and deps["database"]) else "degraded"
     return {
         "status": status,
-        "version": "2.0.0",
+        "version": app.version,
         "service": "Mutemo Desk",
         "dependencies": deps,
     }
