@@ -898,6 +898,29 @@ _TWILIO_SMS_CONFIGURED = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILI
 _EMAIL_OTP_CONFIGURED = bool(os.environ.get("RESEND_API_KEY") or os.environ.get("SMTP_HOST"))
 AUTH_ENABLED = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID) or _TWILIO_SMS_CONFIGURED or _EMAIL_OTP_CONFIGURED
 
+# Any request landing while AUTH_ENABLED is False resolves to a synthetic
+# dev user with no real identity (see get_current_user) — session auth is
+# effectively off. Fine for a developer's own machine; not fine for
+# anything reachable on the internet. RAILWAY_ENVIRONMENT_NAME is present
+# on every Railway-hosted service and absent on a local machine, but it
+# does NOT distinguish real production from staging here — MutemoOS-V2 and
+# mutemoos-staging are two services inside the same Railway "production"
+# environment, so RAILWAY_ENVIRONMENT_NAME reads "production" for both.
+# Rather than trying to guess which service this is, any Railway
+# deployment that genuinely wants the dev-auth fallback (staging today)
+# must opt in explicitly via MUTEMO_ALLOW_DEV_AUTH=true — it's never
+# silently available just because a service happens to be un-configured.
+MUTEMO_ALLOW_DEV_AUTH = os.environ.get("MUTEMO_ALLOW_DEV_AUTH", "").strip().lower() == "true"
+if os.environ.get("RAILWAY_ENVIRONMENT_NAME") and not AUTH_ENABLED and not MUTEMO_ALLOW_DEV_AUTH:
+    raise RuntimeError(
+        "AUTH_ENABLED is False on a Railway deployment "
+        f"(RAILWAY_SERVICE_NAME={os.environ.get('RAILWAY_SERVICE_NAME')!r}) with no "
+        "WhatsApp/Twilio/email OTP channel configured — every request would silently "
+        "fall back to a synthetic dev user with no real authentication. If this service "
+        "is intentionally running without real auth (e.g. staging), set "
+        "MUTEMO_ALLOW_DEV_AUTH=true explicitly. Refusing to start otherwise."
+    )
+
 OTP_TTL_SECONDS     = 300
 SESSION_TTL_SECONDS = 86400 * 7
 MAX_OTP_ATTEMPTS    = 5
