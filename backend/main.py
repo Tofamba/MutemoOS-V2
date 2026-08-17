@@ -2929,6 +2929,29 @@ async def backfill_legal_taxonomy(request: Request):
 
     return {"backfilled": counts}
 
+# TEMPORARY — one-time production backfill for the content_hash reconciliation
+# fix. Runs scripts/backfill_chunk_content_hash.py's real build_plan()/
+# apply_plan() in-process (against this app's own live _db_pool and
+# already-initialized Chroma client, rather than opening a second
+# PersistentClient against the same on-disk data from within the same
+# process) — `railway run` executes on the operator's machine, not inside
+# the container, so it can't reach the private DB host or the volume the
+# standalone script needs. Remove this endpoint once the one-time backfill
+# has been confirmed applied to production.
+@app.post("/api/admin/backfill-chunk-hashes")
+async def admin_backfill_chunk_hashes(request: Request):
+    require_admin_token(request)
+    from scripts.backfill_chunk_content_hash import build_plan, apply_plan
+
+    firm_col, legal_col, zlr_col = get_chroma_collections()
+    collections = {"firm": firm_col, "legal": legal_col, "zlr": zlr_col}
+
+    async with _db_pool.acquire() as conn:
+        plan = await build_plan(conn, lambda source: collections[source], FIRM_ID)
+        summary = await apply_plan(plan, lambda source: collections[source])
+
+    return summary
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
