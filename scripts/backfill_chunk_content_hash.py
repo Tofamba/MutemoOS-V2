@@ -133,6 +133,8 @@ async def cmd_apply(args):
         return
 
     chroma_client = chromadb.PersistentClient(path=args.chroma_data_dir)
+    BATCH = 500  # defensive -- some Chroma backends cap max_batch_size; measured
+                 # clean and fast (~1s/3700 chunks total) at this batch size locally
     for source, entries in plan["to_backfill"].items():
         if not entries:
             continue
@@ -141,7 +143,8 @@ async def cmd_apply(args):
         )
         ids = [cid for cid, _ in entries]
         metadatas = [meta for _, meta in entries]
-        collection.update(ids=ids, metadatas=metadatas)
+        for i in range(0, len(ids), BATCH):
+            collection.update(ids=ids[i:i + BATCH], metadatas=metadatas[i:i + BATCH])
         print(f"  {source}: backfilled content_hash on {len(entries)} chunk(s) (metadata only)")
 
     print(f"\n  Done. {total_backfill} chunk(s) backfilled.")
