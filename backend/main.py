@@ -2952,6 +2952,46 @@ async def admin_backfill_chunk_hashes(request: Request):
 
     return summary
 
+# TEMPORARY — read-only companion to the backfill endpoint above, for
+# verifying its result against real per-chunk data rather than trusting its
+# own summary count. Returns actual Postgres/Chroma content_hash values
+# side by side for a sample of real chunk_ids per source. Remove alongside
+# the backfill endpoint once no longer needed.
+@app.get("/api/admin/verify-chunk-hashes")
+async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
+    require_admin_token(request)
+    firm_col, legal_col, zlr_col = get_chroma_collections()
+    collections = {"firm": firm_col, "legal": legal_col, "zlr": zlr_col}
+
+    results = {}
+    async with _db_pool.acquire() as conn:
+        for source, col in collections.items():
+            rows = await conn.fetch(
+                "SELECT id, content_hash FROM chunks WHERE firm_id=$1 AND chunk_source=$2 LIMIT $3",
+                FIRM_ID, source, sample,
+            )
+            if not rows:
+                results[source] = []
+                continue
+            ids = [r["id"] for r in rows]
+            chroma_data = col.get(ids=ids, include=["metadatas"])
+            chroma_meta = dict(zip(chroma_data["ids"], chroma_data["metadatas"]))
+            entries = []
+            for r in rows:
+                cid = r["id"]
+                pg_hash = r["content_hash"]
+                meta = chroma_meta.get(cid)
+                chroma_hash = (meta or {}).get("content_hash") if meta else None
+                entries.append({
+                    "chunk_id": cid,
+                    "postgres_hash": pg_hash,
+                    "chroma_hash": chroma_hash,
+                    "present_in_chroma": cid in chroma_meta,
+                    "match": pg_hash == chroma_hash,
+                })
+            results[source] = entries
+    return results
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
