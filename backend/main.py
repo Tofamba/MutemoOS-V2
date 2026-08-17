@@ -229,6 +229,22 @@ async def run_migrations():
         ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_number TEXT;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_firm_number
             ON clients(firm_id, client_number) WHERE client_number IS NOT NULL;
+        -- Atomic allocator backing _allocate_next_seq() (see DB helpers below) --
+        -- one row per (firm_id, prefix), where prefix is either a lawyer's
+        -- initials (client numbering) or a full client_number (matter
+        -- numbering under that client) -- same generic prefix concept
+        -- next_sequence() in backend/numbering.py already uses. Replaces the
+        -- old MAX(existing)+1 scan, which raced under concurrent requests:
+        -- two simultaneous creates could both read the same existing rows,
+        -- compute the same next number, and the second INSERT would hit
+        -- idx_clients_firm_number/idx_matters_firm_number with an unhandled
+        -- UniqueViolationError instead of just getting a different number.
+        CREATE TABLE IF NOT EXISTS numbering_counters (
+            firm_id  UUID NOT NULL,
+            prefix   TEXT NOT NULL,
+            next_seq INT NOT NULL,
+            PRIMARY KEY (firm_id, prefix)
+        );
         -- Which lawyer created this client — the "My Clients" default-view
         -- filter's actual join key (client_number's initials prefix is a
         -- point-in-time formatted string, not reliably reversible to a
@@ -2448,20 +2464,70 @@ async def _resolve_user_initials(conn, firm_id, user_id, display_name, persist: 
         await conn.execute("UPDATE users SET initials=$1 WHERE id=$2", initials, user_id)
     return initials
 
-async def _next_client_number(conn, firm_id, initials: str) -> str:
-    rows = await conn.fetch(
-        "SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2",
-        firm_id, f"{initials}-%",
+async def _allocate_next_seq(conn, firm_id, prefix: str, compute_seed) -> int:
+    """
+    Atomically allocates the next sequence number for (firm_id, prefix) via
+    numbering_counters, replacing the old MAX(existing)+1 scan that raced
+    under concurrent requests.
+
+    `compute_seed` is an async callable, invoked ONLY the first time this
+    prefix is ever allocated (existing counter rows skip straight to the
+    atomic UPDATE below, no scan at all) — it should return the correct
+    starting value by scanning the real table, exactly like the old logic
+    did, so a prefix with pre-existing numbers (e.g. NGM-001..NGM-071)
+    seeds itself correctly the first time it's touched under this scheme,
+    without any separate backfill migration.
+
+    The UPDATE...RETURNING is the atomic step: Postgres takes a row lock
+    for its duration, so two concurrent callers serialize on it and always
+    get distinct, consecutive values — never the same one. The seed INSERT
+    uses ON CONFLICT DO NOTHING, so even a true race on the very first-ever
+    call for a brand new prefix (two concurrent callers both finding no
+    counter row yet) is safe: at most one INSERT wins, the other silently
+    no-ops, and both then proceed through the same atomic UPDATE.
+    """
+    existing = await conn.fetchval(
+        "SELECT 1 FROM numbering_counters WHERE firm_id=$1 AND prefix=$2", firm_id, prefix
     )
-    seq = next_sequence([r["client_number"] for r in rows], initials)
+    if existing is None:
+        seed = await compute_seed()
+        await conn.execute(
+            """
+            INSERT INTO numbering_counters (firm_id, prefix, next_seq)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (firm_id, prefix) DO NOTHING
+            """,
+            firm_id, prefix, seed,
+        )
+    row = await conn.fetchrow(
+        """
+        UPDATE numbering_counters
+        SET next_seq = next_seq + 1
+        WHERE firm_id=$1 AND prefix=$2
+        RETURNING next_seq - 1 AS allocated
+        """,
+        firm_id, prefix,
+    )
+    return row["allocated"]
+
+async def _next_client_number(conn, firm_id, initials: str) -> str:
+    async def compute_seed():
+        rows = await conn.fetch(
+            "SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2",
+            firm_id, f"{initials}-%",
+        )
+        return next_sequence([r["client_number"] for r in rows], initials)
+    seq = await _allocate_next_seq(conn, firm_id, initials, compute_seed)
     return format_client_number(initials, seq)
 
 async def _next_matter_number(conn, firm_id, client_number: str) -> str:
-    rows = await conn.fetch(
-        "SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2",
-        firm_id, f"{client_number}-%",
-    )
-    seq = next_sequence([r["matter_number"] for r in rows], client_number)
+    async def compute_seed():
+        rows = await conn.fetch(
+            "SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2",
+            firm_id, f"{client_number}-%",
+        )
+        return next_sequence([r["matter_number"] for r in rows], client_number)
+    seq = await _allocate_next_seq(conn, firm_id, client_number, compute_seed)
     return format_matter_number(client_number, seq)
 
 _CONVEYANCING_DATE_EVENT_TITLES = {

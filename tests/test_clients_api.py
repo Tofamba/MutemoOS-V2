@@ -35,13 +35,32 @@ from fastapi import HTTPException
 
 
 class FakeConnection:
-    def __init__(self, clients, matters, users=None):
+    def __init__(self, clients, matters, users=None, numbering_counters=None):
         self.clients = clients
         self.matters = matters
         self.users = users if users is not None else []
+        self.numbering_counters = numbering_counters if numbering_counters is not None else []
+
+    async def fetchval(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("SELECT 1 FROM numbering_counters WHERE firm_id=$1 AND prefix=$2"):
+            for c in self.numbering_counters:
+                if c["firm_id"] == args[0] and c["prefix"] == args[1]:
+                    return 1
+            return None
+        raise NotImplementedError(f"FakeConnection.fetchval: unhandled query: {q}")
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
+
+        if q.startswith("UPDATE numbering_counters SET next_seq = next_seq + 1"):
+            firm_id, prefix = args
+            for c in self.numbering_counters:
+                if c["firm_id"] == firm_id and c["prefix"] == prefix:
+                    allocated = c["next_seq"]
+                    c["next_seq"] += 1
+                    return {"allocated": allocated}
+            return None
 
         if q.startswith("SELECT initials FROM users WHERE id=$1"):
             for u in self.users:
@@ -119,6 +138,12 @@ class FakeConnection:
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO numbering_counters"):
+            firm_id, prefix, seed = args
+            if not any(c["firm_id"] == firm_id and c["prefix"] == prefix for c in self.numbering_counters):
+                self.numbering_counters.append({"firm_id": firm_id, "prefix": prefix, "next_seq": seed})
+            return "INSERT 0 1"
         return "OK"
 
 
@@ -134,11 +159,12 @@ class _FakeAcquireCtx:
 
 
 class FakePool:
-    def __init__(self, clients=None, matters=None, users=None):
+    def __init__(self, clients=None, matters=None, users=None, numbering_counters=None):
         self.conn = FakeConnection(
             clients if clients is not None else [],
             matters if matters is not None else [],
             users if users is not None else [],
+            numbering_counters if numbering_counters is not None else [],
         )
 
     def acquire(self):
