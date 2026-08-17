@@ -497,6 +497,23 @@ async def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_chunks_firm ON chunks(firm_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(firm_id, chunk_source);
+        -- reconcile_chroma_index() used to compare ChromaDB against Postgres
+        -- by COUNT(*) alone -- equal counts were treated as "in sync" even
+        -- if the actual chunk contents differed (e.g. a stale/wrong vector
+        -- under the right id, or two chunks silently swapped). content_hash
+        -- lets reconciliation compare actual content per chunk_id instead.
+        -- A GENERATED column rather than an application-computed value: it's
+        -- derived automatically from `text` on every INSERT (all 5 existing
+        -- INSERT INTO chunks call sites need no changes at all), and can
+        -- never drift from what's actually stored. Postgres's built-in
+        -- sha256() isn't marked IMMUTABLE (required for use in a generated
+        -- column, even though it's fully deterministic), hence the small
+        -- wrapper function.
+        CREATE OR REPLACE FUNCTION mutemo_sha256_hex(input TEXT) RETURNS TEXT AS $$
+            SELECT encode(sha256(convert_to(input, 'UTF8')), 'hex')
+        $$ LANGUAGE SQL IMMUTABLE;
+        ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_hash TEXT
+            GENERATED ALWAYS AS (mutemo_sha256_hex(text)) STORED;
         CREATE TABLE IF NOT EXISTS invites (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
@@ -2219,17 +2236,26 @@ def get_chroma_collections():
 
 async def reconcile_chroma_index():
     """
-    Cheap self-healing check, run once at startup: compare each ChromaDB
-    collection's count against how many chunks Postgres actually has for
-    that source. Postgres is the real source of truth (chunk text is
+    Self-healing check, run once at startup: compare each ChromaDB
+    collection against Postgres per chunk_id, using content_hash rather
+    than a bare count. Postgres is the real source of truth (chunk text is
     already fully extracted and chunked there) — ChromaDB is a derived
     index that can go out of sync if it's ever reset (volume detached,
     first deploy after adding a volume, manual intervention, etc.).
 
-    Only re-embeds when there's an actual mismatch — this is NOT a full
-    reindex on every boot, which would slow down every single redeploy
-    proportional to total corpus size. In the common case (index already
-    matches Postgres) this adds a few cheap COUNT queries and nothing else.
+    A count comparison alone can't catch every drift: equal counts don't
+    prove equal content (e.g. a wrong/stale vector sitting under the right
+    chunk_id after a partial rebuild). Comparing content_hash per chunk_id
+    catches that. Three outcomes per chunk_id:
+      - in Postgres, missing from Chroma      -> index it
+      - in both, but hashes differ            -> re-index it (upsert)
+      - in Chroma only (stray, e.g. an orphan
+        left by a deleted document)           -> remove it
+    Already-matching chunk_ids are never touched — this fetches ids+hashes
+    (cheap: two short strings each) for every chunk on every boot, but only
+    ever re-embeds ones that actually need it, same as the count-only
+    version's stated goal, just with real detection instead of a count that
+    can silently miss drift.
     """
     if not _db_pool:
         return
@@ -2240,44 +2266,67 @@ async def reconcile_chroma_index():
         return
 
     async with _db_pool.acquire() as conn:
-        pg_counts = {}
+        pg_rows_by_source = {}
         for source in ("firm", "legal", "zlr"):
-            row = await conn.fetchrow(
-                "SELECT COUNT(*) AS n FROM chunks WHERE firm_id=$1 AND chunk_source=$2",
+            rows = await conn.fetch(
+                "SELECT id, content_hash FROM chunks WHERE firm_id=$1 AND chunk_source=$2",
                 FIRM_ID, source
             )
-            pg_counts[source] = row["n"] if row else 0
+            pg_rows_by_source[source] = {r["id"]: r["content_hash"] for r in rows}
 
     collections = {"firm": firm_col, "legal": legal_col, "zlr": zlr_col}
     for source, col in collections.items():
-        try:
-            chroma_count = col.count()
-        except Exception:
-            chroma_count = 0
-        pg_count = pg_counts.get(source, 0)
-
-        if pg_count == 0:
+        pg_hashes = pg_rows_by_source.get(source, {})
+        if not pg_hashes:
             continue  # nothing to index for this source
-        if chroma_count == pg_count:
+
+        try:
+            chroma_data = col.get(include=["metadatas"])
+            chroma_hashes = {
+                cid: (meta or {}).get("content_hash")
+                for cid, meta in zip(chroma_data["ids"], chroma_data["metadatas"])
+            }
+        except Exception as e:
+            print(f"[reconcile] {source}: failed to read ChromaDB collection, skipping: {e}")
+            continue
+
+        missing = pg_hashes.keys() - chroma_hashes.keys()
+        mismatched = {
+            cid for cid in (pg_hashes.keys() & chroma_hashes.keys())
+            if pg_hashes[cid] != chroma_hashes[cid]
+        }
+        stray = chroma_hashes.keys() - pg_hashes.keys()
+        to_reindex = missing | mismatched
+
+        if not to_reindex and not stray:
             continue  # already in sync, nothing to do
 
-        print(f"[reconcile] {source}: Postgres has {pg_count} chunks, "
-              f"ChromaDB has {chroma_count} — rebuilding index from Postgres")
-        async with _db_pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source=$2", FIRM_ID, source
-            )
-        chunks_to_index = [{
-            "id": r["id"],
-            "text": r["text"],
-            "document_id": str(r["document_id"]),
-            "matter_id": r["matter_id"],
-            "chunk_index": r["chunk_index"],
-            "page_number": r["page_number"],
-        } for r in rows]
-        if chunks_to_index:
-            await asyncio.to_thread(index_chunks_in_chroma, chunks_to_index, source)
-            print(f"[reconcile] {source}: re-indexed {len(chunks_to_index)} chunks")
+        print(f"[reconcile] {source}: {len(missing)} missing, {len(mismatched)} content-mismatched, "
+              f"{len(stray)} stray in ChromaDB — repairing")
+
+        if to_reindex:
+            async with _db_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source=$2 AND id = ANY($3)",
+                    FIRM_ID, source, list(to_reindex)
+                )
+            chunks_to_index = [{
+                "id": r["id"],
+                "text": r["text"],
+                "document_id": str(r["document_id"]),
+                "matter_id": r["matter_id"],
+                "chunk_index": r["chunk_index"],
+                "page_number": r["page_number"],
+                "content_hash": r["content_hash"],
+            } for r in rows]
+            if chunks_to_index:
+                await asyncio.to_thread(index_chunks_in_chroma, chunks_to_index, source)
+                print(f"[reconcile] {source}: re-indexed {len(chunks_to_index)} chunk(s) "
+                      f"({len(missing)} missing, {len(mismatched)} mismatched)")
+
+        if stray:
+            await asyncio.to_thread(remove_chunks_from_chroma, list(stray), source)
+            print(f"[reconcile] {source}: removed {len(stray)} stray chunk(s) with no Postgres row")
 
 # ── Pydantic Models ───────────────────────────────────────────────────────────
 
@@ -4681,6 +4730,11 @@ def chunk_text(text: str, page_count: int, doc_id: str, matter_id: str) -> list:
             "text": chunk_str,
             "chunk_index": idx,
             "page_number": page_num,
+            # Matches chunks.content_hash's GENERATED column expression
+            # exactly (encode(sha256(convert_to(text,'UTF8')),'hex')) —
+            # computed here too so it's available immediately for Chroma's
+            # metadata without a round-trip read back from Postgres.
+            "content_hash": hashlib.sha256(chunk_str.encode("utf-8")).hexdigest(),
         })
         idx += 1
         start = end - OVERLAP_WORDS
@@ -4702,8 +4756,17 @@ def index_chunks_in_chroma(chunks: list, collection_type: str = "firm"):
             "matter_id": c.get("matter_id") or "zlr",
             "chunk_index": c["chunk_index"],
             "page_number": c.get("page_number") or 0,
+            # Backs reconcile_chroma_index()'s per-chunk drift detection —
+            # must match chunks.content_hash exactly (both are sha256 hex of
+            # the same UTF-8 text). Computed by the caller (chunk_text()) or
+            # passed straight from a Postgres row on reconciliation repairs.
+            "content_hash": c.get("content_hash") or "",
         } for c in chunks]
-        collection.add(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
+        # upsert, not add: add() raises/silently fails on an id that's
+        # already present (e.g. reconciliation repairing a chunk whose
+        # Chroma entry exists but has drifted) — upsert() correctly
+        # overwrites it instead.
+        collection.upsert(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
     except Exception as e:
         print(f"[vector_store] failed to index chunks ({collection_type}): {e}")
 
