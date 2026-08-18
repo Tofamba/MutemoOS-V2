@@ -18,6 +18,7 @@ backend/main.py — covers two bugs found while diagnosing a real report of
    exercised through the real endpoint with a mocked Anthropic client.
 """
 import asyncio
+import json
 from types import SimpleNamespace
 
 from backend.main import _normalize_for_match, _verify_quote_in_text, review_contract
@@ -105,6 +106,64 @@ def test_findings_as_raw_string_raises_instead_of_inflating_dropped_count(monkey
     monkeypatch.setattr(
         m.client.messages, "create",
         lambda **kwargs: _fake_tool_use_message("this looks like a findings-shaped string but is not a list")
+    )
+    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
+
+    from fastapi import HTTPException
+    try:
+        asyncio.run(review_contract(None, upload, None))
+        assert False, "expected review_contract to raise"
+    except HTTPException as e:
+        assert e.status_code == 502
+
+
+def test_findings_as_json_encoded_string_recovers_instead_of_502ing(monkeypatch):
+    # Reproduces the exact production failure seen after the type-guard
+    # fix shipped: the model emitted a complete, well-formed, correctly
+    # shaped JSON array for `findings` -- but as a *string* value rather
+    # than a native array in the tool-use input. Both real occurrences
+    # involved a finding that quoted contract clause text containing
+    # literal embedded double quotes (a salary clause phrased `... "NET of
+    # US$2000.00 per month excluding all relevant taxes..." `verbatim in
+    # the source document). Since the content itself is genuinely
+    # recoverable JSON (not truncated garbage), this should succeed with
+    # real findings rather than 502.
+    import backend.main as m
+    doc_text = (
+        b'The Employee shall be paid "NET of US$2000.00 per month excluding all '
+        b'relevant taxes required by the Government of Zimbabwe."'
+    )
+    findings_json_string = json.dumps([
+        {
+            "category": "compliance",
+            "severity": "high",
+            "title": "Net salary arrangement may violate PAYE requirements",
+            "description": 'The contract specifies payment of "NET of US$2000.00 per month excluding '
+                            'all relevant taxes required by the Government of Zimbabwe," which is '
+                            "contradictory and potentially non-compliant.",
+            "quote": 'The Employee shall be paid "NET of US$2000.00 per month excluding all '
+                     'relevant taxes required by the Government of Zimbabwe."',
+        },
+    ])
+    monkeypatch.setattr(m.client.messages, "create", lambda **kwargs: _fake_tool_use_message(findings_json_string))
+    upload = FakeUploadFile("contract.txt", doc_text)
+
+    result = asyncio.run(review_contract(None, upload, None))
+
+    assert result["dropped_unverified_count"] == 0
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["title"] == "Net salary arrangement may violate PAYE requirements"
+    assert result["findings"][0]["verification"] == "verified"
+
+
+def test_findings_as_non_json_string_still_502s(monkeypatch):
+    # The recovery attempt must not weaken the guard -- a string that
+    # isn't valid JSON (or doesn't decode to a list) is a genuine
+    # generation failure and must still fail loudly, not silently.
+    import backend.main as m
+    monkeypatch.setattr(
+        m.client.messages, "create",
+        lambda **kwargs: _fake_tool_use_message('{"not": "a list, a dict"}')
     )
     upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 

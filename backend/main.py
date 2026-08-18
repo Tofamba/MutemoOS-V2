@@ -6310,11 +6310,38 @@ Review this contract now and call submit_contract_review with your findings."""
     # show them with appropriately lower confidence, not silently equal
     # to a verified quote-backed finding.
     findings_raw = review.get("findings", [])
+    if isinstance(findings_raw, str):
+        # Observed in production on a real employment contract (twice, on
+        # independent generations): the model emitted a complete, cleanly
+        # indented, schema-shaped JSON array for `findings` — correct
+        # content — but as a *string* value instead of a native array in
+        # the tool-use input. Both occurrences quoted contract clause text
+        # containing literal embedded double quotes (e.g. a salary clause
+        # phrased `... "NET of US$2000.00 per month excluding all relevant
+        # taxes..."` verbatim in the source document), which is exactly the
+        # kind of nested-escaping load that pushes a model toward
+        # flattening a structure into a string rather than emitting it
+        # natively. Since the content itself was genuinely well-formed
+        # (not a truncation — truncation would cut off mid-object, not
+        # produce clean closing structure), attempt to recover it with
+        # json.loads() before giving up; every recovered item still has to
+        # pass the isinstance(dict) check below like any other finding, so
+        # this doesn't weaken the guard against genuinely malformed input.
+        try:
+            parsed = json.loads(findings_raw)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, list):
+            print(f"[contract-review] findings field was a JSON-encoded string; "
+                  f"recovered {len(parsed)} item(s) via json.loads()")
+            findings_raw = parsed
+
     if not isinstance(findings_raw, list):
         # Defensive guard against a wrong-typed top-level `findings` value
-        # (e.g. the model returned a single string instead of an array).
-        # Observed in practice as a wildly inflated dropped_unverified_count
-        # (11047 on a 9-page contract) with zero findings shown — because
+        # that recovery couldn't fix (e.g. genuinely not JSON, or JSON that
+        # didn't decode to a list). Observed in practice, before recovery
+        # existed, as a wildly inflated dropped_unverified_count (11047 on
+        # a 9-page contract) with zero findings shown — because
         # `for f in "some string"` iterates one character at a time and
         # every "item" then fails the isinstance(f, dict) check below, so
         # the per-item guard (which exists for a single malformed *entry*
@@ -6324,8 +6351,8 @@ Review this contract now and call submit_contract_review with your findings."""
         # flagged" result — the entire point of two-stage verification is
         # to never show a misleading result, and a silently-empty findings
         # list after a malformed generation is exactly that.
-        print(f"[contract-review] findings field was not a list (type={type(findings_raw).__name__}): "
-              f"{findings_raw!r:.500}")
+        print(f"[contract-review] findings field was not recoverable as a list "
+              f"(type={type(findings_raw).__name__}): {findings_raw!r:.3000}")
         raise HTTPException(
             status_code=502,
             detail="The contract review didn't come back in the expected format. "
