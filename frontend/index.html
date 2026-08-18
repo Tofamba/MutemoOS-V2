@@ -304,6 +304,36 @@ select{cursor:pointer}
 .upcoming-banner .icon{font-size:1.3rem}
 .upcoming-banner strong{font-size:0.88rem}
 .upcoming-banner p{font-size:0.75rem;opacity:0.8;margin-top:2px}
+
+/* ── Dashboard tab (scoped — new tokens live here only, global :root untouched) ── */
+.dashboard-scope{
+  --dash-green:#1b4d2e;--dash-green-mid:#2d7a4f;--dash-green-light:#e9f0eb;
+  --dash-radius-lg:12px;--dash-radius-md:8px;--dash-shadow:0 2px 8px rgba(0,0,0,0.05);
+}
+.dash-hero{background:linear-gradient(135deg,var(--dash-green),var(--dash-green-mid));color:white;border-radius:var(--dash-radius-lg);padding:1.4rem 1.6rem;margin-bottom:1.25rem;box-shadow:var(--dash-shadow)}
+.dash-hero h2{color:white;font-size:1.3rem;margin-bottom:3px}
+.dash-hero p{font-size:0.82rem;color:rgba(255,255,255,0.75)}
+.dash-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-bottom:1.25rem}
+.dash-section{background:var(--white);border:1px solid var(--border);border-radius:var(--dash-radius-lg);box-shadow:var(--dash-shadow);overflow:hidden;margin-bottom:1.25rem}
+.dash-section-header{padding:0.95rem 1.25rem;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.dash-section-title{font-size:0.92rem;font-weight:700;color:var(--dash-green);display:flex;align-items:center;gap:8px}
+.dash-section-link{font-size:0.72rem;color:var(--dash-green-mid);cursor:pointer;font-weight:700}
+.dash-section-link:hover{text-decoration:underline}
+.dash-section-body{padding:1.1rem 1.25rem}
+.dash-stat-card{background:var(--white);border:1px solid var(--border);border-radius:var(--dash-radius-lg);box-shadow:var(--dash-shadow);padding:1rem 1.2rem;display:flex;align-items:center;gap:12px}
+.dash-stat-icon{width:40px;height:40px;border-radius:var(--dash-radius-md);background:var(--dash-green-light);color:var(--dash-green);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.dash-stat-value{font-size:1.35rem;font-weight:700;color:var(--dash-green);line-height:1.1}
+.dash-stat-label{font-size:0.72rem;color:var(--ink3);margin-top:2px}
+.dash-row{display:flex;align-items:center;gap:10px;padding:0.65rem 0;border-bottom:1px solid var(--paper2)}
+.dash-row:last-child{border-bottom:none}
+.dash-row-main{flex:1;min-width:0}
+.dash-row-title{font-size:0.84rem;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dash-row-meta{font-size:0.72rem;color:var(--ink3);margin-top:2px}
+.dash-badge{display:inline-flex;align-items:center;gap:4px;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.2px}
+.dash-badge-green{background:#dafbe1;color:#1a7f37}
+.dash-badge-red{background:#fde8e8;color:#b83232}
+.dash-badge-blue{background:#e0eaf5;color:#1e4a7a}
+.dash-empty{font-size:0.8rem;color:var(--ink3);padding:0.5rem 0}
 </style>
 </head>
 <body>
@@ -362,6 +392,7 @@ select{cursor:pointer}
 
 <!-- Nav -->
 <nav class="nav">
+  <button class="nav-btn" id="nav-dashboard" onclick="showTab('dashboard')">🏛 Dashboard</button>
   <button class="nav-btn" id="nav-vault" onclick="showTab('vault')">📁 Vault</button>
   <button class="nav-btn" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
@@ -376,6 +407,59 @@ select{cursor:pointer}
 </nav>
 
 <main class="main">
+
+<!-- ═══════════════ DASHBOARD TAB ═══════════════ -->
+<div id="tab-dashboard" class="dashboard-scope" style="display:none">
+  <div class="dash-hero">
+    <h2 id="dash-greeting">Firm Overview</h2>
+    <p id="dash-greeting-sub">A snapshot of everything moving across the firm.</p>
+  </div>
+
+  <div class="dash-grid" id="dash-stats">
+    <div class="dash-empty">Loading…</div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-header">
+      <div class="dash-section-title">⏰ Upcoming Deadlines</div>
+      <span class="dash-section-link" onclick="showTab('matters')">View all matters →</span>
+    </div>
+    <div class="dash-section-body" id="dash-deadlines"><div class="dash-empty">Loading…</div></div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-header">
+      <div class="dash-section-title">🕐 Recent Activity</div>
+    </div>
+    <div class="dash-section-body" id="dash-activity"><div class="dash-empty">Loading…</div></div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-header">
+      <div class="dash-section-title">📊 Practice Area Breakdown</div>
+      <span class="dash-section-link" onclick="showTab('reports')">Full reports →</span>
+    </div>
+    <div class="dash-section-body" id="dash-practice-areas"><div class="dash-empty">Loading…</div></div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-header">
+      <div class="dash-section-title">💰 Fee Overview</div>
+    </div>
+    <div class="dash-section-body">
+      <p style="font-size:0.72rem;color:var(--ink3);margin-bottom:0.85rem">The firm's own professional fees — not client funds held in trust.</p>
+      <div id="dash-fees"><div class="dash-empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-header">
+      <div class="dash-section-title">🛡 RBZ Compliance Status</div>
+      <span class="dash-section-link" onclick="showTab('reports')">Go to Reports →</span>
+    </div>
+    <div class="dash-section-body" id="dash-compliance"><div class="dash-empty">Loading…</div></div>
+  </div>
+</div>
 
 <!-- ═══════════════ VAULT TAB ═══════════════ -->
 <div id="tab-vault" style="display:none">
@@ -2581,10 +2665,11 @@ async function submitClientForm() {
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
+  ['dashboard','vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
+  if (tab === 'dashboard') renderDashboard();
   if (tab === 'matters') renderMattersList();
   if (tab === 'clients') renderClientsList();
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
@@ -2592,6 +2677,187 @@ function showTab(tab) {
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
   if (tab === 'reports') { loadReportHistory(); loadPracticeAreaBreakdown(); }
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+// Firm-wide landing view. Every section aggregates data already loaded for
+// other tabs (the global `matters`/`clients` arrays) or reuses existing
+// endpoints (practice-area-breakdown, report history) — the only new
+// endpoint is GET /api/documents/recent, added specifically to back the
+// activity feed's document half.
+async function renderDashboard() {
+  _dashGreeting();
+  _dashStats();
+  _dashDeadlines();
+  _dashFees();
+  await Promise.all([_dashActivity(), _dashPracticeAreas(), _dashCompliance()]);
+}
+
+function _dashGreeting() {
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const name = window._userDisplayName || '';
+  document.getElementById('dash-greeting').textContent = name ? `${greeting}, ${name}` : 'Firm Overview';
+  document.getElementById('dash-greeting-sub').textContent =
+    `${matters.length} matter${matters.length !== 1 ? 's' : ''} · ${clients.length} client${clients.length !== 1 ? 's' : ''} across the firm.`;
+}
+
+function _dashStats() {
+  const el = document.getElementById('dash-stats');
+  const activeMatters = matters.filter(m => (m.status || 'Active') === 'Active').length;
+  const today = new Date(); today.setHours(0,0,0,0);
+  let overdue = 0, dueSoon = 0;
+  matters.forEach(m => {
+    if (!m.next_deadline) return;
+    const days = Math.round((new Date(m.next_deadline + 'T00:00:00') - today) / 86400000);
+    if (days < 0) overdue++;
+    else if (days <= 7) dueSoon++;
+  });
+  const stats = [
+    { icon: '📂', value: activeMatters, label: 'Active Matters' },
+    { icon: '👤', value: clients.length, label: 'Total Clients' },
+    { icon: '⏰', value: dueSoon, label: 'Deadlines Due in 7 Days' },
+    { icon: '⚠', value: overdue, label: 'Overdue Deadlines' },
+  ];
+  el.innerHTML = stats.map(s => `
+    <div class="dash-stat-card">
+      <div class="dash-stat-icon">${s.icon}</div>
+      <div>
+        <div class="dash-stat-value">${s.value}</div>
+        <div class="dash-stat-label">${s.label}</div>
+      </div>
+    </div>`).join('');
+}
+
+function _dashDeadlines() {
+  const el = document.getElementById('dash-deadlines');
+  const today = new Date(); today.setHours(0,0,0,0);
+  const withDeadlines = matters
+    .filter(m => m.next_deadline)
+    .map(m => ({ m, days: Math.round((new Date(m.next_deadline + 'T00:00:00') - today) / 86400000) }))
+    .sort((a, b) => a.days - b.days)
+    .slice(0, 8);
+  if (!withDeadlines.length) { el.innerHTML = '<div class="dash-empty">No upcoming deadlines across the firm.</div>'; return; }
+  el.innerHTML = withDeadlines.map(({ m }) => `
+    <div class="dash-row" style="cursor:pointer" onclick="goToMatter('${m.id}')">
+      <div class="dash-row-main">
+        <div class="dash-row-title">${escHtml(m.name)}</div>
+        <div class="dash-row-meta">${escHtml(m.client_name || '—')}${m.internal_ref ? ` · ${escHtml(m.internal_ref)}` : ''}</div>
+      </div>
+      ${deadlineChipHtml(m)}
+    </div>`).join('');
+}
+
+// Merges progress notes (already attached per-matter on the in-memory
+// `matters` array) with recently uploaded documents (the one new endpoint)
+// into a single firm-wide feed — same merge/sort shape as
+// _clientRecentActivityHtml, just scoped to the whole firm instead of one
+// client's matters.
+async function _dashActivity() {
+  const el = document.getElementById('dash-activity');
+  let docs = [];
+  try {
+    const res = await fetch(`${API}/api/documents/recent?limit=8`);
+    if (res.ok) docs = await res.json();
+  } catch(e) { /* fall through with notes only */ }
+
+  const items = [];
+  matters.forEach(m => {
+    (m.progress_notes || []).forEach(n => items.push({ type: 'note', matterId: m.id, matterName: m.name, data: n, ts: n.created_at }));
+  });
+  docs.forEach(d => items.push({ type: 'document', matterId: d.matter_id, matterName: d.matter_name || d.matter_client_name || '', data: d, ts: d.uploaded_at }));
+
+  if (!items.length) { el.innerHTML = '<div class="dash-empty">No recent activity across the firm.</div>'; return; }
+  items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  el.innerHTML = items.slice(0, 8).map(it => {
+    if (it.type === 'note') {
+      const n = it.data;
+      return `
+        <div class="note-item" style="cursor:pointer" onclick="goToMatter('${it.matterId}')">
+          <div class="note-text">${escHtml(n.text)}</div>
+          <div class="note-footer"><span>🖊 ${escHtml(n.author || '')} · ${escHtml(it.matterName)} · ${(n.created_at||'').slice(0,10)}</span></div>
+        </div>`;
+    }
+    const d = it.data;
+    return `
+      <div class="doc-item" style="cursor:pointer" onclick="goToMatter('${it.matterId}')">
+        <div class="doc-icon">📄</div>
+        <div style="flex:1;min-width:0">
+          <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
+          <div class="doc-meta" style="margin-top:2px">
+            <span class="chip chip-gray">${escHtml(it.matterName)}</span>
+            <span style="font-size:0.7rem;color:var(--ink3)">${(d.uploaded_at||'').slice(0,10)}</span>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// Reuses GET /api/reports/practice-area-breakdown as-is — same endpoint
+// the Reports tab's table already calls, just rendered as chips here.
+async function _dashPracticeAreas() {
+  const el = document.getElementById('dash-practice-areas');
+  try {
+    const res = await fetch(`${API}/api/reports/practice-area-breakdown`);
+    if (!res.ok) { el.innerHTML = '<div class="dash-empty">Could not load practice area breakdown.</div>'; return; }
+    const rows = await res.json();
+    if (!rows.length) { el.innerHTML = '<div class="dash-empty">No matters yet.</div>'; return; }
+    const total = rows.reduce((sum, r) => sum + r.matter_count, 0);
+    el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px">
+      ${rows.map(r => `<span class="chip chip-gold">${escHtml(r.practice_area)} <span style="font-weight:400;opacity:0.8">(${r.matter_count} · ${Math.round(r.matter_count / total * 100)}%)</span></span>`).join('')}
+    </div>`;
+  } catch(e) { el.innerHTML = '<div class="dash-empty">Error loading practice area breakdown.</div>'; }
+}
+
+// Aggregates amount_billed/amount_received/fee_balance across every matter
+// that has fee figures entered — firm's own professional fees only, never
+// client funds held in trust (same labeling discipline as the per-matter
+// fee card in renderMatterPanel).
+function _dashFees() {
+  const el = document.getElementById('dash-fees');
+  const withFees = matters.filter(m => m.amount_billed != null || m.amount_received != null);
+  if (!withFees.length) { el.innerHTML = '<div class="dash-empty">No fee figures entered yet.</div>'; return; }
+  const billed = withFees.reduce((s, m) => s + (m.amount_billed || 0), 0);
+  const received = withFees.reduce((s, m) => s + (m.amount_received || 0), 0);
+  const balance = billed - received;
+  const fmt = n => `$${n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+  el.innerHTML = `
+    <div class="dash-grid" style="margin-bottom:0">
+      <div class="dash-stat-card"><div class="dash-stat-icon">💵</div><div><div class="dash-stat-value">${fmt(billed)}</div><div class="dash-stat-label">Billed</div></div></div>
+      <div class="dash-stat-card"><div class="dash-stat-icon">✅</div><div><div class="dash-stat-value">${fmt(received)}</div><div class="dash-stat-label">Received</div></div></div>
+      <div class="dash-stat-card"><div class="dash-stat-icon">⚖</div><div><div class="dash-stat-value">${fmt(balance)}</div><div class="dash-stat-label">Balance Outstanding</div></div></div>
+    </div>
+    <p style="font-size:0.7rem;color:var(--ink3);margin-top:0.75rem">Across ${withFees.length} matter${withFees.length !== 1 ? 's' : ''} with fee figures entered.</p>
+  `;
+}
+
+// Reuses GET /api/reports/history (same endpoint the Reports tab's history
+// table calls) — takes the most recent export as "status at a glance".
+// The 30-day marker is just a visual freshness cue computed from the real
+// timestamp, not a claimed regulatory deadline.
+async function _dashCompliance() {
+  const el = document.getElementById('dash-compliance');
+  try {
+    const res = await fetch(`${API}/api/reports/history`);
+    if (!res.ok) { el.innerHTML = '<div class="dash-empty">Could not load compliance history.</div>'; return; }
+    const history = await res.json();
+    if (!history.length) {
+      el.innerHTML = `<span class="dash-badge dash-badge-red">⚠ No export on record</span>
+        <p style="font-size:0.78rem;color:var(--ink3);margin-top:0.6rem">No RBZ compliance export has been generated yet.</p>`;
+      return;
+    }
+    const last = history[0];
+    const lastDate = last.generated_at ? last.generated_at.slice(0,10) : '';
+    const daysSince = last.generated_at ? Math.round((new Date() - new Date(last.generated_at)) / 86400000) : null;
+    const isStale = daysSince !== null && daysSince > 30;
+    el.innerHTML = `
+      <span class="dash-badge ${isStale ? 'dash-badge-red' : 'dash-badge-green'}">${isStale ? `⚠ ${daysSince} days since last export` : '✓ Recently exported'}</span>
+      <div style="margin-top:0.75rem;font-size:0.84rem;color:var(--ink2)">
+        Last export: <strong>${lastDate}</strong>${daysSince !== null ? ` (${daysSince} day${daysSince !== 1 ? 's' : ''} ago)` : ''}<br>
+        Covered <strong>${last.client_count}</strong> client${last.client_count !== 1 ? 's' : ''} and <strong>${last.matter_count}</strong> matter${last.matter_count !== 1 ? 's' : ''}, generated by ${escHtml(last.generated_by_name)}.
+      </div>
+    `;
+  } catch(e) { el.innerHTML = '<div class="dash-empty">Error loading compliance status.</div>'; }
 }
 
 // ── Matters ───────────────────────────────────────────────────────────────────

@@ -4172,6 +4172,34 @@ async def list_documents(matter_id: str, request: Request):
         )
     return [_row_to_doc(r) for r in rows]
 
+@app.get("/api/documents/recent")
+async def list_recent_documents(request: Request, limit: int = 10):
+    """
+    Firm-wide recent completed uploads, joined with their matter for display
+    context — backs the Dashboard tab's activity feed (the document-upload
+    half; progress notes are already attached per-matter by GET /api/matters
+    and don't need a separate fetch). Same matter:read gate as the
+    per-matter document list above; no extra role scoping beyond that.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT d.*, m.name AS matter_name, m.client_name AS matter_client_name
+            FROM documents d
+            JOIN matters m ON m.id = d.matter_id
+            WHERE d.firm_id=$1 AND d.status='complete'
+            ORDER BY d.uploaded_at DESC
+            LIMIT $2
+        """, FIRM_ID, limit)
+    result = []
+    for r in rows:
+        d = _row_to_doc(r)
+        d["matter_name"] = r["matter_name"]
+        d["matter_client_name"] = r["matter_client_name"]
+        result.append(d)
+    return result
+
 async def _process_document_background(doc_id: str, matter_id: str, content: bytes, filename: str, ext: str):
     """
     Background task: extract text, classify, chunk, and index a document.
