@@ -6169,18 +6169,42 @@ CONTRACT_REVIEW_TOOL = {
     },
 }
 
+# Typographic substitutions a word processor's autocorrect applies that an
+# LLM transcribing a quote won't reproduce (it defaults to plain ASCII) —
+# without this, a single autocorrected quote mark in a Schedule-of-
+# definitions-style clause (very common in contracts: "Employee" means...)
+# turns an exact quote into a mismatch. Confirmed empirically: a realistic
+# curly-quote defined-term clause scored 0.91 similarity against the old
+# fuzzy fallback's 0.92 threshold — a real finding, silently dropped.
+_TYPOGRAPHIC_NORMALIZE = str.maketrans({
+    "“": '"', "”": '"', "‘": "'", "’": "'",
+    "–": "-", "—": "-",
+})
+
 def _normalize_for_match(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip().lower()
+    s = (s or "").translate(_TYPOGRAPHIC_NORMALIZE)
+    return re.sub(r"\s+", " ", s).strip().lower()
 
 def _verify_quote_in_text(quote: str, doc_text: str) -> bool:
     """
     Checks a finding's quoted text is actually present in the source
     document — the core safeguard against a finding being fabricated
     rather than genuinely drawn from the contract. Normalizes whitespace
-    (OCR'd/converted documents rarely preserve exact line breaks) before
+    and typographic quote/dash variants before checking, then falls back
+    to a fuzzy check anchored on the middle of the quote for minor
+    formatting differences, before giving up.
 
-    checking, then falls back to a fuzzy check for minor formatting
-    differences (quote marks, hyphenation) before giving up.
+    The fuzzy fallback anchors on a chunk from the *middle* of the quote
+    (deliberately avoiding the first/last few characters, which is exactly
+    where a corrected quote mark tends to sit) and locates it exactly in
+    the document, then compares only the small window around each anchor
+    hit. This replaces an earlier version that ran difflib over the whole
+    document per candidate window at a fixed step size — too slow at
+    real document length (measured ~14s for 40 findings against a 50k-char
+    doc with autojunk off) and, with autojunk on, unreliable on ordinary
+    prose (measured finding only 13/250 matching chars on a genuinely
+    present 250-char excerpt, because common characters get treated as
+    "junk" and excluded from matching blocks).
     """
     if not quote or not quote.strip():
         return False
@@ -6188,23 +6212,27 @@ def _verify_quote_in_text(quote: str, doc_text: str) -> bool:
     norm_doc = _normalize_for_match(doc_text)
     if norm_quote in norm_doc:
         return True
-    # Fuzzy fallback: slide a window through the doc roughly the length of
-    # the quote and check similarity — catches near-exact matches that
-    # differ only by punctuation/quote-mark style, without being so loose
-    # that it would pass a genuinely fabricated quote.
     if len(norm_quote) < 15:
         return False  # too short to fuzzy-match reliably — must be exact
-    window = len(norm_quote)
-    step = max(1, window // 4)
-    best_ratio = 0.0
-    for i in range(0, max(1, len(norm_doc) - window), step):
-        chunk = norm_doc[i:i + window + 20]
-        ratio = difflib.SequenceMatcher(None, norm_quote, chunk).ratio()
-        if ratio > best_ratio:
-            best_ratio = ratio
-        if best_ratio >= 0.92:
+    anchor_len = min(24, len(norm_quote) // 2 or len(norm_quote))
+    anchor_start = max(0, (len(norm_quote) - anchor_len) // 2)
+    anchor = norm_quote[anchor_start:anchor_start + anchor_len]
+    margin = 20
+    search_from = 0
+    checked = 0
+    while checked < 25:
+        pos = norm_doc.find(anchor, search_from)
+        if pos == -1:
+            break
+        checked += 1
+        search_from = pos + 1
+        window_start = max(0, pos - anchor_start - margin)
+        window_end = min(len(norm_doc), pos + (len(norm_quote) - anchor_start) + margin)
+        window = norm_doc[window_start:window_end]
+        ratio = difflib.SequenceMatcher(None, norm_quote, window).ratio()
+        if ratio >= 0.90:
             return True
-    return best_ratio >= 0.92
+    return False
 
 @app.post("/api/contract-review")
 async def review_contract(
@@ -6281,9 +6309,32 @@ Review this contract now and call submit_contract_review with your findings."""
     # can't be checked this way; they're marked distinctly so the UI can
     # show them with appropriately lower confidence, not silently equal
     # to a verified quote-backed finding.
+    findings_raw = review.get("findings", [])
+    if not isinstance(findings_raw, list):
+        # Defensive guard against a wrong-typed top-level `findings` value
+        # (e.g. the model returned a single string instead of an array).
+        # Observed in practice as a wildly inflated dropped_unverified_count
+        # (11047 on a 9-page contract) with zero findings shown — because
+        # `for f in "some string"` iterates one character at a time and
+        # every "item" then fails the isinstance(f, dict) check below, so
+        # the per-item guard (which exists for a single malformed *entry*
+        # inside an otherwise-valid list) silently absorbed the whole thing
+        # as thousands of individually "dropped" findings. Fail loudly
+        # instead of returning what would look like a clean "no issues
+        # flagged" result — the entire point of two-stage verification is
+        # to never show a misleading result, and a silently-empty findings
+        # list after a malformed generation is exactly that.
+        print(f"[contract-review] findings field was not a list (type={type(findings_raw).__name__}): "
+              f"{findings_raw!r:.500}")
+        raise HTTPException(
+            status_code=502,
+            detail="The contract review didn't come back in the expected format. "
+                   "This is a generation error, not a clean review — please try again."
+        )
+
     verified_findings = []
     dropped_count = 0
-    for f in review.get("findings", []):
+    for f in findings_raw:
         if not isinstance(f, dict):
             # Defensive guard — the tool schema requires each finding to be
             # an object, and this hit production once already (a finding
