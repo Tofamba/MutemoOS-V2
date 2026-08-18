@@ -6297,7 +6297,22 @@ async def review_contract(
 Review this contract now and call submit_contract_review with your findings."""
 
     try:
-        msg = client.messages.create(
+        # asyncio.to_thread is required here, not optional -- confirmed by a
+        # real production incident: a request landed right as a deploy was
+        # rolling over, the (then-)direct client.messages.create() call
+        # blocked this worker's single event loop for the whole ~56s the
+        # generation was in flight, the worker couldn't even respond to
+        # health checks during that window (observed as repeated 499s on
+        # /health/alerts immediately before), and when the old container
+        # was torn down mid-block the request died with a bare 502 and no
+        # application-level log line at all -- the coroutine never got a
+        # chance to run past the blocking call. Every other Anthropic call
+        # of comparable length in this file already goes through
+        # asyncio.to_thread (see _call_document_generation_model's
+        # docstring for the same reasoning); this one just hadn't been
+        # brought in line with that convention yet.
+        msg = await asyncio.to_thread(
+            client.messages.create,
             model="claude-sonnet-4-5",
             # A flat 4096 was cutting off mid-generation on longer/denser
             # contracts (confirmed via stop_reason logged below on a real

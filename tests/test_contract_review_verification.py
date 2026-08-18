@@ -19,6 +19,7 @@ backend/main.py — covers two bugs found while diagnosing a real report of
 """
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 from backend.main import _normalize_for_match, _verify_quote_in_text, review_contract
@@ -240,3 +241,40 @@ def test_findings_truncated_mid_string_by_max_tokens_still_502s_with_a_useful_hi
     except HTTPException as e:
         assert e.status_code == 502
         assert "cut off" in e.detail.lower()
+
+
+def test_anthropic_call_does_not_block_the_event_loop(monkeypatch):
+    # Reproduces the real production incident directly: a contract-review
+    # request landed right as a deploy was rolling over. Because
+    # client.messages.create() used to be called directly (not via
+    # asyncio.to_thread), it blocked the single event loop for the whole
+    # ~56s the generation was in flight -- the worker couldn't even answer
+    # its own health checks during that window (observed as repeated 499s
+    # immediately beforehand in the Railway logs), and the request died
+    # with a bare 502 when the old container was torn down mid-block.
+    # Proves the fix: a concurrent coroutine must be able to make progress
+    # while review_contract's Anthropic call is "in flight".
+    import backend.main as m
+
+    def slow_create(**kwargs):
+        time.sleep(0.3)  # simulates a slow real API call, run on a worker thread
+        return _fake_tool_use_message([])
+
+    monkeypatch.setattr(m.client.messages, "create", slow_create)
+    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
+
+    async def scenario():
+        progressed = False
+
+        async def other_coroutine():
+            nonlocal progressed
+            await asyncio.sleep(0.05)  # would never fire if the loop were blocked for 0.3s
+            progressed = True
+
+        results = await asyncio.gather(review_contract(None, upload, None), other_coroutine())
+        return results[0], progressed
+
+    result, progressed = asyncio.run(scenario())
+
+    assert progressed is True
+    assert result["findings"] == []
