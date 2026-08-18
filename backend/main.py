@@ -6124,7 +6124,13 @@ Categories:
 Every "quote" must be copied EXACTLY from the contract text provided — do not paraphrase or
 reconstruct from memory. If you cannot find the exact text to quote, omit the quote field and
 rely on the category/description alone (this applies to missing_clause findings by definition,
-since there's no text to quote for something that isn't there)."""
+since there's no text to quote for something that isn't there).
+
+The "findings" field must be a native JSON array of objects, exactly as submit_contract_review's
+schema defines it — never a JSON-encoded string containing an array. When referencing contract
+text inside "description" (as opposed to the "quote" field, which must be verbatim), prefer
+single quotes or paraphrasing over embedding double-quoted excerpts — this keeps the output
+easier to encode correctly and avoids wasting output budget on escape sequences."""
 
 # Structured tool schema instead of asking the model to hand-format free-text
 # JSON — contract text routinely contains quote marks (defined terms like
@@ -6293,7 +6299,16 @@ Review this contract now and call submit_contract_review with your findings."""
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=4096,
+            # A flat 4096 was cutting off mid-generation on longer/denser
+            # contracts (confirmed via stop_reason logged below on a real
+            # production failure) -- a 9-page employment contract with
+            # several substantial findings, each carrying a title,
+            # multi-sentence description, and a verbatim quote, genuinely
+            # needs more headroom than a short/simple contract. Scaled by
+            # source length rather than picking another flat guess, same
+            # pattern already used for the search/grounding endpoint
+            # elsewhere in this file.
+            max_tokens=min(6000 + len(review_text) // 5, 16000) if review_text else 4096,
             system=CONTRACT_REVIEW_SYSTEM.format(FIRM_NAME=FIRM_NAME),
             tools=[CONTRACT_REVIEW_TOOL],
             tool_choice={"type": "tool", "name": "submit_contract_review"},
@@ -6301,6 +6316,9 @@ Review this contract now and call submit_contract_review with your findings."""
         )
         tool_use = next((b for b in msg.content if b.type == "tool_use"), None)
         review = tool_use.input if tool_use else {"overall_summary": "", "findings": []}
+        if msg.stop_reason == "max_tokens":
+            print(f"[contract-review] generation hit max_tokens (usage={msg.usage}) -- "
+                  f"output was likely cut off mid-structure")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Contract review failed: {e}")
 
@@ -6311,22 +6329,23 @@ Review this contract now and call submit_contract_review with your findings."""
     # to a verified quote-backed finding.
     findings_raw = review.get("findings", [])
     if isinstance(findings_raw, str):
-        # Observed in production on a real employment contract (twice, on
-        # independent generations): the model emitted a complete, cleanly
-        # indented, schema-shaped JSON array for `findings` — correct
-        # content — but as a *string* value instead of a native array in
-        # the tool-use input. Both occurrences quoted contract clause text
-        # containing literal embedded double quotes (e.g. a salary clause
-        # phrased `... "NET of US$2000.00 per month excluding all relevant
-        # taxes..."` verbatim in the source document), which is exactly the
-        # kind of nested-escaping load that pushes a model toward
-        # flattening a structure into a string rather than emitting it
-        # natively. Since the content itself was genuinely well-formed
-        # (not a truncation — truncation would cut off mid-object, not
-        # produce clean closing structure), attempt to recover it with
-        # json.loads() before giving up; every recovered item still has to
-        # pass the isinstance(dict) check below like any other finding, so
-        # this doesn't weaken the guard against genuinely malformed input.
+        # Observed in production on a real employment contract, repeatedly:
+        # the model flattens `findings` into a JSON-encoded string instead
+        # of emitting a native array in the tool-use input. The first two
+        # occurrences produced a complete, cleanly closed string that
+        # json.loads() recovers correctly (see the isinstance(dict) guard
+        # below for the per-item shape check). A later occurrence on the
+        # same document instead cut off mid-string with no closing
+        # bracket -- that's max_tokens truncation compounding on top of
+        # the same string-flattening behaviour (the escaping overhead from
+        # stringifying the array eats extra output budget, which is part
+        # of why max_tokens was scaled up above and the system prompt now
+        # explicitly forbids this). json.loads() correctly refuses to
+        # fabricate a partial list from truncated JSON in that case, so
+        # this recovery step only ever succeeds on genuinely complete
+        # content -- every recovered item still has to pass the
+        # isinstance(dict) check below like any other finding, so this
+        # doesn't weaken the guard against genuinely malformed input.
         try:
             parsed = json.loads(findings_raw)
         except (json.JSONDecodeError, ValueError):
@@ -6338,10 +6357,10 @@ Review this contract now and call submit_contract_review with your findings."""
 
     if not isinstance(findings_raw, list):
         # Defensive guard against a wrong-typed top-level `findings` value
-        # that recovery couldn't fix (e.g. genuinely not JSON, or JSON that
-        # didn't decode to a list). Observed in practice, before recovery
-        # existed, as a wildly inflated dropped_unverified_count (11047 on
-        # a 9-page contract) with zero findings shown — because
+        # that recovery couldn't fix (e.g. genuinely not JSON, or JSON
+        # truncated mid-string by max_tokens). Observed in practice, before
+        # any of this existed, as a wildly inflated dropped_unverified_count
+        # (11047 on a 9-page contract) with zero findings shown — because
         # `for f in "some string"` iterates one character at a time and
         # every "item" then fails the isinstance(f, dict) check below, so
         # the per-item guard (which exists for a single malformed *entry*
@@ -6352,11 +6371,18 @@ Review this contract now and call submit_contract_review with your findings."""
         # to never show a misleading result, and a silently-empty findings
         # list after a malformed generation is exactly that.
         print(f"[contract-review] findings field was not recoverable as a list "
-              f"(type={type(findings_raw).__name__}): {findings_raw!r:.3000}")
+              f"(type={type(findings_raw).__name__}, stop_reason={msg.stop_reason}): "
+              f"{findings_raw!r:.3000}")
+        truncated_hint = (
+            " The model's response was cut off before completing — this contract may need "
+            "a shorter focus_areas request, or is hitting a generation length limit."
+            if msg.stop_reason == "max_tokens" else ""
+        )
         raise HTTPException(
             status_code=502,
             detail="The contract review didn't come back in the expected format. "
                    "This is a generation error, not a clean review — please try again."
+                   + truncated_hint
         )
 
     verified_findings = []

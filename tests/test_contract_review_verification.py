@@ -92,9 +92,9 @@ class FakeUploadFile:
         return self._content
 
 
-def _fake_tool_use_message(findings, overall_summary="Summary."):
+def _fake_tool_use_message(findings, overall_summary="Summary.", stop_reason="tool_use"):
     tool_use_block = SimpleNamespace(type="tool_use", input={"overall_summary": overall_summary, "findings": findings})
-    return SimpleNamespace(content=[tool_use_block])
+    return SimpleNamespace(content=[tool_use_block], stop_reason=stop_reason, usage=SimpleNamespace(output_tokens=123))
 
 
 def test_findings_as_raw_string_raises_instead_of_inflating_dropped_count(monkeypatch):
@@ -199,11 +199,44 @@ def test_single_malformed_entry_in_otherwise_valid_list_is_dropped_not_fatal(mon
 
 def test_missing_findings_key_defaults_to_empty_not_an_error(monkeypatch):
     import backend.main as m
-    tool_use_block = SimpleNamespace(type="tool_use", input={"overall_summary": "ok"})
-    monkeypatch.setattr(m.client.messages, "create", lambda **kwargs: SimpleNamespace(content=[tool_use_block]))
+    fake_message = SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", input={"overall_summary": "ok"})],
+        stop_reason="tool_use", usage=SimpleNamespace(output_tokens=50),
+    )
+    monkeypatch.setattr(m.client.messages, "create", lambda **kwargs: fake_message)
     upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
     result = asyncio.run(review_contract(None, upload, None))
 
     assert result["findings"] == []
     assert result["dropped_unverified_count"] == 0
+
+
+def test_findings_truncated_mid_string_by_max_tokens_still_502s_with_a_useful_hint(monkeypatch):
+    # The genuinely-different failure mode found on a later production
+    # retry: `findings` comes back as a string again, but this time it's
+    # incomplete (cut off mid-object, no closing bracket) because the
+    # generation hit max_tokens -- json.loads() must legitimately fail to
+    # parse it (never fabricate a partial list from truncated JSON), and
+    # the resulting error should call out that the response was cut off,
+    # not just report a generic format mismatch.
+    import backend.main as m
+    truncated_json_string = (
+        '[\n  {\n    "category": "compliance",\n    "severity": "high",\n    '
+        '"title": "Net salary payment structure potentially violates statutory tax obligations",\n    '
+        '"description": "The contract specifies a \'NET of US$2000.00 per month excluding all relevant '
+        'taxes required by the Government of Zimbabwe.\' This structure appears to shift the employer'
+    )
+    monkeypatch.setattr(
+        m.client.messages, "create",
+        lambda **kwargs: _fake_tool_use_message(truncated_json_string, stop_reason="max_tokens")
+    )
+    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
+
+    from fastapi import HTTPException
+    try:
+        asyncio.run(review_contract(None, upload, None))
+        assert False, "expected review_contract to raise"
+    except HTTPException as e:
+        assert e.status_code == 502
+        assert "cut off" in e.detail.lower()
