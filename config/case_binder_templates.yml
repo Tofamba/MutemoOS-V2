@@ -1,0 +1,107 @@
+# Case Binder starter-document config for backend/case_binder.py's
+# provision_case_binder() — matter_type -> the checklist of starter
+# documents a new matter of that type gets automatically, provisioned via
+# POST /api/onboarding/intake (backend/main.py).
+#
+# Loaded once per process (@lru_cache in backend/case_binder.py) — restart
+# the app to pick up a change here; there is no hot-reload, same
+# convention as config/legal_ranking.yml.
+#
+# Per item:
+#   name               — the document's display name / filename stem.
+#   template_source     — reference to where the real template lives.
+#                         Everything here is "placeholder:..." for now —
+#                         real Vault template wiring (pulling an actual
+#                         .docx precedent instead of this inline stub
+#                         text) is a later step, not part of this pass.
+#   needs_merge_fields  — whether content_template contains {{client_name}}
+#                         / {{matter_number}} / {{today}} tokens that
+#                         provision_case_binder() should substitute.
+#   content_template    — the placeholder body text itself. Only
+#                         meaningful content at this stage is the
+#                         structure (which documents exist for which
+#                         matter type) — the text below is intentionally
+#                         minimal.
+
+conveyancing:
+  - name: "Client Engagement Letter"
+    template_source: "placeholder:common/engagement_letter"
+    needs_merge_fields: true
+    content_template: |
+      ENGAGEMENT LETTER
+
+      Client: {{client_name}}
+      Matter: {{matter_number}}
+      Date: {{today}}
+
+      [Placeholder content — real Vault template not yet wired in.]
+
+  - name: "Agreement of Sale"
+    template_source: "placeholder:conveyancing/agreement_of_sale"
+    needs_merge_fields: true
+    content_template: |
+      AGREEMENT OF SALE
+
+      Client: {{client_name}}
+      Matter: {{matter_number}}
+      Date: {{today}}
+
+      [Placeholder content — real Vault template not yet wired in.]
+
+  - name: "Deeds Office Lodgement Checklist"
+    template_source: "placeholder:conveyancing/lodgement_checklist"
+    needs_merge_fields: false
+    content_template: |
+      DEEDS OFFICE LODGEMENT CHECKLIST
+
+      [Placeholder content — real Vault template not yet wired in.]
+
+debt_collection:
+  - name: "Client Engagement Letter"
+    template_source: "placeholder:common/engagement_letter"
+    needs_merge_fields: true
+    content_template: |
+      ENGAGEMENT LETTER
+
+      Client: {{client_name}}
+      Matter: {{matter_number}}
+      Date: {{today}}
+
+      [Placeholder content — real Vault template not yet wired in.]
+
+  - name: "Letter of Demand"
+    template_source: "placeholder:debt_collection/letter_of_demand"
+    needs_merge_fields: true
+    content_template: |
+      LETTER OF DEMAND
+
+      Client: {{client_name}}
+      Matter: {{matter_number}}
+      Date: {{today}}
+
+      [Placeholder content — real Vault template not yet wired in.]
+
+litigation_general:
+  - name: "Client Engagement Letter"
+    template_source: "placeholder:common/engagement_letter"
+    needs_merge_fields: true
+    content_template: |
+      ENGAGEMENT LETTER
+
+      Client: {{client_name}}
+      Matter: {{matter_number}}
+      Date: {{today}}
+
+      [Placeholder content — real Vault template not yet wired in.]
+
+  - name: "Case Summary / Instructions Sheet"
+    template_source: "placeholder:litigation/case_summary"
+    needs_merge_fields: true
+    content_template: |
+      CASE SUMMARY / INSTRUCTIONS SHEET
+
+      Client: {{client_name}}
+      Matter: {{matter_number}}
+      Date: {{today}}
+
+      [Placeholder content — real Vault template not yet wired in.]

@@ -37,6 +37,7 @@ from backend.numbering import (
     generate_initials, disambiguate_initials, next_sequence,
     format_client_number, format_matter_number,
 )
+from backend.case_binder import provision_case_binder
 from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text
 from backend.conveyancing import CONVEYANCING_MILESTONES
 from backend.deadline_engine import try_compute_deadline
@@ -536,6 +537,15 @@ async def run_migrations():
         ALTER TABLE firms ADD COLUMN IF NOT EXISTS firm_logo_url TEXT;
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS r2_key TEXT;
         ALTER TABLE firms ADD COLUMN IF NOT EXISTS features JSONB DEFAULT '[]'::jsonb;
+
+        -- Distinguishes a document a user actually uploaded (source IS
+        -- NULL — the existing, default case) from one the system created
+        -- on the matter's behalf, e.g. POST /api/onboarding/intake's Case
+        -- Binder starter documents (source='auto_provisioned') — so the
+        -- Vault/matter document list can eventually show that distinction
+        -- rather than an auto-provisioned placeholder looking identical
+        -- to something a lawyer actually uploaded.
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS source TEXT;
 
         -- Organisation roles (ops_manager / panel_lawyer) — separate from firm-level role
         CREATE TABLE IF NOT EXISTS organisation_roles (
@@ -2337,6 +2347,25 @@ async def reconcile_chroma_index():
 
 MATTER_STATUSES = ["Active", "Awaiting Client", "Awaiting Court", "On Hold", "Closed"]
 
+# matter_type enum for POST /api/onboarding/intake specifically — the
+# general create_matter/update_matter matter_type field stays free-text
+# (Optional[str], validated nowhere) as it already is today; this pass
+# doesn't touch that. Mirrors the existing frontend New Matter dropdown's
+# option values, plus "litigation_general" — a generic-litigation catch-all
+# the existing list doesn't have one of (it only has specific litigation
+# sub-types: eviction, matrimonial, criminal, etc.) — added because
+# config/case_binder_templates.yml seeds a starter checklist for it.
+# Deliberately a superset of case_binder.known_matter_types(): most of
+# these values don't have a case-binder entry yet, and that's expected —
+# provision_case_binder() returns no starter documents for those, not an
+# error (see backend/case_binder.py's own docstring).
+INTAKE_MATTER_TYPES = [
+    "eviction", "estate", "trust", "employment", "commercial_property",
+    "commercial_contract", "conveyancing", "customary_law", "matrimonial",
+    "family_law", "company_law", "criminal", "constitutional",
+    "debt_collection", "mining", "litigation_general", "other",
+]
+
 class MatterCreate(BaseModel):
     name: str
     number: Optional[str] = None
@@ -3954,6 +3983,272 @@ async def bulk_onboard_from_excel(
             "created_unlinked_pending_review": matters_unlinked,
         },
         "errors": row_errors,
+    }
+
+# ── Single-client intake (Case Binder provisioning) ─────────────────────────
+# Preview-first (a `commit` field, default False), same convention as
+# bulk_onboard_from_excel just above. Client-identity resolution reuses
+# match_client_name() (backend/client_migration.py) the same way:
+# zero matches -> create, one match -> reuse, 2+ -> flag for manual review
+# and never guess.
+#
+# Numbering (backend/numbering.py) is only actually *allocated* on commit,
+# via the same atomic _next_client_number()/_next_matter_number()
+# create_client/create_matter already use — those functions atomically
+# increment numbering_counters the moment they're called, so calling them
+# in preview mode would burn a real sequence number nothing ends up using
+# (the next real commit would then skip a number). Preview instead computes
+# a *would-be* number via numbering.py's next_sequence() directly against
+# current rows — a read-only estimate, not a reservation, same technique
+# bulk_onboard_from_excel's own preview already relies on for exactly this
+# reason.
+
+class ClientIntakeRequest(BaseModel):
+    client_name: str
+    phone: str
+    email: Optional[str] = None
+    contact_person: Optional[str] = None
+    matter_type: str  # validated against INTAKE_MATTER_TYPES below
+    matter_description: str
+    assigned_lawyer_id: str
+    existing_client_id: Optional[str] = None
+    commit: bool = False
+
+@app.post("/api/onboarding/intake")
+async def client_intake(req: ClientIntakeRequest, request: Request):
+    """
+    Single-client version of bulk_onboard_from_excel above: takes one new
+    (or existing) client plus one new matter, and auto-provisions that
+    matter's Case Binder starter documents (backend/case_binder.py) —
+    intended for the normal one-at-a-time "a new client just walked in"
+    intake, not a batch upload.
+
+    commit=False (the default) returns the exact plan — client match/create
+    decision, matter number, and the case-binder document list — without
+    writing anything. Re-submit with commit=True to actually apply it (same
+    known limitation as bulk_onboard_from_excel: no built-in guard against
+    double-committing the same request; review the preview, then commit
+    once).
+
+    An ambiguous client-name match (2+ existing clients score similarly)
+    blocks the ENTIRE request rather than proceeding with anything — unlike
+    bulk_onboard_from_excel, there is no batch of other rows that still need
+    processing here, so there's nothing to gain by partially creating a
+    matter with no resolved client. Resolve the ambiguity (e.g. by
+    re-submitting with existing_client_id set to the correct candidate)
+    and try again.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:create")
+
+    if req.matter_type not in INTAKE_MATTER_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"matter_type must be one of: {', '.join(INTAKE_MATTER_TYPES)}",
+        )
+
+    try:
+        lawyer_uuid = _uuid_mod.UUID(req.assigned_lawyer_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="assigned_lawyer_id must be a valid UUID")
+
+    async with _db_pool.acquire() as conn:
+        lawyer_row = await conn.fetchrow(
+            "SELECT id, display_name FROM users WHERE firm_id=$1 AND id=$2", FIRM_ID, lawyer_uuid
+        )
+        if not lawyer_row:
+            raise HTTPException(status_code=404, detail="assigned_lawyer_id is not a user in this firm")
+
+        # ── Client resolution (read-only — safe regardless of commit) ──────
+        client_id = None
+        client_number = None
+        client_full_name = req.client_name
+        client_result = {}
+
+        if req.existing_client_id:
+            try:
+                existing_uuid = _uuid_mod.UUID(req.existing_client_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="existing_client_id must be a valid UUID")
+            existing = await conn.fetchrow(
+                "SELECT id, full_name, client_number FROM clients WHERE firm_id=$1 AND id=$2",
+                FIRM_ID, existing_uuid,
+            )
+            if not existing:
+                raise HTTPException(status_code=404, detail="existing_client_id not found")
+            client_id = existing["id"]
+            client_number = existing["client_number"]
+            client_full_name = existing["full_name"]
+            client_result = {
+                "action": "matched_explicit", "client_id": str(client_id),
+                "full_name": client_full_name, "client_number": client_number,
+            }
+        else:
+            existing_client_rows = await conn.fetch(
+                "SELECT id, full_name, client_number FROM clients WHERE firm_id=$1", FIRM_ID
+            )
+            candidate_pool = [
+                {"id": str(r["id"]), "full_name": r["full_name"], "client_number": r["client_number"]}
+                for r in existing_client_rows
+            ]
+            match = match_client_name(req.client_name, candidate_pool)
+
+            if match["status"] == "matched":
+                client_id = _uuid_mod.UUID(match["candidate"]["id"])
+                client_number = match["candidate"].get("client_number")
+                client_full_name = match["candidate"]["full_name"]
+                client_result = {
+                    "action": "matched", "client_id": str(client_id),
+                    "full_name": client_full_name, "client_number": client_number,
+                }
+            elif match["status"] == "ambiguous":
+                return {
+                    "committed": False,
+                    "client": {"action": "review_required", "candidates": match["candidates"]},
+                    "matter": None,
+                    "case_binder": [],
+                    "errors": [
+                        "Client name is ambiguous against existing clients — resolve by "
+                        "re-submitting with existing_client_id set to the correct candidate, "
+                        "or use a more specific name."
+                    ],
+                }
+            else:  # no_match
+                initials = await _resolve_user_initials(
+                    conn, FIRM_ID, lawyer_row["id"], lawyer_row["display_name"], persist=req.commit
+                )
+                if req.commit:
+                    client_id = _uuid_mod.uuid4()
+                    client_number = await _next_client_number(conn, FIRM_ID, initials)
+                else:
+                    # Would-be number only — see module docstring above for
+                    # why this can't call _next_client_number() in preview.
+                    existing_numbers = await conn.fetch(
+                        "SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2",
+                        FIRM_ID, f"{initials}-%",
+                    )
+                    would_be_seq = next_sequence([r["client_number"] for r in existing_numbers], initials)
+                    client_number = format_client_number(initials, would_be_seq)
+                client_full_name = req.client_name
+                client_result = {
+                    "action": "created" if req.commit else "would_create",
+                    "client_id": str(client_id) if req.commit else None,
+                    "full_name": client_full_name, "client_number": client_number,
+                }
+
+        # ── Matter + Case Binder ────────────────────────────────────────────
+        if req.commit:
+            async with conn.transaction():
+                now = datetime.utcnow()
+                if client_result["action"] == "created":
+                    await conn.execute(
+                        """INSERT INTO clients (id, firm_id, full_name, email, phone, contact_person,
+                                                client_number, created_by, created_at, updated_at)
+                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)""",
+                        client_id, FIRM_ID, client_full_name, req.email, req.phone, req.contact_person,
+                        client_number, lawyer_row["id"], now,
+                    )
+
+                matter_id = _uuid_mod.uuid4()
+                matter_number = await _next_matter_number(conn, FIRM_ID, client_number) if client_number else None
+                await conn.execute(
+                    """INSERT INTO matters (id, firm_id, name, client_name, client_id, status,
+                                            matter_type, assigned_lawyer_id, matter_number,
+                                            created_by, created_at, last_activity)
+                       VALUES ($1,$2,$3,$4,$5,'Active',$6,$7,$8,$9,$10,$10)""",
+                    matter_id, FIRM_ID, req.matter_description, client_full_name, client_id,
+                    req.matter_type, lawyer_row["id"], matter_number, lawyer_row["id"], now,
+                )
+                matter_result = {
+                    "action": "created", "matter_id": str(matter_id), "matter_number": matter_number,
+                    "name": req.matter_description, "matter_type": req.matter_type,
+                }
+
+                binder_items = provision_case_binder(
+                    {"matter_number": matter_number}, req.matter_type, {"full_name": client_full_name}
+                )
+                case_binder_result = []
+                for item in binder_items:
+                    doc_id = _uuid_mod.uuid4()
+                    content_bytes = item["content"].encode("utf-8")
+                    r2_key = None
+                    # R2 upload failure is best-effort, same resilience as
+                    # the normal single-document upload path — a starter
+                    # document still gets its row (so it shows up on the
+                    # matter and can be re-uploaded later) even if the
+                    # object store round-trip fails.
+                    if R2_ENABLED and _r2_client:
+                        try:
+                            r2_key = f"{FIRM_ID}/{matter_id}/{doc_id}/{item['name']}.txt"
+                            await asyncio.to_thread(
+                                _r2_client.put_object, Bucket=R2_BUCKET, Key=r2_key,
+                                Body=content_bytes, ContentType="text/plain",
+                            )
+                        except Exception as e:
+                            print(f"[case-binder] R2 upload failed for {item['name']!r}: {e}")
+                            r2_key = None
+                    await conn.execute(
+                        """INSERT INTO documents (id, matter_id, firm_id, filename, source, status,
+                                                  word_count, page_count, r2_key, uploaded_at, uploaded_by)
+                           VALUES ($1,$2,$3,$4,'auto_provisioned','complete',$5,1,$6,$7,$8)""",
+                        doc_id, matter_id, FIRM_ID, item["name"], len(item["content"].split()),
+                        r2_key, now, lawyer_row["id"],
+                    )
+                    case_binder_result.append({
+                        "action": "created", "document_id": str(doc_id), "name": item["name"],
+                        "template_source": item["template_source"], "r2_uploaded": r2_key is not None,
+                    })
+
+                await conn.execute(
+                    """INSERT INTO audit_logs (firm_id, user_id, actor_name, actor_role, action,
+                                               target_type, target_id, details)
+                       VALUES ($1, $2, $3, $4, 'CLIENT_INTAKE', 'MATTER', $5, $6)""",
+                    FIRM_ID,
+                    _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+                    user.get("display_name", "Unknown"), user.get("role", "unknown"),
+                    matter_id,
+                    json.dumps({
+                        "client_action": client_result["action"],
+                        "client_id": client_result.get("client_id"),
+                        "matter_number": matter_number,
+                        "matter_type": req.matter_type,
+                        "assigned_lawyer_id": str(lawyer_row["id"]),
+                        "case_binder_documents_created": len(case_binder_result),
+                    }),
+                )
+        else:
+            # Preview: matter number is a would-be estimate (see module
+            # docstring); nothing below this point writes anything.
+            if client_number:
+                existing_matter_numbers = await conn.fetch(
+                    "SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2",
+                    FIRM_ID, f"{client_number}-%",
+                )
+                would_be_matter_seq = next_sequence(
+                    [r["matter_number"] for r in existing_matter_numbers], client_number
+                )
+                matter_number = format_matter_number(client_number, would_be_matter_seq)
+            else:
+                matter_number = None
+            matter_result = {
+                "action": "would_create", "matter_id": None, "matter_number": matter_number,
+                "name": req.matter_description, "matter_type": req.matter_type,
+            }
+            binder_items = provision_case_binder(
+                {"matter_number": matter_number}, req.matter_type, {"full_name": client_full_name}
+            )
+            case_binder_result = [
+                {"action": "would_create", "document_id": None, "name": item["name"],
+                 "template_source": item["template_source"]}
+                for item in binder_items
+            ]
+
+    return {
+        "committed": req.commit,
+        "client": client_result,
+        "matter": matter_result,
+        "case_binder": case_binder_result,
+        "errors": [],
     }
 
 # ── Reports (RBZ compliance export) ─────────────────────────────────────────
