@@ -203,43 +203,61 @@ def test_create_client_returns_stringified_ids_and_all_fields(monkeypatch):
 
 
 def test_create_client_assigns_first_client_number_under_creating_users_initials(monkeypatch):
-    """AUTH_ENABLED is False here, so get_current_user() returns the
-    synthetic dev user whose display_name is literally "NGM" — generate_initials
-    passes that through unchanged (see tests/test_numbering.py)."""
+    """The creating user's display_name is run through generate_initials()
+    to derive the new client's number prefix — verified here against an
+    explicit test user rather than depending on whatever the real
+    AUTH_ENABLED=False dev-mode fallback's display_name happens to be
+    (generate_initials() itself is unit-tested independently in
+    tests/test_numbering.py)."""
     import backend.main as m
     pool = FakePool()
     monkeypatch.setattr(m, "_db_pool", pool)
 
+    async def fake_get_current_user(request):
+        return {"id": None, "firm_id": FIRM_ID, "phone": None, "email": None,
+                "role": "partner", "display_name": "Test User"}
+    monkeypatch.setattr(m, "get_current_user", fake_get_current_user)
+
     result = asyncio.run(create_client(ClientCreate(full_name="John Moyo"), None))
 
-    assert result["client_number"] == "NGM-001"
+    assert result["client_number"] == "TU-001"
 
 
 def test_create_client_numbers_sequentially_for_the_same_prefix(monkeypatch):
     import backend.main as m
     existing = [{
-        "id": uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Existing Client", "client_number": "NGM-006",
+        "id": uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Existing Client", "client_number": "TU-006",
     }]
     pool = FakePool(clients=existing)
     monkeypatch.setattr(m, "_db_pool", pool)
 
+    async def fake_get_current_user(request):
+        return {"id": None, "firm_id": FIRM_ID, "phone": None, "email": None,
+                "role": "partner", "display_name": "Test User"}
+    monkeypatch.setattr(m, "get_current_user", fake_get_current_user)
+
     result = asyncio.run(create_client(ClientCreate(full_name="John Moyo"), None))
 
-    assert result["client_number"] == "NGM-007"
+    assert result["client_number"] == "TU-007"
 
 
 def test_create_client_number_prefix_ignores_other_firms_numbers(monkeypatch):
     import backend.main as m
     other_firm = uuid.uuid4()
     existing = [{
-        "id": uuid.uuid4(), "firm_id": other_firm, "full_name": "Other Firm's Client", "client_number": "NGM-099",
+        "id": uuid.uuid4(), "firm_id": other_firm, "full_name": "Other Firm's Client", "client_number": "TU-099",
     }]
     pool = FakePool(clients=existing)
     monkeypatch.setattr(m, "_db_pool", pool)
 
+    async def fake_get_current_user(request):
+        return {"id": None, "firm_id": FIRM_ID, "phone": None, "email": None,
+                "role": "partner", "display_name": "Test User"}
+    monkeypatch.setattr(m, "get_current_user", fake_get_current_user)
+
     result = asyncio.run(create_client(ClientCreate(full_name="John Moyo"), None))
 
-    assert result["client_number"] == "NGM-001"
+    assert result["client_number"] == "TU-001"
 
 
 # ── list_clients ─────────────────────────────────────────────────────────

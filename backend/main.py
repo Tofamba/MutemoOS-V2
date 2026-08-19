@@ -1248,8 +1248,12 @@ async def auth_status(request: Request):
 async def get_current_user(request: Request) -> Optional[dict]:
     """Return the current user dict, or None if not authenticated."""
     if not AUTH_ENABLED:
-        # Return a synthetic partner user when auth is disabled (dev/demo mode)
-        return {"id": None, "firm_id": FIRM_ID, "phone": None, "email": None, "role": "partner", "display_name": "NGM"}
+        # Return a synthetic partner user when auth is disabled (dev/demo
+        # mode). Deliberately a generic label, not a person's name — this
+        # shows up as the author on every note/report/action taken while
+        # running without real auth (staging demo included), so it must
+        # never resemble anyone real.
+        return {"id": None, "firm_id": FIRM_ID, "phone": None, "email": None, "role": "partner", "display_name": "Demo User"}
     token = request.cookies.get("mutemo_session")
     if not token or not _db_pool:
         return None
