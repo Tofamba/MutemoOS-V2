@@ -547,6 +547,21 @@ async def run_migrations():
         -- to something a lawyer actually uploaded.
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS source TEXT;
 
+        -- Idempotency guard for POST /api/onboarding/intake's commit=true
+        -- path (a client-generated idempotency_key). Keyed on (firm_id,
+        -- key) rather than key alone -- a key is only meaningful scoped to
+        -- one firm, and this doubles as the lookup index for the guard's
+        -- one query. response_body stores the exact response the first
+        -- (real) commit produced, so a detected duplicate can return it
+        -- byte-for-byte rather than reprocessing.
+        CREATE TABLE IF NOT EXISTS intake_idempotency_keys (
+            firm_id       UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            key           TEXT NOT NULL,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            response_body JSONB NOT NULL,
+            PRIMARY KEY (firm_id, key)
+        );
+
         -- Organisation roles (ops_manager / panel_lawyer) — separate from firm-level role
         CREATE TABLE IF NOT EXISTS organisation_roles (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4013,6 +4028,13 @@ class ClientIntakeRequest(BaseModel):
     assigned_lawyer_id: str
     existing_client_id: Optional[str] = None
     commit: bool = False
+    # Client-generated (a UUID is recommended, but any string is accepted)
+    # — guards commit=true against an accidental duplicate submit (double-
+    # click, a network retry, a client-side retry-on-timeout that actually
+    # succeeded server-side). Optional and additive: omitting it reproduces
+    # today's exact behaviour with no duplicate-submit protection at all —
+    # see the docstring below for what that means in practice.
+    idempotency_key: Optional[str] = None
 
 @app.post("/api/onboarding/intake")
 async def client_intake(req: ClientIntakeRequest, request: Request):
@@ -4025,10 +4047,20 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
 
     commit=False (the default) returns the exact plan — client match/create
     decision, matter number, and the case-binder document list — without
-    writing anything. Re-submit with commit=True to actually apply it (same
-    known limitation as bulk_onboard_from_excel: no built-in guard against
-    double-committing the same request; review the preview, then commit
-    once).
+    writing anything. Re-submit with commit=True to actually apply it.
+
+    Duplicate-submit protection on commit=true is opt-in via
+    idempotency_key: pass the same key on a retry of the same logical
+    request, and a detected duplicate short-circuits to the ORIGINAL
+    response — the exact one the first, real commit produced — without
+    creating a second client, matter, or set of case-binder documents, and
+    without a second audit_logs entry. Checked before anything else in the
+    request happens, keyed per-firm. KNOWN LIMITATION: if idempotency_key
+    is omitted (it's optional, not required), there is no protection at
+    all — a genuine double-click or retry with no key will create a
+    duplicate client/matter/documents exactly as it would today. Preview
+    mode (commit=false) needs no such guard — it never writes anything, so
+    repeating a preview call is already safe on its own.
 
     An ambiguous client-name match (2+ existing clients score similarly)
     blocks the ENTIRE request rather than proceeding with anything — unlike
@@ -4036,7 +4068,8 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
     processing here, so there's nothing to gain by partially creating a
     matter with no resolved client. Resolve the ambiguity (e.g. by
     re-submitting with existing_client_id set to the correct candidate)
-    and try again.
+    and try again. (Not idempotency-guarded — an ambiguous match writes
+    nothing on any attempt, so retrying it is already naturally safe.)
     """
     user = await get_current_user(request)
     _check_permission(user, "client:create")
@@ -4053,6 +4086,17 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
         raise HTTPException(status_code=422, detail="assigned_lawyer_id must be a valid UUID")
 
     async with _db_pool.acquire() as conn:
+        if req.commit and req.idempotency_key:
+            # Checked first, before any lookup/validation work below —
+            # a genuine duplicate returns the ORIGINAL response as-is,
+            # not a freshly-recomputed one.
+            existing_key_row = await conn.fetchrow(
+                "SELECT response_body FROM intake_idempotency_keys WHERE firm_id=$1 AND key=$2",
+                FIRM_ID, req.idempotency_key,
+            )
+            if existing_key_row:
+                return json.loads(existing_key_row["response_body"])
+
         lawyer_row = await conn.fetchrow(
             "SELECT id, display_name FROM users WHERE firm_id=$1 AND id=$2", FIRM_ID, lawyer_uuid
         )
@@ -4216,6 +4260,31 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
                         "case_binder_documents_created": len(case_binder_result),
                     }),
                 )
+
+                final_response = {
+                    "committed": True,
+                    "client": client_result,
+                    "matter": matter_result,
+                    "case_binder": case_binder_result,
+                    "errors": [],
+                }
+                if req.idempotency_key:
+                    # Stored in this same transaction as the writes above —
+                    # a crash between "processed" and "key stored" can't
+                    # happen; either both land or neither does. ON CONFLICT
+                    # DO NOTHING as a defensive backstop against a
+                    # genuinely simultaneous duplicate racing the initial
+                    # SELECT above (this guard is a check-then-act, not a
+                    # row lock — adequate for the double-click/retry/
+                    # accidental-refire case this exists for, not a
+                    # guarantee against millisecond-scale true concurrency).
+                    await conn.execute(
+                        """INSERT INTO intake_idempotency_keys (firm_id, key, response_body)
+                           VALUES ($1, $2, $3)
+                           ON CONFLICT (firm_id, key) DO NOTHING""",
+                        FIRM_ID, req.idempotency_key, json.dumps(final_response),
+                    )
+                return final_response
         else:
             # Preview: matter number is a would-be estimate (see module
             # docstring); nothing below this point writes anything.

@@ -40,11 +40,12 @@ class _FakeTransaction:
 
 
 class FakeConnection:
-    def __init__(self, clients=None, matters=None, users=None, numbering_counters=None):
+    def __init__(self, clients=None, matters=None, users=None, numbering_counters=None, idempotency_keys=None):
         self.clients = clients if clients is not None else []
         self.matters = matters if matters is not None else []
         self.users = users if users is not None else []
         self.numbering_counters = numbering_counters if numbering_counters is not None else []
+        self.idempotency_keys = idempotency_keys if idempotency_keys is not None else []
         self.documents = []
         self.audit_logs = []
 
@@ -62,6 +63,13 @@ class FakeConnection:
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
+
+        if q.startswith("SELECT response_body FROM intake_idempotency_keys WHERE firm_id=$1 AND key=$2"):
+            firm_id, key = args
+            for row in self.idempotency_keys:
+                if row["firm_id"] == firm_id and row["key"] == key:
+                    return {"response_body": row["response_body"]}
+            return None
 
         if q.startswith("SELECT id, display_name FROM users WHERE firm_id=$1 AND id=$2"):
             for u in self.users:
@@ -165,6 +173,12 @@ class FakeConnection:
             })
             return "INSERT 0 1"
 
+        if q.startswith("INSERT INTO intake_idempotency_keys"):
+            firm_id, key, response_body = args
+            if not any(r["firm_id"] == firm_id and r["key"] == key for r in self.idempotency_keys):
+                self.idempotency_keys.append({"firm_id": firm_id, "key": key, "response_body": response_body})
+            return "INSERT 0 1"
+
         return "OK"
 
 
@@ -180,8 +194,8 @@ class _FakeAcquireCtx:
 
 
 class FakePool:
-    def __init__(self, clients=None, matters=None, users=None, numbering_counters=None):
-        self.conn = FakeConnection(clients, matters, users, numbering_counters)
+    def __init__(self, clients=None, matters=None, users=None, numbering_counters=None, idempotency_keys=None):
+        self.conn = FakeConnection(clients, matters, users, numbering_counters, idempotency_keys)
 
     def acquire(self):
         return _FakeAcquireCtx(self.conn)
@@ -426,3 +440,129 @@ def test_existing_client_id_not_found_returns_404(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(client_intake(req, _fake_request()))
     assert exc_info.value.status_code == 404
+
+
+# ── Idempotency guard ──────────────────────────────────────────────────
+
+def test_same_idempotency_key_twice_returns_original_response_zero_new_writes(monkeypatch):
+    import backend.main as m
+    lawyer = _lawyer()
+    pool = FakePool(users=[lawyer])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    def make_req():
+        return ClientIntakeRequest(
+            client_name="Kudakwashe Marufu", phone="+263772100003",
+            matter_type="conveyancing", matter_description="Stand 88 Hillside — Sale agreement and transfer",
+            assigned_lawyer_id=str(lawyer["id"]), commit=True, idempotency_key="fixed-retry-key-001",
+        )
+
+    first = asyncio.run(client_intake(make_req(), _fake_request()))
+    assert first["client"]["action"] == "created"
+    assert len(pool.conn.clients) == 1
+    assert len(pool.conn.matters) == 1
+    assert len(pool.conn.documents) == 3
+    assert len(pool.conn.audit_logs) == 1
+    assert len(pool.conn.idempotency_keys) == 1
+
+    second = asyncio.run(client_intake(make_req(), _fake_request()))
+
+    # Byte-for-byte the same response as the first call, not a fresh
+    # recomputation (a fresh one would report client action="matched"
+    # rather than "created", and a different/incremented matter_number).
+    assert second == first
+
+    # Zero new writes anywhere -- still exactly what the first call produced.
+    assert len(pool.conn.clients) == 1
+    assert len(pool.conn.matters) == 1
+    assert len(pool.conn.documents) == 3
+    assert len(pool.conn.audit_logs) == 1
+    assert len(pool.conn.idempotency_keys) == 1
+
+
+def test_two_different_idempotency_keys_both_process_as_separate_intakes(monkeypatch):
+    import backend.main as m
+    lawyer = _lawyer()
+    pool = FakePool(users=[lawyer])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    def make_req(key):
+        return ClientIntakeRequest(
+            client_name="Kudakwashe Marufu", phone="+263772100003",
+            matter_type="conveyancing", matter_description="Stand 88 Hillside — Sale agreement and transfer",
+            assigned_lawyer_id=str(lawyer["id"]), commit=True, idempotency_key=key,
+        )
+
+    first = asyncio.run(client_intake(make_req("key-a"), _fake_request()))
+    second = asyncio.run(client_intake(make_req("key-b"), _fake_request()))
+
+    # Same client reused the second time (real match_client_name behaviour,
+    # not idempotency short-circuiting) -- but a genuinely NEW matter each
+    # time, since these are two distinct keys, i.e. two distinct legitimate
+    # requests as far as the guard is concerned.
+    assert first["client"]["action"] == "created"
+    assert second["client"]["action"] == "matched"
+    assert first["matter"]["matter_number"] != second["matter"]["matter_number"]
+    assert len(pool.conn.clients) == 1  # one client, reused correctly
+    assert len(pool.conn.matters) == 2  # two separate matters
+    assert len(pool.conn.documents) == 6  # 3 case-binder docs each
+    assert len(pool.conn.audit_logs) == 2
+    assert len(pool.conn.idempotency_keys) == 2
+
+
+def test_no_idempotency_key_behaves_exactly_as_before(monkeypatch):
+    """Omitting idempotency_key entirely -- the existing, pre-guard
+    behaviour -- must be completely unaffected: no idempotency_keys row
+    ever gets written, and nothing about client/matter/document creation
+    changes. (The other 9 tests in this file already exercise this
+    behaviour without ever setting idempotency_key; this test makes the
+    "no key stored" property explicit rather than just implicit.)"""
+    import backend.main as m
+    lawyer = _lawyer()
+    pool = FakePool(users=[lawyer])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientIntakeRequest(
+        client_name="Kudakwashe Marufu", phone="+263772100003",
+        matter_type="conveyancing", matter_description="Stand 88 Hillside — Sale agreement and transfer",
+        assigned_lawyer_id=str(lawyer["id"]), commit=True,  # idempotency_key omitted
+    )
+    result = asyncio.run(client_intake(req, _fake_request()))
+
+    assert result["client"]["action"] == "created"
+    assert len(pool.conn.clients) == 1
+    assert len(pool.conn.matters) == 1
+    assert len(pool.conn.documents) == 3
+    assert len(pool.conn.audit_logs) == 1
+    assert pool.conn.idempotency_keys == []  # no guard applied, nothing stored
+
+
+def test_same_key_for_a_different_firm_is_not_treated_as_a_duplicate(monkeypatch):
+    import backend.main as m
+    lawyer = _lawyer()
+    other_firm_id = uuid.uuid4()
+    # A row already exists for this exact key string, but scoped to a
+    # different firm -- must not short-circuit a request for FIRM_ID.
+    pool = FakePool(
+        users=[lawyer],
+        idempotency_keys=[{"firm_id": other_firm_id, "key": "shared-key-string", "response_body": '{"fake": "other firm response"}'}],
+    )
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientIntakeRequest(
+        client_name="Kudakwashe Marufu", phone="+263772100003",
+        matter_type="conveyancing", matter_description="Stand 88 Hillside — Sale agreement and transfer",
+        assigned_lawyer_id=str(lawyer["id"]), commit=True, idempotency_key="shared-key-string",
+    )
+    result = asyncio.run(client_intake(req, _fake_request()))
+
+    # Processed for real -- not the other firm's stored fake response.
+    assert result["client"]["action"] == "created"
+    assert len(pool.conn.clients) == 1
+    assert len(pool.conn.matters) == 1
+    assert len(pool.conn.documents) == 3
+    # A new row for THIS firm was stored, alongside the pre-existing
+    # other-firm row -- both present, correctly scoped.
+    assert len(pool.conn.idempotency_keys) == 2
+    this_firm_rows = [r for r in pool.conn.idempotency_keys if r["firm_id"] == FIRM_ID]
+    assert len(this_firm_rows) == 1
