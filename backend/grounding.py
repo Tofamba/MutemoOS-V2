@@ -27,7 +27,7 @@ ai_client = anthropic.Anthropic()
 # Same reasoning as ai_client above, and same default as main.py's own
 # FIRM_NAME — re-reads the env var directly rather than importing it, since
 # importing from main.py here would be circular.
-FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "Sawyer & Mkushi Legal Practitioners")
+FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "")
 
 AUTHORITY_FLOOR = 0.6
 

@@ -304,6 +304,11 @@ def test_pdf_partner_succeeds_with_expected_content(monkeypatch):
     ]
     pool = FakePool(clients=[huang, vengesai], matters=matters)
     monkeypatch.setattr(m, "_db_pool", pool)
+    # Set explicitly rather than relying on whatever FIRM_NAME defaults to —
+    # the default is deliberately a generic empty string (MUTEMO_FIRM_NAME
+    # unset), and asserting against "" would trivially pass no matter what
+    # the PDF actually contains.
+    monkeypatch.setattr(m, "FIRM_NAME", "Test Firm Legal Practitioners")
 
     response = asyncio.run(export_rbz_compliance_report_pdf(_fake_request()))
 
@@ -312,7 +317,7 @@ def test_pdf_partner_succeeds_with_expected_content(monkeypatch):
     assert response.headers["Content-Disposition"].endswith('.pdf"')
 
     text = _pdf_text(response)
-    assert "Sawyer & Mkushi" in text  # firm name header
+    assert "Test Firm Legal Practitioners" in text  # firm name header
     assert "RBZ Compliance Export" in text
     assert "NGM-001" in text and "Huang Li Qiang" in text
     assert "NGM-001-01" in text and "Active" in text

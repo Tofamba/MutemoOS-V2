@@ -380,7 +380,7 @@ select{cursor:pointer}
     </div>
   </div>
   <div class="header-firm" style="display:flex;align-items:center;gap:12px">
-    <span>Sawyer &amp; Mkushi Legal Practitioners</span>
+    <span id="header-firm-name"></span>
     <span id="current-user-display"
           onclick="openIdentityModal()"
           style="font-size:0.75rem;opacity:0.8;cursor:pointer;padding:3px 8px;border-radius:4px;background:rgba(255,255,255,0.15)"
@@ -636,7 +636,7 @@ select{cursor:pointer}
 
   <!-- Hidden print header — only visible when printing -->
   <div id="search-print-header" style="display:none;margin-bottom:1.5rem">
-    <div style="font-size:16pt;font-weight:bold">Sawyer & Mkushi Legal Practitioners</div>
+    <div id="print-firm-name" style="font-size:16pt;font-weight:bold"></div>
     <div style="font-size:10pt;color:#555;margin-top:4pt">Mutemo Desk — Legal Research Output</div>
     <div id="search-print-query" style="font-size:10pt;margin-top:4pt"></div>
     <div style="font-size:9pt;color:#888;margin-top:2pt" id="search-print-date"></div>
@@ -864,7 +864,7 @@ select{cursor:pointer}
           </div>
           <div class="form-group">
             <label>Recipient Email</label>
-            <input type="email" id="reminder-email" placeholder="nyari@sawyermkushi.co.zw"/>
+            <input type="email" id="reminder-email" placeholder="e.g. name@yourfirm.co.zw"/>
           </div>
           <div class="form-row">
             <div class="form-group">
@@ -1672,7 +1672,7 @@ select{cursor:pointer}
           </div>
           <div class="form-group">
             <label>Email Address *</label>
-            <input type="email" id="invite-email" placeholder="e.g. tmoyo@sawyerandmkushi.co.zw"/>
+            <input type="email" id="invite-email" placeholder="e.g. name@yourfirm.co.zw"/>
           </div>
           <div class="form-group">
             <label>Phone Number *</label>
@@ -1812,10 +1812,24 @@ function saveIdentity() {
 // ── Authentication ───────────────────────────────────────────────────────────
 let loginPhone = '';
 
+// Populates the header and print-letterhead firm name from the backend's
+// real MUTEMO_FIRM_NAME (via /api/auth/status) instead of a hardcoded
+// string — this file is shared across every firm's deployment of this
+// app (and staging, which intentionally runs synthetic firm data), so a
+// literal firm name baked into the HTML would leak one firm's identity
+// into every other deployment.
+function applyFirmName(name) {
+  const el = document.getElementById('header-firm-name');
+  if (el) el.textContent = name || '';
+  const printEl = document.getElementById('print-firm-name');
+  if (printEl) printEl.textContent = name || '';
+}
+
 async function checkAuthAndBoot() {
   try {
     const res = await fetch(`${API}/api/auth/status`);
     const data = await res.json();
+    applyFirmName(data.firm_name);
     if (!data.auth_enabled || data.authenticated) {
       window._userRole = data.role || 'partner';
       window._userDisplayName = data.display_name || '';

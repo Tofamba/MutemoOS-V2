@@ -659,7 +659,7 @@ async def run_migrations():
     print("[db] schema migrations complete")
 
 # ── Firm identity ─────────────────────────────────────────────────────────────
-FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "Sawyer & Mkushi Legal Practitioners")
+FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "")
 FIRM_CITY = os.environ.get("MUTEMO_FIRM_CITY", "Harare, Zimbabwe")
 # Fixed firm UUID for Nyari's deployment. Second firm gets its own Railway instance + its own FIRM_ID.
 FIRM_ID_STR = os.environ.get("MUTEMO_FIRM_ID", "a1b2c3d4-0000-0000-0000-000000000001")
@@ -1226,7 +1226,7 @@ async def logout(request: Request, response: Response):
 @app.get("/api/auth/status")
 async def auth_status(request: Request):
     if not AUTH_ENABLED:
-        return {"auth_enabled": False, "authenticated": True}
+        return {"auth_enabled": False, "authenticated": True, "firm_name": FIRM_NAME}
     token = request.cookies.get("mutemo_session")
     if token and _db_pool:
         async with _db_pool.acquire() as conn:
@@ -1240,9 +1240,10 @@ async def auth_status(request: Request):
                 return {
                     "auth_enabled": True, "authenticated": True,
                     "id": str(row["id"]), "phone": row["phone"], "role": row["role"],
-                    "display_name": row["display_name"], "initials": row["initials"]
+                    "display_name": row["display_name"], "initials": row["initials"],
+                    "firm_name": FIRM_NAME,
                 }
-    return {"auth_enabled": True, "authenticated": False}
+    return {"auth_enabled": True, "authenticated": False, "firm_name": FIRM_NAME}
 
 async def get_current_user(request: Request) -> Optional[dict]:
     """Return the current user dict, or None if not authenticated."""
