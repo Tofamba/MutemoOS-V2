@@ -76,13 +76,25 @@ def test_today_defaults_to_the_real_date_when_not_given():
     assert date.today().isoformat() in engagement_letter["content"]
 
 
-def test_every_item_carries_name_template_source_and_content():
+def test_every_item_carries_name_template_source_content_and_provenance_type():
     docs = provision_case_binder(
         {"matter_number": "TC-001-01"}, "conveyancing", {"full_name": "Chiedza Bvumbe"}
     )
     for d in docs:
-        assert set(d.keys()) == {"name", "template_source", "content"}
+        assert set(d.keys()) == {"name", "template_source", "content", "provenance_document_type"}
         assert d["template_source"].startswith("placeholder:")
+
+
+def test_provenance_document_type_is_read_from_the_yml_per_item():
+    docs = provision_case_binder(
+        {"matter_number": "TC-001-01"}, "conveyancing", {"full_name": "Chiedza Bvumbe"}
+    )
+    by_name = {d["name"]: d["provenance_document_type"] for d in docs}
+    assert by_name == {
+        "Client Engagement Letter": "Correspondence",
+        "Agreement of Sale": "Contract",
+        "Deeds Office Lodgement Checklist": "General",
+    }
 
 
 def test_missing_client_and_matter_fields_do_not_crash():

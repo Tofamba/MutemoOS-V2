@@ -155,8 +155,18 @@ class FakeConnection:
             return "INSERT 0 1"
 
         if q.startswith("INSERT INTO documents"):
-            cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
-            row = dict(zip(cols, args))
+            # Not the generic column/arg zip trick -- like audit_logs above,
+            # this real query embeds 'auto_provisioned'/'complete'/'Draft'/1
+            # as SQL literals interleaved with placeholders, so column count
+            # (13) != arg count (9) and a naive zip() silently misaligns
+            # every column from "source" onward.
+            doc_id, matter_id, firm_id, filename, word_count, r2_key, uploaded_at, uploaded_by, provenance_document_type = args
+            row = {
+                "id": doc_id, "matter_id": matter_id, "firm_id": firm_id, "filename": filename,
+                "source": "auto_provisioned", "status": "complete", "word_count": word_count,
+                "page_count": 1, "r2_key": r2_key, "uploaded_at": uploaded_at, "uploaded_by": uploaded_by,
+                "document_status": "Draft", "provenance_document_type": provenance_document_type,
+            }
             self.documents.append(row)
             return "INSERT 0 1"
 
@@ -247,6 +257,13 @@ def test_new_client_new_matter_commit_creates_everything(monkeypatch):
     assert len(pool.conn.audit_logs) == 1
     assert pool.conn.audit_logs[0]["action"] == "CLIENT_INTAKE"
     assert pool.conn.audit_logs[0]["target_type"] == "MATTER"
+
+    # Every auto-provisioned case-binder document defaults to Draft --
+    # they're untouched shells until a lawyer edits them.
+    assert all(d["document_status"] == "Draft" for d in pool.conn.documents)
+    assert {d["provenance_document_type"] for d in pool.conn.documents} == {
+        "Correspondence", "Contract", "General",
+    }  # conveyancing's 3 seeded docs, per config/case_binder_templates.yml
 
 
 # ── Existing client via existing_client_id ───────────────────────────────

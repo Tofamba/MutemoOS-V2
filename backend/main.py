@@ -348,6 +348,36 @@ async def run_migrations():
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS authority_strength TEXT;
         CREATE INDEX IF NOT EXISTS idx_documents_legal_type ON documents(legal_source_type);
 
+        -- Document provenance metadata for client/matter (Vault) documents
+        -- -- a genuinely separate concern from the two classification
+        -- systems already on this table: document_type (AI-classified
+        -- specific form, e.g. "affidavit"/"lease_agreement" -- feeds
+        -- legal_source_type/authority_ranker.py, untouched here) and
+        -- matter_type. Named provenance_document_type specifically to
+        -- avoid colliding with the existing document_type column -- reusing
+        -- that name would have meant either breaking
+        -- classify_firm_document()'s FIRM_DOC_TYPE_MAP (new values like
+        -- "Contract" aren't keys in it, so it would silently fall back to
+        -- LegalSourceType.UNKNOWN) or overloading one column with two
+        -- unrelated taxonomies.
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS provenance_document_type TEXT
+            CHECK (provenance_document_type IN (
+                'Pleading', 'Contract', 'Correspondence', 'JudgmentOrder',
+                'Evidence', 'Research', 'Precedent', 'General'
+            ));
+        -- document_status: a legal-document lifecycle stage, distinct from
+        -- the existing `status` column (a processing-pipeline state:
+        -- processing/complete). Defaults to Draft -- a document is a draft
+        -- shell until someone actively moves it forward; this applies
+        -- equally to a case-binder auto-provisioned starter document
+        -- (definitionally untouched until a lawyer edits it) and a fresh
+        -- manual upload with no status specified.
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS document_status TEXT DEFAULT 'Draft'
+            CHECK (document_status IN ('Draft', 'Review', 'Final', 'Executed', 'Superseded'));
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS description TEXT;
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS confidentiality TEXT DEFAULT 'Standard'
+            CHECK (confidentiality IN ('Standard', 'Restricted', 'Privileged'));
+
         CREATE TABLE IF NOT EXISTS legal_updates (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
@@ -2381,6 +2411,22 @@ INTAKE_MATTER_TYPES = [
     "debt_collection", "mining", "litigation_general", "other",
 ]
 
+# Document provenance metadata for client/matter (Vault) documents -- see
+# the documents.provenance_document_type/document_status/confidentiality
+# migration comment (run_migrations()) for why provenance_document_type
+# is a deliberately separate concept/column from the existing
+# document_type (AI-classified specific form, feeds legal_source_type).
+# Kept as real Python lists (matching PRACTICE_AREAS's convention) rather
+# than deriving from the DB CHECK constraints, so a mismatch between the
+# two would show up immediately as a real bug, not silently resolve to
+# whatever Postgres happens to accept.
+PROVENANCE_DOCUMENT_TYPES = [
+    "Pleading", "Contract", "Correspondence", "JudgmentOrder",
+    "Evidence", "Research", "Precedent", "General",
+]
+DOCUMENT_STATUSES = ["Draft", "Review", "Final", "Executed", "Superseded"]
+DOCUMENT_CONFIDENTIALITY_LEVELS = ["Standard", "Restricted", "Privileged"]
+
 class MatterCreate(BaseModel):
     name: str
     number: Optional[str] = None
@@ -4233,10 +4279,11 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
                             r2_key = None
                     await conn.execute(
                         """INSERT INTO documents (id, matter_id, firm_id, filename, source, status,
-                                                  word_count, page_count, r2_key, uploaded_at, uploaded_by)
-                           VALUES ($1,$2,$3,$4,'auto_provisioned','complete',$5,1,$6,$7,$8)""",
+                                                  word_count, page_count, r2_key, uploaded_at, uploaded_by,
+                                                  document_status, provenance_document_type)
+                           VALUES ($1,$2,$3,$4,'auto_provisioned','complete',$5,1,$6,$7,$8,'Draft',$9)""",
                         doc_id, matter_id, FIRM_ID, item["name"], len(item["content"].split()),
-                        r2_key, now, lawyer_row["id"],
+                        r2_key, now, lawyer_row["id"], item.get("provenance_document_type") or "General",
                     )
                     case_binder_result.append({
                         "action": "created", "document_id": str(doc_id), "name": item["name"],
@@ -4689,6 +4736,10 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     matter_id: str = Form(...),
+    provenance_document_type: Optional[str] = Form(None),
+    document_status: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    confidentiality: Optional[str] = Form(None),
     request: Request = None,
 ):
     if request:
@@ -4696,6 +4747,15 @@ async def upload_document(
         _check_permission(user, "document:upload")
     else:
         user = None
+
+    if provenance_document_type is not None and provenance_document_type not in PROVENANCE_DOCUMENT_TYPES:
+        raise HTTPException(status_code=422, detail=f"provenance_document_type must be one of {PROVENANCE_DOCUMENT_TYPES}")
+    if document_status is not None and document_status not in DOCUMENT_STATUSES:
+        raise HTTPException(status_code=422, detail=f"document_status must be one of {DOCUMENT_STATUSES}")
+    if confidentiality is not None and confidentiality not in DOCUMENT_CONFIDENTIALITY_LEVELS:
+        raise HTTPException(status_code=422, detail=f"confidentiality must be one of {DOCUMENT_CONFIDENTIALITY_LEVELS}")
+    document_status = document_status or "Draft"
+    confidentiality = confidentiality or "Standard"
 
     async with _db_pool.acquire() as conn:
         matter = await conn.fetchrow(
@@ -4713,11 +4773,13 @@ async def upload_document(
     # Insert document record immediately with status='processing'
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO documents (id, matter_id, firm_id, filename, status, uploaded_at, uploaded_by)
-            VALUES ($1,$2,$3,$4,'processing',NOW(),$5) RETURNING *
+            INSERT INTO documents (id, matter_id, firm_id, filename, status, uploaded_at, uploaded_by,
+                                    provenance_document_type, document_status, description, confidentiality)
+            VALUES ($1,$2,$3,$4,'processing',NOW(),$5,$6,$7,$8,$9) RETURNING *
         """,
         _uuid_mod.UUID(doc_id), _uuid_mod.UUID(matter_id), FIRM_ID, filename,
-        _uuid_mod.UUID(str(user["id"])) if user and user.get("id") else None
+        _uuid_mod.UUID(str(user["id"])) if user and user.get("id") else None,
+        provenance_document_type, document_status, description, confidentiality,
         )
 
     # Schedule heavy processing in the background — returns immediately to client
@@ -6042,9 +6104,14 @@ async def search_documents(req: SearchRequest, request: Request):
         firm_chunk_rows = await conn.fetch(
             """
             SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
-                   d.matter_type, d.legal_source_type, d.authority_strength
+                   d.matter_type, d.legal_source_type, d.authority_strength,
+                   d.document_status, d.provenance_document_type,
+                   m.matter_number, m.name AS matter_name, m.client_id AS matter_client_id,
+                   cl.full_name AS client_name
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
+            LEFT JOIN matters m ON m.id = d.matter_id
+            LEFT JOIN clients cl ON cl.id = m.client_id
             WHERE c.firm_id=$1 AND c.chunk_source='firm'
             """,
             FIRM_ID
@@ -6274,9 +6341,14 @@ async def _run_document_search_job(
             firm_chunk_rows = await conn.fetch(
                 """
                 SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
-                       d.legal_source_type, d.authority_strength
+                       d.legal_source_type, d.authority_strength,
+                       d.document_status, d.provenance_document_type,
+                       m.matter_number, m.name AS matter_name, m.client_id AS matter_client_id,
+                       cl.full_name AS client_name
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
+                LEFT JOIN matters m ON m.id = d.matter_id
+                LEFT JOIN clients cl ON cl.id = m.client_id
                 WHERE c.firm_id=$1 AND c.chunk_source='firm'
                 """,
                 FIRM_ID
@@ -6846,6 +6918,12 @@ def _semantic_search_firm(req, chunks: list) -> list:
                     "matter_type": chunk.get("matter_type"),
                     "legal_source_type": chunk.get("legal_source_type"),
                     "authority_strength": chunk.get("authority_strength"),
+                    "document_status": chunk.get("document_status"),
+                    "provenance_document_type": chunk.get("provenance_document_type"),
+                    "matter_number": chunk.get("matter_number"),
+                    "matter_name": chunk.get("matter_name"),
+                    "client_id": str(chunk["matter_client_id"]) if chunk.get("matter_client_id") else None,
+                    "client_name": chunk.get("client_name"),
                 })
                 if len(results) >= req.limit:
                     break
@@ -6872,6 +6950,12 @@ def _semantic_search_firm(req, chunks: list) -> list:
                 "matter_type": chunk.get("matter_type"),
                 "legal_source_type": chunk.get("legal_source_type"),
                 "authority_strength": chunk.get("authority_strength"),
+                "document_status": chunk.get("document_status"),
+                "provenance_document_type": chunk.get("provenance_document_type"),
+                "matter_number": chunk.get("matter_number"),
+                "matter_name": chunk.get("matter_name"),
+                "client_id": str(chunk["matter_client_id"]) if chunk.get("matter_client_id") else None,
+                "client_name": chunk.get("client_name"),
             })
     return results
 

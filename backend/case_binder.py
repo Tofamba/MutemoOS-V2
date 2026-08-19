@@ -65,7 +65,8 @@ def provision_case_binder(matter: dict, matter_type: str, client: dict, today: s
     """
     Returns the starter document records for a new matter of this type —
     not yet persisted anywhere. Each item:
-        {"name": str, "template_source": str, "content": str}
+        {"name": str, "template_source": str, "content": str,
+         "provenance_document_type": str}
 
     matter: {"matter_number": str}
     client: {"full_name": str}
@@ -73,6 +74,14 @@ def provision_case_binder(matter: dict, matter_type: str, client: dict, today: s
         given — accepted as a parameter (rather than always calling
         date.today() internally) so callers/tests can pin a specific date
         deterministically without monkeypatching the datetime module.
+
+    provenance_document_type comes straight from the YAML (one of
+    backend/main.py's PROVENANCE_DOCUMENT_TYPES) and falls back to
+    "General" if an item doesn't specify one. document_status is
+    deliberately NOT included here — every auto-provisioned document gets
+    document_status='Draft', the same fixed value regardless of item or
+    matter_type, so the caller (POST /api/onboarding/intake) sets it
+    directly rather than this function threading a constant through.
 
     An unrecognised matter_type (not a key in the YAML) returns an empty
     list rather than raising — a matter_type with no defined starter
@@ -98,5 +107,6 @@ def provision_case_binder(matter: dict, matter_type: str, client: dict, today: s
             "name": item["name"],
             "template_source": item.get("template_source"),
             "content": content,
+            "provenance_document_type": item.get("provenance_document_type") or "General",
         })
     return result

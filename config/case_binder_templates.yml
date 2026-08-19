@@ -8,24 +8,36 @@
 # convention as config/legal_ranking.yml.
 #
 # Per item:
-#   name               — the document's display name / filename stem.
-#   template_source     — reference to where the real template lives.
-#                         Everything here is "placeholder:..." for now —
-#                         real Vault template wiring (pulling an actual
-#                         .docx precedent instead of this inline stub
-#                         text) is a later step, not part of this pass.
-#   needs_merge_fields  — whether content_template contains {{client_name}}
-#                         / {{matter_number}} / {{today}} tokens that
-#                         provision_case_binder() should substitute.
-#   content_template    — the placeholder body text itself. Only
-#                         meaningful content at this stage is the
-#                         structure (which documents exist for which
-#                         matter type) — the text below is intentionally
-#                         minimal.
+#   name                    — the document's display name / filename stem.
+#   template_source         — reference to where the real template lives.
+#                             Everything here is "placeholder:..." for now —
+#                             real Vault template wiring (pulling an actual
+#                             .docx precedent instead of this inline stub
+#                             text) is a later step, not part of this pass.
+#   provenance_document_type — one of backend/main.py's
+#                             PROVENANCE_DOCUMENT_TYPES (Pleading, Contract,
+#                             Correspondence, JudgmentOrder, Evidence,
+#                             Research, Precedent, General) — the document-
+#                             provenance category set on the created
+#                             documents row (documents.provenance_document_type).
+#                             Every auto-provisioned document also gets
+#                             document_status='Draft' (set by the caller,
+#                             not here — it's the same value for every item
+#                             regardless of type, so there's nothing
+#                             item-specific to configure).
+#   needs_merge_fields      — whether content_template contains {{client_name}}
+#                             / {{matter_number}} / {{today}} tokens that
+#                             provision_case_binder() should substitute.
+#   content_template        — the placeholder body text itself. Only
+#                             meaningful content at this stage is the
+#                             structure (which documents exist for which
+#                             matter type) — the text below is intentionally
+#                             minimal.
 
 conveyancing:
   - name: "Client Engagement Letter"
     template_source: "placeholder:common/engagement_letter"
+    provenance_document_type: "Correspondence"
     needs_merge_fields: true
     content_template: |
       ENGAGEMENT LETTER
@@ -38,6 +50,7 @@ conveyancing:
 
   - name: "Agreement of Sale"
     template_source: "placeholder:conveyancing/agreement_of_sale"
+    provenance_document_type: "Contract"
     needs_merge_fields: true
     content_template: |
       AGREEMENT OF SALE
@@ -50,6 +63,7 @@ conveyancing:
 
   - name: "Deeds Office Lodgement Checklist"
     template_source: "placeholder:conveyancing/lodgement_checklist"
+    provenance_document_type: "General"
     needs_merge_fields: false
     content_template: |
       DEEDS OFFICE LODGEMENT CHECKLIST
@@ -59,6 +73,7 @@ conveyancing:
 debt_collection:
   - name: "Client Engagement Letter"
     template_source: "placeholder:common/engagement_letter"
+    provenance_document_type: "Correspondence"
     needs_merge_fields: true
     content_template: |
       ENGAGEMENT LETTER
@@ -71,6 +86,7 @@ debt_collection:
 
   - name: "Letter of Demand"
     template_source: "placeholder:debt_collection/letter_of_demand"
+    provenance_document_type: "Correspondence"
     needs_merge_fields: true
     content_template: |
       LETTER OF DEMAND
@@ -84,6 +100,7 @@ debt_collection:
 litigation_general:
   - name: "Client Engagement Letter"
     template_source: "placeholder:common/engagement_letter"
+    provenance_document_type: "Correspondence"
     needs_merge_fields: true
     content_template: |
       ENGAGEMENT LETTER
@@ -96,6 +113,7 @@ litigation_general:
 
   - name: "Case Summary / Instructions Sheet"
     template_source: "placeholder:litigation/case_summary"
+    provenance_document_type: "Research"
     needs_merge_fields: true
     content_template: |
       CASE SUMMARY / INSTRUCTIONS SHEET
