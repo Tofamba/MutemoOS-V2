@@ -3252,6 +3252,8 @@ async function renderMatterPanel(id) {
             <div style="flex:1;min-width:0">
               <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
               <div class="doc-meta" style="margin-top:2px">
+                ${documentStatusChipHtml(d.document_status)}
+                ${d.provenance_document_type ? `<span class="chip chip-blue">${escHtml(d.provenance_document_type)}</span>` : ''}
                 ${d.document_type ? `<span class="chip chip-gray">${d.document_type.replace(/_/g,' ')}</span>` : ''}
                 ${d.doc_date ? `<span class="chip chip-blue">${d.doc_date}</span>` : ''}
                 ${d.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}

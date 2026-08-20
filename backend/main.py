@@ -7041,13 +7041,15 @@ RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT
 - Ground your analysis in the document's actual wording — reference specific clauses, dates, or terms where relevant
 - Where firm precedent or legal sources below are relevant, cross-reference them explicitly (e.g. "this clause is consistent with/departs from [reference]")
 - If the document appears to have a legal defect, gap, or unusual provision, flag it clearly
-- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
+- If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection
+- If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
     else:
         instructions = """Answer directly and practically:
 - If firm precedents are present, identify patterns and note them by document ID
 - If legislation or case law is present, summarise the relevant legal position and cite by reference
 - Flag variations over time
-- For drafting queries, suggest specific language from the firm precedents""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
+- For drafting queries, suggest specific language from the firm precedents
+- If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
 
     try:
         msg = client.messages.create(

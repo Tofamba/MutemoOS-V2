@@ -276,7 +276,19 @@ def format_context(results: list, legal_results: list, zlr_results: list) -> str
     """Build the source context block injected into the synthesis prompt."""
     context_parts = []
     for r in (results or [])[:5]:
-        context_parts.append(f"[FIRM PRECEDENT — {r.get('filename', 'Unknown Document')}]\n{r['text']}")
+        filename = r.get('filename', 'Unknown Document')
+        # Only a non-Final/Executed document_status gets called out in the
+        # label -- an untouched case-binder Draft shell or a Superseded
+        # document previously looked identical to a signed Final one to
+        # the model, with nothing to stop it being cited as settled firm
+        # precedent. Final/Executed and legacy documents with no
+        # document_status (predating this metadata) keep the plain label
+        # unchanged -- this is the common case and must not regress.
+        status = r.get('document_status')
+        if status and status not in ('Final', 'Executed'):
+            context_parts.append(f"[FIRM PRECEDENT — {status.upper()} — {filename}]\n{r['text']}")
+        else:
+            context_parts.append(f"[FIRM PRECEDENT — {filename}]\n{r['text']}")
     for r in (legal_results or [])[:3]:
         ref = r.get("reference") or r.get("source_name") or "Legal Source"
         if r.get("source_type") in CONTEXT_SOURCE_TYPES:
