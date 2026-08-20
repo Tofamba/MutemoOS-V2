@@ -3874,6 +3874,19 @@ function printSearchResults() {
   }, 1000);
 }
 
+// document_status must be unmissable — Draft/Review vs Final/Executed is
+// a liability distinction, not decoration, so it gets its own bold chip
+// rather than blending in with the other gray metadata chips. Top-level
+// (not nested in renderSearchResults) so renderMatterPanel's doc-item
+// cards can call it too.
+function documentStatusChipHtml(status) {
+  if (!status) return '';
+  const cls = (status === 'Final' || status === 'Executed') ? 'chip-green'
+    : (status === 'Superseded') ? 'chip-gray'
+    : 'chip-red'; // Draft, Review
+  return `<span class="chip ${cls}" style="font-weight:700;text-transform:uppercase;letter-spacing:0.3px">${escHtml(status)}</span>`;
+}
+
 function renderSearchResults(data, query) {
   const el = document.getElementById('search-results');
   if (!data.results.length && !data.answer) {
@@ -3965,17 +3978,6 @@ function renderSearchResults(data, query) {
   function scoreBadgeHtml(topScore, ranking) {
     const tierLabel = ranking ? `<div style="font-size:0.6rem;color:var(--ink3);text-transform:uppercase;letter-spacing:0.4px;margin-top:2px">${escHtml(ranking.tier)}</div>` : '';
     return `<div style="text-align:right"><span class="sr-score">${Math.round(topScore*100)}% match</span>${tierLabel}</div>`;
-  }
-
-  // document_status must be unmissable — Draft/Review vs Final/Executed is
-  // a liability distinction, not decoration, so it gets its own bold chip
-  // rather than blending in with the other gray metadata chips.
-  function documentStatusChipHtml(status) {
-    if (!status) return '';
-    const cls = (status === 'Final' || status === 'Executed') ? 'chip-green'
-      : (status === 'Superseded') ? 'chip-gray'
-      : 'chip-red'; // Draft, Review
-    return `<span class="chip ${cls}" style="font-weight:700;text-transform:uppercase;letter-spacing:0.3px">${escHtml(status)}</span>`;
   }
 
   function cardHtml(first, chunks, ranking) {
