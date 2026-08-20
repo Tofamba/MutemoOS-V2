@@ -7054,13 +7054,19 @@ RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT
     try:
         msg = client.messages.create(
             model="claude-sonnet-4-5",
-            # 900, then 3000, both still cut off mid-sentence in production —
-            # this level of thorough, multi-section document analysis
-            # (headed sections, tables, extensive verbatim quoting) genuinely
-            # needs significant headroom. Going well above what's been
-            # demonstrated necessary so far rather than incrementally
-            # guessing again.
-           max_tokens=min(8000 + len(attached_doc_text) // 5, 24000) if attached_doc_text else 4000,
+            # 900, then 3000, both still cut off mid-sentence in production for
+            # attached-document analysis — this level of thorough, multi-section
+            # analysis (headed sections, tables, extensive verbatim quoting)
+            # genuinely needs significant headroom. The plain-query branch (no
+            # attached document) used to be a flat 4000 regardless of how much
+            # was actually being asked — fine for a single narrow issue, but a
+            # genuinely broad multi-issue query hits IRAC_STRUCTURE_RULES' full
+            # 7-section structure once per issue and blows straight through it.
+            # Both branches now scale the same way, off however much source
+            # material/context this particular call actually has to work with,
+            # rather than one branch guessing a fixed number.
+            max_tokens=min(8000 + len(attached_doc_text) // 5, 24000) if attached_doc_text
+                       else min(8000 + len(context) // 5, 24000),
             messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
 Today's date: {datetime.utcnow().strftime('%Y-%m-%d')}
 
@@ -7074,7 +7080,11 @@ Sources:
 
 {instructions}
 
-Professional, direct{', using clear headed sections for a thorough document review' if attached_doc_text else ', max 4 paragraphs'}. Clearly distinguish the attached document's own content from firm precedent and from public legal sources. Finish every section you start — do not begin a point and leave it incomplete."""}]
+Professional, direct{
+    ", using clear headed sections for a thorough document review. Clearly distinguish the attached document's own content from firm precedent and from public legal sources."
+    if attached_doc_text else
+    ", following the issue-by-issue structure above in full for every distinct legal issue the query raises — do not compress multiple issues together or shorten/omit sections to fit a target length."
+}. Finish every section you start — do not begin a point and leave it incomplete."""}]
         )
         answer_text = msg.content[0].text
         if msg.stop_reason == "max_tokens":
