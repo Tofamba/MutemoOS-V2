@@ -3771,8 +3771,8 @@ async function doSearch() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || 'Search failed');
       }
-      const data = await res.json();
-      if (myToken === _searchPollToken) renderSearchResults(data, query);
+      const { job_id } = await res.json();
+      await pollPlainSearchJob(job_id, query, myToken);
     }
   } catch(e) {
     if (myToken === _searchPollToken) {
@@ -3830,6 +3830,41 @@ function pollJobStatus(statusUrl, isCancelled, handlers) {
 function pollDocumentSearchJob(jobId, query, myToken) {
   return pollJobStatus(
     `${API}/api/search/document/status/${jobId}`,
+    () => myToken !== _searchPollToken,
+    {
+      onComplete: (data) => {
+        const result = data.result;
+        if (!result) {
+          console.warn('[search_job_poll] status=complete but data.result is missing:', data);
+          document.getElementById('search-results').innerHTML = `<div class="status show error">Search job completed without a result.</div>`;
+          return;
+        }
+        if (!Array.isArray(result.results)) {
+          console.warn('[search_job_poll] result.results is not an array:', result);
+          document.getElementById('search-results').innerHTML = `<div class="status show error">Search result is missing the expected results array — please refresh the page and try again.</div>`;
+          return;
+        }
+        renderSearchResults(result, query);
+      },
+      onFailed: (error) => {
+        document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${escHtml(error)}.</div>`;
+      },
+      onError: (e) => {
+        document.getElementById('search-results').innerHTML = `<div class="status show error">Search failed: ${e.message}. Is the server running?</div>`;
+      },
+    }
+  );
+}
+
+// Polls /api/search/status/{jobId} (see backend/main.py
+// _run_plain_search_job) — the plain-query (no attached file) counterpart
+// to pollDocumentSearchJob above. Identical handling, since both jobs
+// resolve to the same result shape consumed by renderSearchResults; kept
+// as its own function rather than parameterizing pollDocumentSearchJob so
+// neither path risks the other's regression.
+function pollPlainSearchJob(jobId, query, myToken) {
+  return pollJobStatus(
+    `${API}/api/search/status/${jobId}`,
     () => myToken !== _searchPollToken,
     {
       onComplete: (data) => {

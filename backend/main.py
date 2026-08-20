@@ -6093,143 +6093,226 @@ def parse_zlr_subject_index(text: str, source: str, volume_year: Optional[str]) 
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
-@app.post("/api/search")
+async def _run_plain_search_job(job_id: str, req: SearchRequest, user: dict):
+    """
+    Background half of POST /api/search -- same fire-and-poll shape and
+    same reason as _run_document_search_job below: full multi-source
+    retrieval plus Sonnet synthesis can run long enough on a genuinely
+    broad query to exceed Cloudflare's ~100s edge timeout if held behind
+    one synchronous request. Confirmed directly against a real broad
+    3-issue query in production: 123.5s wall-clock, well past that
+    ceiling, after the max_tokens fix let the model actually finish
+    instead of cutting off early. The endpoint returns a job_id
+    immediately; the frontend polls /api/search/status/{job_id}.
+    """
+    _search_jobs[job_id]["status"] = JobStatus.RUNNING
+    try:
+        # Load chunks from DB for keyword fallback
+        async with _db_pool.acquire() as conn:
+            firm_chunk_rows = await conn.fetch(
+                """
+                SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
+                       d.matter_type, d.legal_source_type, d.authority_strength,
+                       d.document_status, d.provenance_document_type,
+                       m.matter_number, m.name AS matter_name, m.client_id AS matter_client_id,
+                       cl.full_name AS client_name
+                FROM chunks c
+                JOIN documents d ON d.id = c.document_id
+                LEFT JOIN matters m ON m.id = d.matter_id
+                LEFT JOIN clients cl ON cl.id = m.client_id
+                WHERE c.firm_id=$1 AND c.chunk_source='firm'
+                """,
+                FIRM_ID
+            )
+            legal_chunk_rows = await conn.fetch(
+                """
+                SELECT c.*, lu.legal_source_type, lu.authority_strength
+                FROM chunks c
+                LEFT JOIN legal_updates lu ON lu.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='legal'
+                """,
+                FIRM_ID
+            )
+            zlr_chunk_rows = await conn.fetch(
+                """
+                SELECT c.*, z.legal_source_type, z.authority_strength
+                FROM chunks c
+                LEFT JOIN zlr_entries z ON z.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='zlr'
+                """,
+                FIRM_ID
+            )
+
+        firm_chunks = [dict(r) for r in firm_chunk_rows]
+        legal_chunks = [dict(r) for r in legal_chunk_rows]
+        zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
+
+        results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
+        legal_results = []
+        if req.include_legal_updates:
+            legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
+
+        zlr_results = []
+        if zlr_chunks_list:
+            raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, req.query, None, 3)
+            for r in raw_zlr:
+                zlr_results.append({
+                    "result_source": "zlr",
+                    "chunk_id": r.get("item_id"),
+                    "text": r.get("relevant_excerpt", ""),
+                    "similarity": r.get("similarity", 0),
+                    "document_id": r.get("item_id"),
+                    "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
+                    "citation": r.get("citation"),
+                    "taxonomy_category": r.get("taxonomy_category"),
+                    "summary": r.get("summary"),
+                    "legal_source_type": r.get("legal_source_type"),
+                    "authority_strength": r.get("authority_strength"),
+                })
+
+        deadline_info = try_compute_deadline(req.query, legal_results, zlr_results)
+
+        all_results = results + legal_results + zlr_results
+        for r in all_results:
+            r["display_label"] = display_label(r)
+        if not all_results:
+            _search_jobs[job_id]["result"] = {
+                "answer": None, "results": [],
+                "message": f'No relevant documents found for: "{req.query}"',
+            }
+            _search_jobs[job_id]["status"] = JobStatus.COMPLETE
+            return
+
+        # Authority-first reranking (backend/authority_ranker.py) — additive:
+        # existing `results`/grounding fields are untouched, this is a second,
+        # independent view of the same candidates for clients that want it.
+        authority_ranking = rerank(all_results, req.query)
+
+        grounding = compute_grounding(results, legal_results, zlr_results)
+
+        research_map = None
+        if not grounding["sources_sufficient"]:
+            context_for_agent = format_context(results, legal_results, zlr_results)
+            research_map = await asyncio.to_thread(run_legal_research_agent, req.query, context_for_agent)
+
+        synthesis_context = format_context(results[:5], legal_results[:3], zlr_results[:3])
+
+        answer = await asyncio.to_thread(
+            synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3],
+            deadline_info=deadline_info, research_map=research_map
+        )
+
+        answer, qc_log = verify_citations(answer, synthesis_context)
+        answer, inline_qc_log = verify_inline_case_citations(answer, synthesis_context)
+        qc_log = qc_log + inline_qc_log
+
+        answer, confidence_qc_log = enforce_confidence_consistency(answer)
+        qc_log = qc_log + confidence_qc_log
+
+        answer = apply_confidence_safeguard(answer, grounding)
+
+        research_agent_status = (
+            "success" if research_map and "error" not in research_map
+            else "failed" if research_map
+            else "not_triggered"
+        )
+
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO audit_logs (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details)
+                VALUES ($1, $2, $3, $4, 'SEARCH', 'QUERY', NULL, $5)
+                """,
+                FIRM_ID,
+                _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+                user.get("display_name", "Unknown"),
+                user.get("role", "unknown"),
+                json.dumps({
+                    "query": req.query,
+                    "max_similarity_score": grounding["max_similarity_score"],
+                    "sources_sufficient": grounding["sources_sufficient"],
+                    "source_tier_breakdown": grounding["source_tier_breakdown"],
+                    "research_agent_status": research_agent_status,
+                    "research_agent_gaps": research_map.get("gaps", []) if research_map else [],
+                    "qc_downgrades": qc_log,
+                    "authority_confidence": authority_ranking["confidence"],
+                    "authority_excluded_count": authority_ranking["excluded_count"],
+                }),
+            )
+
+        _search_jobs[job_id]["result"] = {
+            "answer": answer, "results": all_results, **grounding,
+            "authority_ranking": authority_ranking,
+        }
+        _search_jobs[job_id]["status"] = JobStatus.COMPLETE
+    except Exception as e:
+        print(f"[search_job:{job_id}] FAILED: {e}")
+        _search_jobs[job_id]["error"] = str(e)
+        _search_jobs[job_id]["status"] = JobStatus.FAILED
+
+@app.post("/api/search", status_code=202)
 async def search_documents(req: SearchRequest, request: Request):
+    """
+    Search Vault's main query path — full multi-source retrieval (firm
+    precedent, indexed legislation/case law, ZLR judgments) plus Sonnet
+    synthesis.
+
+    Runs as a fire-and-poll background job rather than a single
+    synchronous request/response, same pattern as /api/search/document
+    below and for the same reason: the pipeline can run long enough on a
+    genuinely broad query to exceed Cloudflare's ~100s edge timeout.
+    Returns a job_id immediately; poll /api/search/status/{job_id} for
+    progress and the eventual result.
+    """
     user = await get_current_user(request)
     _check_permission(user, "search")
     _require_retrieval_ready()
 
-    # Load chunks from DB for keyword fallback
-    async with _db_pool.acquire() as conn:
-        firm_chunk_rows = await conn.fetch(
-            """
-            SELECT c.*, d.filename AS document_filename, d.document_type, d.court,
-                   d.matter_type, d.legal_source_type, d.authority_strength,
-                   d.document_status, d.provenance_document_type,
-                   m.matter_number, m.name AS matter_name, m.client_id AS matter_client_id,
-                   cl.full_name AS client_name
-            FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            LEFT JOIN matters m ON m.id = d.matter_id
-            LEFT JOIN clients cl ON cl.id = m.client_id
-            WHERE c.firm_id=$1 AND c.chunk_source='firm'
-            """,
-            FIRM_ID
-        )
-        legal_chunk_rows = await conn.fetch(
-            """
-            SELECT c.*, lu.legal_source_type, lu.authority_strength
-            FROM chunks c
-            LEFT JOIN legal_updates lu ON lu.id = c.document_id
-            WHERE c.firm_id=$1 AND c.chunk_source='legal'
-            """,
-            FIRM_ID
-        )
-        zlr_chunk_rows = await conn.fetch(
-            """
-            SELECT c.*, z.legal_source_type, z.authority_strength
-            FROM chunks c
-            LEFT JOIN zlr_entries z ON z.id = c.document_id
-            WHERE c.firm_id=$1 AND c.chunk_source='zlr'
-            """,
-            FIRM_ID
-        )
+    now = datetime.utcnow()
+    for jid, job in list(_search_jobs.items()):
+        if now - datetime.fromisoformat(job["created_at"]) > _SEARCH_JOB_MAX_AGE:
+            del _search_jobs[jid]
 
-    firm_chunks = [dict(r) for r in firm_chunk_rows]
-    legal_chunks = [dict(r) for r in legal_chunk_rows]
-    zlr_chunks_list = [dict(r) for r in zlr_chunk_rows]
+    job_id = str(_uuid_mod.uuid4())
 
-    results = await asyncio.to_thread(_semantic_search_firm, req, firm_chunks)
-    legal_results = []
-    if req.include_legal_updates:
-        legal_results = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
+    # Capture only the minimum authenticated user context required by the
+    # pipeline, same reasoning as job_user in search_with_document below —
+    # the Request object is tied to this request/response cycle and must
+    # not be relied on after it ends.
+    job_user = {
+        "id": user.get("id"), "firm_id": user.get("firm_id"),
+        "display_name": user.get("display_name"), "role": user.get("role"),
+    }
 
-    zlr_results = []
-    if zlr_chunks_list:
-        raw_zlr = await asyncio.to_thread(_zlr_semantic_search, zlr_chunks_list, req.query, None, 3)
-        for r in raw_zlr:
-            zlr_results.append({
-                "result_source": "zlr",
-                "chunk_id": r.get("item_id"),
-                "text": r.get("relevant_excerpt", ""),
-                "similarity": r.get("similarity", 0),
-                "document_id": r.get("item_id"),
-                "filename": r.get("case_name") or r.get("citation") or "ZLR Entry",
-                "citation": r.get("citation"),
-                "taxonomy_category": r.get("taxonomy_category"),
-                "summary": r.get("summary"),
-                "legal_source_type": r.get("legal_source_type"),
-                "authority_strength": r.get("authority_strength"),
-            })
+    _search_jobs[job_id] = {
+        "status": JobStatus.PENDING,
+        "result": None,
+        "error": None,
+        "firm_id": str(user.get("firm_id") or FIRM_ID),
+        "created_at": now.isoformat(),
+    }
 
-    deadline_info = try_compute_deadline(req.query, legal_results, zlr_results)
+    asyncio.create_task(_run_plain_search_job(job_id, req, job_user))
 
-    all_results = results + legal_results + zlr_results
-    for r in all_results:
-        r["display_label"] = display_label(r)
-    if not all_results:
-        return {"answer": None, "results": [], "message": f'No relevant documents found for: "{req.query}"'}
+    return {"job_id": job_id, "status": "pending"}
 
-    # Authority-first reranking (backend/authority_ranker.py) — additive:
-    # existing `results`/grounding fields are untouched, this is a second,
-    # independent view of the same candidates for clients that want it.
-    authority_ranking = rerank(all_results, req.query)
+@app.get("/api/search/status/{job_id}")
+async def get_plain_search_job_status(job_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "search")
 
-    grounding = compute_grounding(results, legal_results, zlr_results)
+    job = _search_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    research_map = None
-    if not grounding["sources_sufficient"]:
-        context_for_agent = format_context(results, legal_results, zlr_results)
-        research_map = await asyncio.to_thread(run_legal_research_agent, req.query, context_for_agent)
-
-    synthesis_context = format_context(results[:5], legal_results[:3], zlr_results[:3])
-
-    answer = await asyncio.to_thread(
-        synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3],
-        deadline_info=deadline_info, research_map=research_map
-    )
-
-    answer, qc_log = verify_citations(answer, synthesis_context)
-    answer, inline_qc_log = verify_inline_case_citations(answer, synthesis_context)
-    qc_log = qc_log + inline_qc_log
-
-    answer, confidence_qc_log = enforce_confidence_consistency(answer)
-    qc_log = qc_log + confidence_qc_log
-
-    answer = apply_confidence_safeguard(answer, grounding)
-
-    research_agent_status = (
-        "success" if research_map and "error" not in research_map
-        else "failed" if research_map
-        else "not_triggered"
-    )
-
-    async with _db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO audit_logs (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details)
-            VALUES ($1, $2, $3, $4, 'SEARCH', 'QUERY', NULL, $5)
-            """,
-            FIRM_ID,
-            _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
-            user.get("display_name", "Unknown"),
-            user.get("role", "unknown"),
-            json.dumps({
-                "query": req.query,
-                "max_similarity_score": grounding["max_similarity_score"],
-                "sources_sufficient": grounding["sources_sufficient"],
-                "source_tier_breakdown": grounding["source_tier_breakdown"],
-                "research_agent_status": research_agent_status,
-                "research_agent_gaps": research_map.get("gaps", []) if research_map else [],
-                "qc_downgrades": qc_log,
-                "authority_confidence": authority_ranking["confidence"],
-                "authority_excluded_count": authority_ranking["excluded_count"],
-            }),
-        )
+    if job["firm_id"] != str(user.get("firm_id") or FIRM_ID):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     return {
-        "answer": answer, "results": all_results, **grounding,
-        "authority_ranking": authority_ranking,
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job["result"],
+        "error": job["error"],
     }
 
 # Cap on attached-document text sent to the model — generous enough for a
@@ -6238,14 +6321,19 @@ async def search_documents(req: SearchRequest, request: Request):
 # still bounding cost/latency for anything unusually long.
 MAX_ATTACHED_DOC_CHARS = 40_000
 
-# ── Document search: fire-and-poll job pattern ─────────────────────────────────
-# The full pipeline (OCR, multi-source retrieval, Sonnet synthesis with
-# max_tokens=8000) can run long enough to exceed Cloudflare's edge timeout
-# when held behind one synchronous request. The endpoint now returns a
-# job_id immediately and the pipeline runs in a background asyncio task;
-# the frontend polls /api/search/document/status/{job_id} for the result.
-# In-process dict is an MVP job store — fine for a single instance, not a
-# durable queue.
+# ── Search: fire-and-poll job pattern ───────────────────────────────────────────
+# Shared by both Search Vault paths — plain query (/api/search) and
+# document-attached query (/api/search/document). Either pipeline (multi-
+# source retrieval, optional OCR, Sonnet synthesis) can run long enough on
+# a genuinely broad query to exceed Cloudflare's ~100s edge timeout when
+# held behind one synchronous request — confirmed directly in production
+# for the plain-query path (123.5s on a real broad 3-issue query, after
+# the max_tokens fix let it actually finish instead of cutting off early).
+# Each endpoint returns a job_id immediately and runs its pipeline in a
+# background asyncio task; the frontend polls that job's own status
+# endpoint (/api/search/status/{job_id} or /api/search/document/status/{job_id})
+# for the result. In-process dict is an MVP job store, shared across both
+# paths by job_id — fine for a single instance, not a durable queue.
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"

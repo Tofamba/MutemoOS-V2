@@ -141,23 +141,30 @@ def test_search_zlr_works_normally_once_ready(monkeypatch):
 def test_search_documents_503s_when_not_ready_without_touching_db(monkeypatch):
     monkeypatch.setattr(m, "_retrieval_ready", False)
     monkeypatch.setattr(m, "_db_pool", _PoisonPool())
+    jobs_before = dict(m._search_jobs)
 
     req = SearchRequest(query="Chikwanha v Ministry of Local Government")
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(search_documents(req, None))
     assert exc_info.value.status_code == 503
+    assert m._search_jobs == jobs_before  # no job left behind
 
 
 def test_search_documents_proceeds_past_guard_once_ready(monkeypatch):
-    """Doesn't fully execute the retrieval pipeline (would need ChromaDB
-    mocked too) — proves the guard let it through to normal logic by
-    checking it reaches the DB, rather than stopping at 503."""
+    """/api/search is now a fire-and-poll job endpoint (see
+    test_synthesis_token_budget.py / the Cloudflare-timeout fix) — job
+    creation itself doesn't touch the DB before spawning the background
+    task, so reaching this point (a real job_id, not a 503) is the proof
+    the guard let it through, same convention as
+    test_search_with_document_proceeds_past_guard_once_ready below."""
     monkeypatch.setattr(m, "_retrieval_ready", True)
     monkeypatch.setattr(m, "_db_pool", _SentinelPool())
 
     req = SearchRequest(query="Chikwanha v Ministry of Local Government")
-    with pytest.raises(_SentinelTouchedError):
-        asyncio.run(search_documents(req, None))
+    result = asyncio.run(search_documents(req, None))
+    assert "job_id" in result
+    assert result["status"] == "pending"
+    del m._search_jobs[result["job_id"]]  # don't leak state into other tests
 
 
 # ── search_with_document (/api/search/document) ─────────────────────────
