@@ -197,6 +197,31 @@ async def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_matters_firm ON matters(firm_id);
         CREATE INDEX IF NOT EXISTS idx_matters_status ON matters(firm_id, status);
 
+        -- Sentinel matter for documents that aren't tied to a specific
+        -- client matter (e.g. Rapid Precedent Capture's "General / Firm
+        -- Precedents" option). documents.matter_id is NOT NULL with a hard
+        -- FK -- rather than loosen that constraint (which would ripple
+        -- into every join/document_count increment across the app), every
+        -- firm gets one real matter row to attach general captures to.
+        -- Identified by `number='GENERAL'`, not by name, so a firm
+        -- renaming it doesn't break the lookup in the capture endpoint.
+        --
+        -- is_sentinel marks it as NOT a real client matter: list_matters(),
+        -- the practice-area breakdown, and the inactivity digest all
+        -- exclude it explicitly (see those queries) so it never inflates a
+        -- matter count, shows up in an "active matters" list, or gets
+        -- flagged as a stale/inactive matter in a firm-wide alert. The RBZ
+        -- compliance export needs no such exclusion -- it's driven from
+        -- clients LEFT JOIN matters, and the sentinel has no client_id, so
+        -- it structurally cannot appear there regardless of this flag.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS is_sentinel BOOLEAN NOT NULL DEFAULT FALSE;
+        INSERT INTO matters (firm_id, name, number, status, is_sentinel)
+        SELECT id, 'General / Firm Precedents', 'GENERAL', 'Active', TRUE
+        FROM firms
+        WHERE NOT EXISTS (
+            SELECT 1 FROM matters WHERE matters.firm_id = firms.id AND matters.number = 'GENERAL'
+        );
+
         -- ── Clients ──────────────────────────────────────────────────────
         -- Separate from matters (one client can have many matters over time).
         -- client_id is nullable on matters until the standalone migration
@@ -339,6 +364,11 @@ async def run_migrations():
         );
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS ocr_confidence FLOAT;
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT FALSE;
+        -- Rapid Precedent Capture: distinguishes a phone/camera capture
+        -- from a regular file upload, purely so the "Recently captured"
+        -- list (GET /api/capture/recent) can filter to just these without
+        -- guessing from filename or other heuristics.
+        ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_capture BOOLEAN DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS idx_documents_matter ON documents(matter_id);
         CREATE INDEX IF NOT EXISTS idx_documents_firm ON documents(firm_id);
         -- Legal source classification (backend/legal_taxonomy.py) — nullable,
@@ -347,6 +377,7 @@ async def run_migrations():
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS legal_source_type TEXT;
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS authority_strength TEXT;
         CREATE INDEX IF NOT EXISTS idx_documents_legal_type ON documents(legal_source_type);
+        CREATE INDEX IF NOT EXISTS idx_documents_capture ON documents(firm_id, is_capture, uploaded_at DESC);
 
         -- Document provenance metadata for client/matter (Vault) documents
         -- -- a genuinely separate concern from the two classification
@@ -3108,13 +3139,19 @@ async def list_matters(request: Request):
         if org_role == "panel_lawyer":
             # Panel lawyers only see matters assigned to them, not the whole firm's docket.
             rows = await conn.fetch(
-                "SELECT * FROM matters WHERE firm_id=$1 AND assigned_lawyer_id=$2 "
+                "SELECT * FROM matters WHERE firm_id=$1 AND assigned_lawyer_id=$2 AND NOT is_sentinel "
                 "ORDER BY last_activity DESC NULLS LAST, created_at DESC",
                 FIRM_ID, user_id
             )
         else:
+            # Excludes the sentinel "General / Firm Precedents" matter
+            # (Rapid Precedent Capture) -- it's a system bucket, not a real
+            # client matter, and this list feeds the frontend's global
+            # `matters` array that dashboard stats and the Matters tab both
+            # read from directly.
             rows = await conn.fetch(
-                "SELECT * FROM matters WHERE firm_id=$1 ORDER BY last_activity DESC NULLS LAST, created_at DESC",
+                "SELECT * FROM matters WHERE firm_id=$1 AND NOT is_sentinel "
+                "ORDER BY last_activity DESC NULLS LAST, created_at DESC",
                 FIRM_ID
             )
     matters = []
@@ -4567,7 +4604,7 @@ async def practice_area_breakdown(request: Request):
     async with _db_pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT practice_area, COUNT(*) AS matter_count FROM matters "
-            "WHERE firm_id=$1 GROUP BY practice_area ORDER BY matter_count DESC",
+            "WHERE firm_id=$1 AND NOT is_sentinel GROUP BY practice_area ORDER BY matter_count DESC",
             FIRM_ID
         )
     return [
@@ -4789,6 +4826,261 @@ async def upload_document(
 
     return {**_row_to_doc(row), "processing": True,
             "message": "Document received. Text extraction and indexing are running in the background."}
+
+# ── Rapid Precedent Capture ───────────────────────────────────────────────────
+# Fast, low-friction phone/camera capture path, distinct from /api/upload
+# above: minimal required input at capture time (a matter, or nothing —
+# defaults to the firm's sentinel "General / Firm Precedents" matter), no
+# manual tagging gate, and support for either (a) one or more photographed
+# pages of a single physical document, combined into one document, or (b)
+# a single already-digital file picked from the device (e.g. an email
+# attachment just downloaded to the phone) -- see capture_documents().
+#
+# document_status defaults to 'Final' here, not 'Draft' -- deliberately
+# distinct from /api/upload's Draft default (line ~4771 above). A lawyer
+# photographing a document is virtually always capturing something already
+# finished (a signed judgment, an executed contract, a filed pleading),
+# not a work-in-progress draft; case-binder shells and general uploads
+# have the opposite default because that's overwhelmingly what's happening
+# there instead. Not shared logic, so not factored into one constant --
+# these are two independently-meaningful defaults that happen to differ.
+
+def _combine_capture_pages_to_pdf(pages: list) -> bytes:
+    """
+    pages: list of (content: bytes, ext: str) for photographed image pages,
+    in capture order. Combines them into a single multi-page PDF so a
+    multi-photo capture session becomes one coherent, downloadable
+    document -- matching every other document in the Vault -- rather than
+    N loose page images with nowhere to live under documents.r2_key's
+    single-file-per-document shape. Pillow can write a multi-page PDF
+    directly (save_all=True, append_images=...); already a dependency for
+    OCR image handling, so this needs nothing new.
+    """
+    from PIL import Image
+    import io
+    images = [Image.open(io.BytesIO(content)).convert("RGB") for content, _ext in pages]
+    buf = io.BytesIO()
+    if len(images) == 1:
+        images[0].save(buf, format="PDF")
+    else:
+        images[0].save(buf, format="PDF", save_all=True, append_images=images[1:])
+    return buf.getvalue()
+
+
+async def _process_capture_background(doc_id: str, matter_id: str, files: list):
+    """
+    files: list of {"content": bytes, "filename": str}, in capture order.
+    Mirrors _process_document_background's pipeline (extract -> AI
+    classify -> chunk -> embed -> legal_source_type/authority_strength)
+    but assembles potentially several captured pages into one document's
+    text and storage, reusing _extract_attached_document_text -- the same
+    per-file extraction dispatch (PDF/DOCX/image-OCR) already used by the
+    multi-file Search Vault attach path -- rather than duplicating it.
+    """
+    combined_text_parts = []
+    ocr_confidences = []
+    any_ocr_used = False
+    image_pages = []        # (content, ext) -- photographed pages, combined into one PDF
+    non_image_files = []    # (content, filename, ext) -- already-digital files (e.g. an emailed PDF)
+
+    for f in files:
+        filename = f["filename"]
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+        try:
+            page_text, page_confidence = _extract_attached_document_text(f["content"], filename)
+        except ValueError as e:
+            print(f"[capture:{doc_id}] page extraction failed for {filename}: {e}")
+            continue
+        combined_text_parts.append(page_text)
+        if ext in ("jpg", "jpeg", "png", "webp"):
+            any_ocr_used = True
+            if page_confidence is not None:
+                ocr_confidences.append(page_confidence)
+            image_pages.append((f["content"], ext))
+        else:
+            non_image_files.append((f["content"], filename, ext))
+
+    text = "\n\n".join(combined_text_parts)
+    word_count = len(text.split())
+    page_count = len(files)
+    ocr_confidence = round(sum(ocr_confidences) / len(ocr_confidences), 1) if ocr_confidences else None
+
+    metadata = {}
+    if text:
+        try:
+            metadata = await asyncio.to_thread(classify_document_sync, text[:2000])
+        except Exception:
+            metadata = {}
+
+    legal_source_type = classify_firm_document(metadata.get("document_type"))
+    authority_strength = authority_strength_for(legal_source_type)
+
+    chunk_count = 0
+    if text:
+        new_chunks = chunk_text(text, page_count, doc_id, matter_id)
+        for c in new_chunks:
+            c["chunk_source"] = "firm"
+        if new_chunks:
+            await asyncio.to_thread(index_chunks_in_chroma, new_chunks, "firm")
+            async with _db_pool.acquire() as conn:
+                for c in new_chunks:
+                    await conn.execute("""
+                        INSERT INTO chunks (id, firm_id, document_id, matter_id, chunk_source,
+                                           text, chunk_index, page_number, created_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+                        ON CONFLICT (id) DO NOTHING
+                    """,
+                    c["id"], FIRM_ID, _uuid_mod.UUID(doc_id),
+                    matter_id, "firm", c["text"], c["chunk_index"], c.get("page_number", 1)
+                    )
+            chunk_count = len(new_chunks)
+
+    raw_date = metadata.get("doc_date")
+    doc_date = None
+    if raw_date:
+        try:
+            doc_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except Exception:
+            doc_date = None
+
+    # Storage: a single already-digital file (email attachment picked from
+    # the device) is stored as-is. One or more photographed pages are
+    # combined into a single PDF. A batch mixing both is a rare edge case
+    # (real usage is "photograph N pages" OR "pick one existing file", not
+    # both in the same session) -- the digital file wins as the stored
+    # document in that case; the photographed pages' text still made it
+    # into the combined text above, just not into the stored file itself.
+    r2_key = None
+    if R2_ENABLED and _r2_client:
+        try:
+            if non_image_files:
+                store_content, store_filename, store_ext = non_image_files[0]
+                content_type = (
+                    "application/pdf" if store_ext == "pdf" else
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    if store_ext in ("docx", "doc") else "application/octet-stream"
+                )
+            elif image_pages:
+                store_content = await asyncio.to_thread(_combine_capture_pages_to_pdf, image_pages)
+                store_filename = "Captured Document.pdf"
+                content_type = "application/pdf"
+            else:
+                store_content = None
+            if store_content:
+                r2_key = f"{FIRM_ID}/{matter_id}/{doc_id}/{store_filename}"
+                await asyncio.to_thread(
+                    _r2_client.put_object, Bucket=R2_BUCKET, Key=r2_key,
+                    Body=store_content, ContentType=content_type,
+                )
+        except Exception as e:
+            print(f"[capture] R2 upload failed for {doc_id}: {e}")
+            r2_key = None
+
+    async with _db_pool.acquire() as conn:
+        needs_review = any_ocr_used and (ocr_confidence is not None) and (ocr_confidence < 80)
+        await conn.execute("""
+            UPDATE documents SET
+                document_type=$1, matter_type=$2, parties=$3,
+                doc_date=$4, court=$5, word_count=$6, page_count=$7,
+                chunk_count=$8, ocr_used=$9, status='complete', r2_key=$12,
+                ocr_confidence=$13, needs_review=$14,
+                legal_source_type=$15, authority_strength=$16
+            WHERE id=$10 AND firm_id=$11
+        """,
+        metadata.get("document_type"), metadata.get("matter_type"),
+        str(metadata.get("parties", "")) if metadata.get("parties") else None,
+        doc_date, metadata.get("court"),
+        word_count, page_count, chunk_count, any_ocr_used,
+        _uuid_mod.UUID(doc_id), FIRM_ID, r2_key,
+        ocr_confidence, needs_review,
+        legal_source_type.value, authority_strength.value
+        )
+        await conn.execute(
+            "UPDATE matters SET document_count = document_count + 1, last_activity=NOW() WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(matter_id), FIRM_ID
+        )
+
+    if needs_review:
+        print(f"[capture] ⚠ {doc_id}: OCR confidence {ocr_confidence}% (below 80%) — flagged for manual review")
+    print(f"[capture] processed {doc_id}: {word_count} words, {chunk_count} chunks across {page_count} page(s)")
+
+
+@app.post("/api/capture", status_code=202)
+async def capture_documents(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    matter_id: Optional[str] = Form(None),
+    request: Request = None,
+):
+    if request:
+        user = await get_current_user(request)
+        _check_permission(user, "document:upload")
+    else:
+        user = None
+
+    if not files:
+        raise HTTPException(status_code=422, detail="At least one photo or file is required")
+
+    async with _db_pool.acquire() as conn:
+        if matter_id:
+            matter = await conn.fetchrow(
+                "SELECT id FROM matters WHERE id=$1 AND firm_id=$2",
+                _uuid_mod.UUID(matter_id), FIRM_ID
+            )
+            if not matter:
+                raise HTTPException(status_code=404, detail="Matter not found")
+        else:
+            # No matter specified -- the fast/low-friction default path.
+            matter = await conn.fetchrow(
+                "SELECT id FROM matters WHERE firm_id=$1 AND number='GENERAL'", FIRM_ID
+            )
+            if not matter:
+                raise HTTPException(status_code=500, detail="General/Firm Precedents matter not provisioned")
+        resolved_matter_id = str(matter["id"])
+
+    file_payloads = []
+    for f in files:
+        content = await f.read()
+        if content:
+            file_payloads.append({"content": content, "filename": f.filename or "capture.jpg"})
+    if not file_payloads:
+        raise HTTPException(status_code=422, detail="At least one photo or file is required")
+
+    doc_id = str(_uuid_mod.uuid4())
+    filename = (
+        file_payloads[0]["filename"] if len(file_payloads) == 1
+        else f"Captured Document ({len(file_payloads)} pages)"
+    )
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO documents (id, matter_id, firm_id, filename, status, uploaded_at, uploaded_by,
+                                    document_status, is_capture)
+            VALUES ($1,$2,$3,$4,'processing',NOW(),$5,'Final',TRUE) RETURNING *
+        """,
+        _uuid_mod.UUID(doc_id), _uuid_mod.UUID(resolved_matter_id), FIRM_ID, filename,
+        _uuid_mod.UUID(str(user["id"])) if user and user.get("id") else None,
+        )
+
+    background_tasks.add_task(_process_capture_background, doc_id, resolved_matter_id, file_payloads)
+
+    return {**_row_to_doc(row), "processing": True,
+            "message": f"{len(file_payloads)} page(s) received. Processing in the background."}
+
+
+@app.get("/api/capture/recent")
+async def recent_captures(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT d.*, m.name AS matter_name FROM documents d
+            JOIN matters m ON m.id = d.matter_id
+            WHERE d.firm_id=$1 AND d.is_capture=TRUE
+            ORDER BY d.uploaded_at DESC LIMIT 50
+        """, FIRM_ID)
+    return {"documents": [_row_to_doc(r) for r in rows]}
+
 
 # ── Legal Updates ─────────────────────────────────────────────────────────────
 
@@ -9348,7 +9640,7 @@ async def _maybe_send_reminder():
             FROM matters m
             LEFT JOIN clients c ON c.id = m.client_id
             WHERE m.firm_id=$1 AND m.next_deadline >= $2 AND m.next_deadline <= $3
-              AND m.status != 'Closed'
+              AND m.status != 'Closed' AND NOT m.is_sentinel
             ORDER BY m.next_deadline ASC
         """, FIRM_ID, today, today + timedelta(days=30))
     for r in deadline_rows:
@@ -9406,7 +9698,7 @@ async def inactivity_check(request: Request):
         rows = await conn.fetch("""
             SELECT id, name, internal_ref, last_activity
             FROM matters
-            WHERE firm_id=$1 AND status='Active'
+            WHERE firm_id=$1 AND status='Active' AND NOT is_sentinel
               AND (last_activity IS NULL OR last_activity < $2)
             ORDER BY last_activity ASC NULLS FIRST
         """, FIRM_ID, threshold)
@@ -9610,6 +9902,42 @@ async def update_settings(body: dict, request: Request):
             FIRM_ID, *values
         )
     return {"saved": True}
+
+# ── PWA assets ────────────────────────────────────────────────────────────────
+# Explicit routes, registered before the frontend catch-all below -- without
+# these, /manifest.json and /sw.js would fall through to serve_frontend()
+# and silently return index.html (wrong content, wrong content-type)
+# instead of 404ing or serving the real file, since FastAPI/Starlette
+# match routes in registration order and the catch-all matches everything.
+# sw.js specifically must be served from the site root (not /assets/sw.js)
+# -- a service worker's scope is limited to its own directory and below,
+# so root-scoped install (controlling the whole app) requires a root path.
+
+@app.get("/manifest.json")
+async def serve_manifest():
+    path = os.path.join(frontend_path, "manifest.json")
+    if os.path.exists(path):
+        return FileResponse(path, media_type="application/manifest+json")
+    return JSONResponse(status_code=404, content={"detail": "manifest.json not found"})
+
+@app.get("/sw.js")
+async def serve_service_worker():
+    path = os.path.join(frontend_path, "sw.js")
+    if os.path.exists(path):
+        return FileResponse(path, media_type="application/javascript")
+    return JSONResponse(status_code=404, content={"detail": "sw.js not found"})
+
+@app.get("/icons/{filename}")
+async def serve_icon(filename: str):
+    # filename comes straight from the URL path; restrict to a plain
+    # basename with no path separators so this can't be used to read
+    # arbitrary files elsewhere on disk (e.g. "../../backend/main.py").
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+    path = os.path.join(frontend_path, "icons", filename)
+    if os.path.exists(path):
+        return FileResponse(path, media_type="image/png")
+    return JSONResponse(status_code=404, content={"detail": "Not found"})
 
 # ── Frontend catch-all ────────────────────────────────────────────────────────
 

@@ -4,6 +4,12 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Mutemo Desk — Zimbabwe Legal Practice</title>
+<link rel="manifest" href="/manifest.json"/>
+<meta name="theme-color" content="#b8922a"/>
+<link rel="icon" href="/icons/icon-192.png"/>
+<link rel="apple-touch-icon" href="/icons/icon-192.png"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tiptap/2.1.12/tiptap.umd.min.js" defer></script>
 <style>
 /* TipTap editor styles */
@@ -373,7 +379,7 @@ select{cursor:pointer}
 <!-- Header -->
 <header class="header">
   <div class="header-brand">
-    <div class="header-seal">⚖</div>
+    <div class="header-seal"><img src="/icons/logo-source.png" alt="MutemoOS" style="width:26px;height:26px;object-fit:contain"/></div>
     <div>
       <div class="header-title">Mutemo Desk</div>
       <div class="header-subtitle">ZIMBABWE LEGAL PRACTICE SYSTEM</div>
@@ -393,6 +399,7 @@ select{cursor:pointer}
 <!-- Nav -->
 <nav class="nav">
   <button class="nav-btn" id="nav-dashboard" onclick="showTab('dashboard')">🏛 Dashboard</button>
+  <button class="nav-btn" id="nav-capture" onclick="showTab('capture')" style="background:var(--gold2);color:var(--green);font-weight:700">📸 + Add Precedent</button>
   <button class="nav-btn" id="nav-vault" onclick="showTab('vault')">📁 Vault</button>
   <button class="nav-btn" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
@@ -410,9 +417,12 @@ select{cursor:pointer}
 
 <!-- ═══════════════ DASHBOARD TAB ═══════════════ -->
 <div id="tab-dashboard" class="dashboard-scope" style="display:none">
-  <div class="dash-hero">
-    <h2 id="dash-greeting">Firm Overview</h2>
-    <p id="dash-greeting-sub">A snapshot of everything moving across the firm.</p>
+  <div class="dash-hero" style="display:flex;align-items:center;gap:1rem">
+    <img src="/icons/logo-source.png" alt="MutemoOS" style="width:56px;height:56px;object-fit:contain;flex-shrink:0"/>
+    <div>
+      <h2 id="dash-greeting">Firm Overview</h2>
+      <p id="dash-greeting-sub">A snapshot of everything moving across the firm.</p>
+    </div>
   </div>
 
   <div class="dash-grid" id="dash-stats">
@@ -571,6 +581,51 @@ select{cursor:pointer}
           <div class="tip">Documents are chunked and indexed for semantic search. The AI will learn your firm's drafting style and precedents.</div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ RAPID PRECEDENT CAPTURE TAB ═══════════════ -->
+<div id="tab-capture" style="display:none">
+  <div class="section-head">
+    <h2>📸 Add Precedent</h2>
+    <p>Photograph a paper document (or pick a file you just downloaded — e.g. an email attachment) and submit. Everything else — document type, name, status — is classified automatically.</p>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <div id="capture-status" class="status"></div>
+
+      <div class="form-group">
+        <label>Matter</label>
+        <select id="capture-matter-select">
+          <option value="">General / Firm Precedents (default)</option>
+        </select>
+      </div>
+
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:0.75rem 0">
+        <button class="btn btn-gold" style="width:auto;flex:1;min-width:160px" onclick="document.getElementById('capture-camera-input').click()">📷 Take Photo</button>
+        <button class="btn btn-outline" style="width:auto;flex:1;min-width:160px" onclick="document.getElementById('capture-file-input').click()">📁 Choose File</button>
+      </div>
+      <input type="file" id="capture-camera-input" accept="image/*" capture="environment" style="display:none" onchange="addCapturePages(event)"/>
+      <input type="file" id="capture-file-input" accept="image/*,.pdf,.docx,.doc" multiple style="display:none" onchange="addCapturePages(event)"/>
+
+      <div id="capture-pages-list" style="display:flex;flex-wrap:wrap;gap:8px;margin:0.75rem 0"></div>
+
+      <button class="btn btn-primary" id="capture-submit-btn" onclick="submitCapture()" disabled>
+        Submit
+      </button>
+      <div class="tip">Take another photo any time before submitting to add more pages of the same document. Offline? Your capture is queued on this device and uploads automatically once you're back online.</div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <div class="card-header">
+      <div class="card-icon">🕐</div>
+      <div><div class="card-title">Recently captured</div><div class="card-desc">Low-confidence OCR reads are flagged for review — nothing is filed silently</div></div>
+    </div>
+    <div class="card-body">
+      <div id="capture-recent-list"><p style="color:var(--ink3);font-size:0.85rem">No captures yet.</p></div>
     </div>
   </div>
 </div>
@@ -2679,11 +2734,12 @@ async function submitClientForm() {
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['dashboard','vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
+  ['dashboard','capture','vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
   if (tab === 'dashboard') renderDashboard();
+  if (tab === 'capture') renderCaptureTab();
   if (tab === 'matters') renderMattersList();
   if (tab === 'clients') renderClientsList();
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
@@ -3687,6 +3743,200 @@ function showVaultStatus(msg, type) {
   const el = document.getElementById('vault-status');
   el.innerHTML = msg;
   el.className = `status show ${type}`;
+}
+
+// ── Rapid Precedent Capture ─────────────────────────────────────────────────
+// Local queue for the pages/files added to the *current, not-yet-submitted*
+// capture session (multi-page photo capture, or one picked file). Cleared
+// on successful submit. Separate from the offline IndexedDB queue below,
+// which holds sessions that failed to submit and are waiting for
+// connectivity — this array only ever holds one in-progress session.
+let capturePages = [];
+
+function showCaptureStatus(msg, type) {
+  const el = document.getElementById('capture-status');
+  el.innerHTML = msg;
+  el.className = `status show ${type}`;
+}
+
+function renderCaptureTab() {
+  const sel = document.getElementById('capture-matter-select');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">General / Firm Precedents (default)</option>' +
+    matters.filter(m => m.number !== 'GENERAL')
+      .map(m => `<option value="${m.id}">${escHtml(m.name)}</option>`).join('');
+  sel.value = current;
+  capturePages = [];
+  renderCapturePagesList();
+  showCaptureStatus('', '');
+  loadRecentCaptures();
+}
+
+function addCapturePages(event) {
+  const files = Array.from(event.target.files || []);
+  capturePages.push(...files);
+  event.target.value = ''; // allow re-selecting the same file/photo again
+  renderCapturePagesList();
+}
+
+function removeCapturePage(index) {
+  capturePages.splice(index, 1);
+  renderCapturePagesList();
+}
+
+function renderCapturePagesList() {
+  const el = document.getElementById('capture-pages-list');
+  document.getElementById('capture-submit-btn').disabled = capturePages.length === 0;
+  if (!capturePages.length) { el.innerHTML = ''; return; }
+  el.innerHTML = capturePages.map((f, i) => `
+    <div class="chip" style="display:flex;align-items:center;gap:6px;background:var(--paper2)">
+      <span>📄 ${escHtml(f.name)} ${capturePages.length > 1 ? `(page ${i + 1})` : ''}</span>
+      <span onclick="removeCapturePage(${i})" style="cursor:pointer;color:var(--ink3);font-weight:700">✕</span>
+    </div>
+  `).join('');
+}
+
+async function submitCapture() {
+  if (!capturePages.length) return;
+  const matterId = document.getElementById('capture-matter-select').value;
+  const pages = capturePages;
+  const btn = document.getElementById('capture-submit-btn');
+  btn.disabled = true;
+  showCaptureStatus(`<span class="spinner"></span> Uploading ${pages.length} page(s)…`, 'loading');
+
+  try {
+    await sendCapture(pages, matterId);
+    capturePages = [];
+    renderCapturePagesList();
+    showCaptureStatus('✓ Captured. Processing in the background — check "Recently captured" below shortly.', 'success');
+    await loadMatters();
+    loadRecentCaptures();
+  } catch (e) {
+    if (e instanceof TypeError || !navigator.onLine) {
+      // Network unavailable, not a server-side rejection — queue locally
+      // rather than lose the capture (Part 4: offline tolerance).
+      await queueCaptureOffline(pages, matterId);
+      capturePages = [];
+      renderCapturePagesList();
+      showCaptureStatus('📴 Offline — capture queued on this device. It will upload automatically once you\'re back online.', 'success');
+    } else {
+      showCaptureStatus(`✗ Capture failed: ${e.message || e}`, 'error');
+      btn.disabled = false;
+    }
+  }
+}
+
+async function sendCapture(pages, matterId) {
+  const fd = new FormData();
+  for (const f of pages) fd.append('files', f);
+  if (matterId) fd.append('matter_id', matterId);
+  const res = await fetch(`${API}/api/capture`, { method: 'POST', body: fd });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+async function loadRecentCaptures() {
+  const el = document.getElementById('capture-recent-list');
+  try {
+    const res = await fetch(`${API}/api/capture/recent`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.documents.length) {
+      el.innerHTML = '<p style="color:var(--ink3);font-size:0.85rem">No captures yet.</p>';
+      return;
+    }
+    el.innerHTML = data.documents.map(d => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--paper3)">
+        <div>
+          <div style="font-weight:600;font-size:0.88rem">${escHtml(d.document_type || d.filename)}</div>
+          <div style="font-size:0.75rem;color:var(--ink3)">${escHtml(d.matter_name || '')} · ${d.uploaded_at ? new Date(d.uploaded_at).toLocaleString() : ''}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          ${d.needs_review ? '<span class="chip chip-red" style="font-weight:700">⚠ Needs review</span>' : ''}
+          ${documentStatusChipHtml(d.document_status)}
+        </div>
+      </div>
+    `).join('');
+  } catch (e) { /* offline or transient — leave existing list as-is */ }
+}
+
+// ── Offline queue (Part 4) ───────────────────────────────────────────────────
+// A capture that fails to submit because the device has no connectivity is
+// queued in IndexedDB (survives a page reload/app close, unlike an in-memory
+// array) and retried automatically. Two retry triggers, deliberately not
+// relying on just one:
+//   1. window 'online' event — fires whenever this tab regains connectivity
+//      while foregrounded. Works on every browser, including iOS Safari.
+//   2. Background Sync ('sync' event in sw.js) — lets Chromium browsers
+//      retry even if the tab isn't open when connectivity returns. NOT
+//      supported on Safari/iOS at all (a real platform gap, not a bug
+//      here) — trigger 1 above is what actually covers iOS.
+const CAPTURE_DB_NAME = 'mutemo-capture-queue';
+const CAPTURE_STORE = 'pending';
+
+function openCaptureDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(CAPTURE_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(CAPTURE_STORE, { keyPath: 'id', autoIncrement: true });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function queueCaptureOffline(pages, matterId) {
+  const db = await openCaptureDB();
+  const files = pages.map(f => ({ name: f.name, type: f.type, blob: f }));
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(CAPTURE_STORE, 'readwrite');
+    tx.objectStore(CAPTURE_STORE).add({ matterId: matterId || null, files, queuedAt: new Date().toISOString() });
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  registerCaptureSync();
+}
+
+function registerCaptureSync() {
+  if ('serviceWorker' in navigator && 'SyncManager' in window) {
+    navigator.serviceWorker.ready
+      .then(reg => reg.sync.register('capture-queue-flush'))
+      .catch(() => {}); // unsupported/blocked — the 'online' listener below still covers it
+  }
+}
+
+async function flushCaptureQueue() {
+  if (!navigator.onLine) return;
+  const db = await openCaptureDB();
+  const items = await new Promise((resolve, reject) => {
+    const tx = db.transaction(CAPTURE_STORE, 'readonly');
+    const req = tx.objectStore(CAPTURE_STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  for (const item of items) {
+    try {
+      const files = item.files.map(f => new File([f.blob], f.name, { type: f.type }));
+      await sendCapture(files, item.matterId);
+      const tx = db.transaction(CAPTURE_STORE, 'readwrite');
+      tx.objectStore(CAPTURE_STORE).delete(item.id);
+    } catch (e) {
+      break; // still offline or server unreachable — stop, retry next trigger
+    }
+  }
+  if (document.getElementById('tab-capture').style.display !== 'none') loadRecentCaptures();
+}
+
+window.addEventListener('online', flushCaptureQueue);
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {}); // PWA install/offline shell — non-fatal if it fails
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'flush-capture-queue') flushCaptureQueue();
+  });
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
