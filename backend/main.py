@@ -409,6 +409,174 @@ async def run_migrations():
         ALTER TABLE documents ADD COLUMN IF NOT EXISTS confidentiality TEXT DEFAULT 'Standard'
             CHECK (confidentiality IN ('Standard', 'Restricted', 'Privileged'));
 
+        -- ── AML/KYC Client Compliance ───────────────────────────────────────
+        -- Money Laundering and Proceeds of Crime Act [Chapter 9:24] --
+        -- identity/ownership/PEP tracking only. Deliberately excludes
+        -- trust/client-money accounting -- no ledger, no trust balance
+        -- tracking; that is a separate concern this module does not touch.
+        -- Every field below traces to a specific verified section, cited
+        -- inline so the compliance logic stays auditable against its legal
+        -- basis rather than free-floating "best practice" fields.
+        --
+        -- All additive and nullable at the schema level -- existing clients
+        -- are not forced to backfill anything on this deploy.
+
+        -- s17(a): identity particulars for a natural-person client -- date
+        -- and place of birth required "to the extent not disclosed by the
+        -- identity document" (hence nullable, not mandatory-on-write).
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_type TEXT
+            CHECK (client_type IN (
+                'Individual', 'Company', 'Partnership', 'Trust', 'Estate',
+                'NonProfit', 'Government', 'Other'
+            ));
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS place_of_birth TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS national_id_number TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS passport_number TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS id_expiry_date DATE;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS residential_address TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS occupation TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS employer_or_business TEXT;
+
+        -- s17(a): identity particulars for a company/partnership/other legal
+        -- person -- registration and controlling-document details, not just
+        -- the free-text id_or_registration_number the client record already
+        -- had (kept untouched for backward compatibility; these are the
+        -- specific fields s17 actually names).
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS registered_name TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS trading_name TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS registration_number TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS date_incorporated DATE;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS registered_office_address TEXT;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS principal_business_address TEXT;
+        -- Document links, not file storage -- point at an existing Vault
+        -- document (uploaded via /api/upload or /api/capture, both already
+        -- built) rather than duplicating document handling here.
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS proof_of_incorporation_document_id UUID REFERENCES documents(id);
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS governing_document_id UUID REFERENCES documents(id);
+
+        -- s17(c): "every trustee, settlor, and beneficiary" for a trust, or
+        -- the equivalent for an estate -- a small, structured list per
+        -- client rather than a join table, matching the existing
+        -- calendar_events.attendees JSONB convention for this shape of data
+        -- (see _row_to_client's handling below for the same
+        -- str-or-already-decoded-list defensiveness that pattern uses).
+        -- Each entry: {name, id_number, role}.
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS trustees JSONB DEFAULT '[]'::jsonb;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS settlors JSONB DEFAULT '[]'::jsonb;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS beneficiaries JSONB DEFAULT '[]'::jsonb;
+
+        -- s15 / s17(b): beneficial ownership -- "information necessary to
+        -- understand ownership and control." No percentage threshold gate:
+        -- ownership_percentage is nullable because not every basis of
+        -- ownership/control is percentage-based (e.g. "de facto control via
+        -- management agreement"). Multiple rows per client supported --
+        -- ownership chains are not artificially capped at one owner.
+        CREATE TABLE IF NOT EXISTS beneficial_owners (
+            id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            client_id                   UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            firm_id                     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            owner_name                  TEXT NOT NULL,
+            date_of_birth               DATE,
+            nationality                 TEXT,
+            id_or_passport_number       TEXT,
+            residential_address         TEXT,
+            ownership_or_control_basis  TEXT,
+            ownership_percentage        NUMERIC(5,2),
+            verification_status         TEXT NOT NULL DEFAULT 'Unverified'
+                CHECK (verification_status IN ('Unverified', 'Pending', 'Verified')),
+            verified_date               DATE,
+            verified_by                 UUID REFERENCES users(id),
+            created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_beneficial_owners_client ON beneficial_owners(client_id);
+
+        -- s17(d): the person actually instructing the firm, when it isn't
+        -- the client themselves -- their identity and the basis of their
+        -- authority to act. authority_document is a Vault document link,
+        -- same pattern as proof_of_incorporation/governing_document above.
+        CREATE TABLE IF NOT EXISTS authorized_representatives (
+            id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            client_id                   UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            firm_id                     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            full_name                   TEXT NOT NULL,
+            position_or_relationship    TEXT,
+            id_or_passport_number       TEXT,
+            contact_details             TEXT,
+            authority_basis             TEXT
+                CHECK (authority_basis IN (
+                    'PowerOfAttorney', 'BoardResolution', 'Mandate',
+                    'LetterOfAdministration', 'LetterOfExecutorship', 'Other'
+                )),
+            authority_document_id       UUID REFERENCES documents(id),
+            verification_status         TEXT NOT NULL DEFAULT 'Unverified'
+                CHECK (verification_status IN ('Unverified', 'Pending', 'Verified')),
+            verified_date               DATE,
+            created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_authorized_representatives_client ON authorized_representatives(client_id);
+
+        -- s20: politically exposed person screening, plus the overall
+        -- compliance picture -- one row per client. is_pep is nullable
+        -- (NULL = not yet assessed, distinct from FALSE = assessed and
+        -- cleared) since compliance_status (see _compute_compliance_status)
+        -- needs to tell "never checked" apart from "checked, not a PEP".
+        --
+        -- client_is_beneficial_owner backs Part 2's UI prompt ("is the
+        -- client the beneficial owner? Yes/No/Unknown") -- lives here
+        -- rather than on beneficial_owners itself since it's a client-level
+        -- answer, not a per-owner record.
+        --
+        -- relationship_ended_date / retained_until back s24 (retention) --
+        -- flag-only in this pass, no deletion/expiry enforcement.
+        -- relationship_ended_date is auto-derived (set when every one of
+        -- the client's matters reaches status='Closed', cleared if a
+        -- matter reopens -- see _sync_client_relationship_ended below).
+        -- retained_until is deliberately NOT auto-computed from
+        -- relationship_ended_date: s24 sets a minimum retention period, and
+        -- the exact figure was not available to verify at the time this was
+        -- built -- left for a compliance officer to enter manually rather
+        -- than risk baking in a wrong statutory duration.
+        CREATE TABLE IF NOT EXISTS client_compliance (
+            id                                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            client_id                               UUID NOT NULL UNIQUE REFERENCES clients(id) ON DELETE CASCADE,
+            firm_id                                  UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            identity_verification_status            TEXT NOT NULL DEFAULT 'Unverified'
+                CHECK (identity_verification_status IN ('Unverified', 'Pending', 'Verified')),
+            client_is_beneficial_owner              TEXT
+                CHECK (client_is_beneficial_owner IN ('Yes', 'No', 'Unknown')),
+            is_pep                                   BOOLEAN,
+            pep_basis                                TEXT
+                CHECK (pep_basis IN ('Self', 'BeneficialOwner', 'CloseAssociate', 'NotApplicable')),
+            pep_position                             TEXT,
+            pep_country                              TEXT,
+            senior_management_approval_required      BOOLEAN NOT NULL DEFAULT FALSE,
+            senior_management_approved_by            UUID REFERENCES users(id),
+            senior_management_approved_date          DATE,
+            source_of_wealth                         TEXT,
+            source_of_funds                          TEXT,
+            enhanced_monitoring_required             BOOLEAN NOT NULL DEFAULT FALSE,
+            risk_rating                              TEXT NOT NULL DEFAULT 'NotAssessed'
+                CHECK (risk_rating IN ('Low', 'Medium', 'High', 'NotAssessed')),
+            relationship_ended_date                  DATE,
+            retained_until                           DATE,
+            -- A real conflict-of-interest check DOES exist in this codebase
+            -- (GET /api/matters/check-conflict, fuzzy name-similarity search
+            -- against every existing matter — used today on the New Matter
+            -- form). It's a live, on-demand similarity search, not a stored
+            -- pass/fail outcome, so it has nothing to persist on its own —
+            -- these two columns are what make "reviewed" a real, storable
+            -- fact for compliance_status to require, reusing that existing
+            -- endpoint (keyed off the client's own name) rather than
+            -- building a second conflict-check mechanism.
+            conflict_check_reviewed                  BOOLEAN NOT NULL DEFAULT FALSE,
+            conflict_check_reviewed_by               UUID REFERENCES users(id),
+            conflict_check_reviewed_date             DATE,
+            created_at                               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at                               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_compliance_client ON client_compliance(client_id);
+
         CREATE TABLE IF NOT EXISTS legal_updates (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
@@ -2458,6 +2626,25 @@ PROVENANCE_DOCUMENT_TYPES = [
 DOCUMENT_STATUSES = ["Draft", "Review", "Final", "Executed", "Superseded"]
 DOCUMENT_CONFIDENTIALITY_LEVELS = ["Standard", "Restricted", "Privileged"]
 
+# AML/KYC Client Compliance (Money Laundering and Proceeds of Crime Act
+# [Chapter 9:24]) -- kept as real Python lists mirroring the DB CHECK
+# constraints, same convention/reasoning as PROVENANCE_DOCUMENT_TYPES above.
+CLIENT_TYPES = [
+    "Individual", "Company", "Partnership", "Trust", "Estate",
+    "NonProfit", "Government", "Other",
+]
+# Legal-person types for which Part 2 (beneficial ownership, s15/s17(b))
+# applies -- an Individual is inherently their own beneficial owner.
+LEGAL_PERSON_CLIENT_TYPES = [t for t in CLIENT_TYPES if t != "Individual"]
+VERIFICATION_STATUSES = ["Unverified", "Pending", "Verified"]
+AUTHORITY_BASIS_TYPES = [
+    "PowerOfAttorney", "BoardResolution", "Mandate",
+    "LetterOfAdministration", "LetterOfExecutorship", "Other",
+]
+PEP_BASIS_TYPES = ["Self", "BeneficialOwner", "CloseAssociate", "NotApplicable"]
+RISK_RATINGS = ["Low", "Medium", "High", "NotAssessed"]
+CLIENT_IS_BENEFICIAL_OWNER_VALUES = ["Yes", "No", "Unknown"]
+
 class MatterCreate(BaseModel):
     name: str
     number: Optional[str] = None
@@ -2514,6 +2701,12 @@ class ClientCreate(BaseModel):
     contact_person: Optional[str] = None  # corporate/entity clients only — blank for individuals
     notes: Optional[str] = None
 
+class TrustParty(BaseModel):
+    """s17(c): one trustee/settlor/beneficiary entry."""
+    name: str
+    id_number: Optional[str] = None
+    role: Optional[str] = None
+
 class ClientUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[str] = None
@@ -2522,6 +2715,94 @@ class ClientUpdate(BaseModel):
     id_or_registration_number: Optional[str] = None
     contact_person: Optional[str] = None
     notes: Optional[str] = None
+    # ── AML/KYC (s17) — validated against CLIENT_TYPES etc. in update_client() ──
+    client_type: Optional[str] = None
+    # s17(a): individual
+    date_of_birth: Optional[str] = None
+    place_of_birth: Optional[str] = None
+    national_id_number: Optional[str] = None
+    passport_number: Optional[str] = None
+    id_expiry_date: Optional[str] = None
+    residential_address: Optional[str] = None
+    occupation: Optional[str] = None
+    employer_or_business: Optional[str] = None
+    # s17(a): company/partnership/other legal person
+    registered_name: Optional[str] = None
+    trading_name: Optional[str] = None
+    registration_number: Optional[str] = None
+    date_incorporated: Optional[str] = None
+    registered_office_address: Optional[str] = None
+    principal_business_address: Optional[str] = None
+    proof_of_incorporation_document_id: Optional[str] = None
+    governing_document_id: Optional[str] = None
+    # s17(c): trust/estate
+    trustees: Optional[List[TrustParty]] = None
+    settlors: Optional[List[TrustParty]] = None
+    beneficiaries: Optional[List[TrustParty]] = None
+
+# ── AML/KYC: beneficial ownership (s15/s17(b)) ──────────────────────────────
+
+class BeneficialOwnerCreate(BaseModel):
+    owner_name: str
+    date_of_birth: Optional[str] = None
+    nationality: Optional[str] = None
+    id_or_passport_number: Optional[str] = None
+    residential_address: Optional[str] = None
+    ownership_or_control_basis: Optional[str] = None
+    ownership_percentage: Optional[float] = None  # not required — basis need not be percentage-based
+
+class BeneficialOwnerUpdate(BaseModel):
+    owner_name: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    nationality: Optional[str] = None
+    id_or_passport_number: Optional[str] = None
+    residential_address: Optional[str] = None
+    ownership_or_control_basis: Optional[str] = None
+    ownership_percentage: Optional[float] = None
+    verification_status: Optional[str] = None
+    verified_date: Optional[str] = None
+
+# ── AML/KYC: authorized representative (s17(d)) ─────────────────────────────
+
+class AuthorizedRepresentativeCreate(BaseModel):
+    full_name: str
+    position_or_relationship: Optional[str] = None
+    id_or_passport_number: Optional[str] = None
+    contact_details: Optional[str] = None
+    authority_basis: Optional[str] = None
+    authority_document_id: Optional[str] = None
+
+class AuthorizedRepresentativeUpdate(BaseModel):
+    full_name: Optional[str] = None
+    position_or_relationship: Optional[str] = None
+    id_or_passport_number: Optional[str] = None
+    contact_details: Optional[str] = None
+    authority_basis: Optional[str] = None
+    authority_document_id: Optional[str] = None
+    verification_status: Optional[str] = None
+    verified_date: Optional[str] = None
+
+# ── AML/KYC: compliance / PEP (s20) ──────────────────────────────────────────
+
+class ClientComplianceUpdate(BaseModel):
+    identity_verification_status: Optional[str] = None
+    client_is_beneficial_owner: Optional[str] = None
+    is_pep: Optional[bool] = None
+    pep_basis: Optional[str] = None
+    pep_position: Optional[str] = None
+    pep_country: Optional[str] = None
+    senior_management_approved_by: Optional[str] = None
+    senior_management_approved_date: Optional[str] = None
+    source_of_wealth: Optional[str] = None
+    source_of_funds: Optional[str] = None
+    enhanced_monitoring_required: Optional[bool] = None
+    risk_rating: Optional[str] = None
+    retained_until: Optional[str] = None
+    # Reuses the real, existing GET /api/matters/check-conflict —
+    # conflict_check_reviewed is set true by the frontend once a lawyer
+    # has actually run that check for this client and confirmed it (see
+    # runClientConflictCheck() / markConflictReviewed() in index.html).
+    conflict_check_reviewed: Optional[bool] = None
 
 class ProgressNote(BaseModel):
     text: str
@@ -2755,6 +3036,47 @@ async def _sync_conveyancing_calendar_events(conn, matter, touched_fields):
                 "deadline", matter["name"], "conveyancing_sync",
             )
 
+async def _sync_client_relationship_ended(conn, client_id) -> None:
+    """
+    s24 retention flag (Part 5): "end of business relationship" is not a
+    concept that exists on the client record itself today (confirmed by
+    inspection before building this module — clients has no status
+    field). Derived instead: relationship_ended_date is set the moment
+    every one of a client's matters reaches status='Closed', and cleared
+    again the moment that stops being true (a matter reopening, a new
+    matter being created). Called from update_matter() whenever a
+    matter's status changes and it's linked to a client.
+
+    Deliberately does not compute retained_until here — s24 sets a
+    minimum retention period, and the exact statutory duration was not
+    available to verify when this was built. A compliance officer enters
+    that deadline manually (PATCH .../compliance); this only tracks the
+    trigger date a future feature could measure that period from.
+    """
+    matter_rows = await conn.fetch(
+        "SELECT status FROM matters WHERE client_id=$1 AND firm_id=$2",
+        client_id, FIRM_ID
+    )
+    all_closed = bool(matter_rows) and all(m["status"] == "Closed" for m in matter_rows)
+    ended_date = date.today() if all_closed else None
+
+    existing = await conn.fetchrow(
+        "SELECT id, relationship_ended_date FROM client_compliance WHERE client_id=$1 AND firm_id=$2",
+        client_id, FIRM_ID
+    )
+    if existing:
+        if (existing["relationship_ended_date"] is not None) == all_closed:
+            return  # already in the right state — avoid an unnecessary write
+        await conn.execute(
+            "UPDATE client_compliance SET relationship_ended_date=$1, updated_at=NOW() WHERE id=$2",
+            ended_date, existing["id"]
+        )
+    elif all_closed:
+        await conn.execute(
+            "INSERT INTO client_compliance (client_id, firm_id, relationship_ended_date) VALUES ($1,$2,$3)",
+            client_id, FIRM_ID, ended_date
+        )
+
 def _row_to_matter(row) -> dict:
     d = dict(row)
     for k in ("id", "firm_id", "created_by", "client_id"):
@@ -2785,13 +3107,134 @@ def _row_to_matter(row) -> dict:
 
 def _row_to_client(row) -> dict:
     d = dict(row)
-    for k in ("id", "firm_id", "created_by"):
+    for k in ("id", "firm_id", "created_by", "proof_of_incorporation_document_id", "governing_document_id"):
         if d.get(k):
             d[k] = str(d[k])
     for k in ("created_at", "updated_at"):
         if d.get(k):
             d[k] = d[k].isoformat()
+    for k in ("date_of_birth", "id_expiry_date", "date_incorporated"):
+        if d.get(k):
+            d[k] = str(d[k])
+    # asyncpg may return jsonb as a raw string depending on codec config —
+    # same defensive handling as calendar_events.attendees.
+    for k in ("trustees", "settlors", "beneficiaries"):
+        if isinstance(d.get(k), str):
+            try:
+                d[k] = json.loads(d[k])
+            except (ValueError, TypeError):
+                d[k] = []
+        elif d.get(k) is None:
+            d[k] = []
     return d
+
+def _row_to_beneficial_owner(row) -> dict:
+    d = dict(row)
+    for k in ("id", "client_id", "firm_id", "verified_by"):
+        if d.get(k):
+            d[k] = str(d[k])
+    if d.get("created_at"):
+        d["created_at"] = d["created_at"].isoformat()
+    if d.get("date_of_birth"):
+        d["date_of_birth"] = str(d["date_of_birth"])
+    if d.get("verified_date"):
+        d["verified_date"] = str(d["verified_date"])
+    if d.get("ownership_percentage") is not None:
+        d["ownership_percentage"] = float(d["ownership_percentage"])
+    return d
+
+def _row_to_authorized_representative(row) -> dict:
+    d = dict(row)
+    for k in ("id", "client_id", "firm_id", "authority_document_id"):
+        if d.get(k):
+            d[k] = str(d[k])
+    if d.get("created_at"):
+        d["created_at"] = d["created_at"].isoformat()
+    if d.get("verified_date"):
+        d["verified_date"] = str(d["verified_date"])
+    return d
+
+def _row_to_client_compliance(row) -> dict:
+    d = dict(row)
+    for k in ("id", "client_id", "firm_id", "senior_management_approved_by", "conflict_check_reviewed_by"):
+        if d.get(k):
+            d[k] = str(d[k])
+    for k in ("created_at", "updated_at"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    for k in ("senior_management_approved_date", "relationship_ended_date", "retained_until", "conflict_check_reviewed_date"):
+        if d.get(k):
+            d[k] = str(d[k])
+    return d
+
+_DEFAULT_CLIENT_COMPLIANCE = {
+    "identity_verification_status": "Unverified",
+    "client_is_beneficial_owner": None,
+    "is_pep": None,
+    "pep_basis": None,
+    "pep_position": None,
+    "pep_country": None,
+    "senior_management_approval_required": False,
+    "senior_management_approved_by": None,
+    "senior_management_approved_date": None,
+    "source_of_wealth": None,
+    "source_of_funds": None,
+    "enhanced_monitoring_required": False,
+    "risk_rating": "NotAssessed",
+    "relationship_ended_date": None,
+    "retained_until": None,
+    "conflict_check_reviewed": False,
+    "conflict_check_reviewed_by": None,
+    "conflict_check_reviewed_date": None,
+}
+
+def _compute_compliance_status(client: dict, compliance: Optional[dict], beneficial_owners: list) -> dict:
+    """
+    "Cleared" requires every one of: identity verified, beneficial
+    ownership resolved (verified, or not applicable), PEP screening done
+    (and senior management approval if PEP), and the conflict check
+    reviewed.
+
+    Conflict check: reuses the real, existing GET /api/matters/check-conflict
+    (fuzzy name-similarity search against every matter, already live on the
+    New Matter form) — not a stub. That endpoint is a live, on-demand
+    search with no stored outcome of its own, so conflict_check_reviewed
+    on client_compliance is what "Cleared" actually gates on: a lawyer
+    has run the check for this client and confirmed there's no conflict
+    (see runClientConflictCheck()/markConflictReviewed() in index.html).
+    """
+    compliance = compliance or _DEFAULT_CLIENT_COMPLIANCE
+    missing = []
+
+    client_type = client.get("client_type")
+    if not client_type:
+        return {"compliance_status": "Action Required", "missing": ["Client type not recorded"]}
+
+    if compliance.get("identity_verification_status") != "Verified":
+        missing.append("Identity not verified")
+
+    if client_type in LEGAL_PERSON_CLIENT_TYPES:
+        is_bo = compliance.get("client_is_beneficial_owner")
+        if is_bo == "No":
+            if not any(o.get("verification_status") == "Verified" for o in beneficial_owners):
+                missing.append("Beneficial ownership not verified")
+        elif is_bo in (None, "Unknown"):
+            missing.append("Beneficial ownership not assessed")
+        # is_bo == "Yes" -> client itself is the beneficial owner, satisfied
+
+    is_pep = compliance.get("is_pep")
+    if is_pep is None:
+        missing.append("PEP screening not completed")
+    elif is_pep is True and not compliance.get("senior_management_approved_by"):
+        missing.append("Senior management approval required (PEP)")
+
+    if not compliance.get("conflict_check_reviewed"):
+        missing.append("Conflict check not reviewed")
+
+    return {
+        "compliance_status": "Cleared" if not missing else "Action Required",
+        "missing": missing,
+    }
 
 def _row_to_doc(row) -> dict:
     d = dict(row)
@@ -3366,6 +3809,13 @@ async def get_client(client_id: str, request: Request):
             )
             calendar_events = [_row_to_event(e) for e in event_rows]
 
+        compliance_row = await conn.fetchrow(
+            "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+        owner_rows = await conn.fetch(
+            "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+
     c = _row_to_client(row)
     c["matters"] = []
     for m in matter_rows:
@@ -3375,6 +3825,13 @@ async def get_client(client_id: str, request: Request):
         md["documents"] = docs_by_matter.get(mid, [])
         c["matters"].append(md)
     c["calendar_events"] = calendar_events
+    # Compliance badge — same shape/spirit as the document_status chips
+    # already built this session, computed from whatever exists so far
+    # rather than requiring a second round-trip to /compliance.
+    compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
+    status = _compute_compliance_status(dict(row), compliance, [dict(r) for r in owner_rows])
+    c["compliance_status"] = status["compliance_status"]
+    c["compliance_missing"] = status["missing"]
     return c
 
 @app.patch("/api/clients/{client_id}")
@@ -3388,8 +3845,38 @@ async def update_client(client_id: str, update: ClientUpdate, request: Request):
     fields = {k: v for k, v in update.dict().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    if "client_type" in fields and fields["client_type"] not in CLIENT_TYPES:
+        raise HTTPException(status_code=422, detail=f"client_type must be one of: {', '.join(CLIENT_TYPES)}")
+
+    date_fields = ("date_of_birth", "id_expiry_date", "date_incorporated")
+    for k in date_fields:
+        if k in fields:
+            try:
+                fields[k] = date.fromisoformat(fields[k])
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"{k} must be in YYYY-MM-DD format")
+
+    for k in ("proof_of_incorporation_document_id", "governing_document_id"):
+        if k in fields:
+            try:
+                fields[k] = _uuid_mod.UUID(fields[k])
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"{k} must be a valid UUID")
+
+    # s17(c) trust/estate party lists — JSONB columns need an explicit
+    # ::jsonb cast + json.dumps, same convention as calendar_events.attendees
+    # (see update_calendar_event) and firms.features.
+    jsonb_fields = ("trustees", "settlors", "beneficiaries")
+    for k in jsonb_fields:
+        if k in fields:
+            fields[k] = json.dumps([p.dict() if hasattr(p, "dict") else p for p in fields[k]])
+
     fields["updated_at"] = datetime.utcnow()
-    set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
+    set_clauses = ", ".join(
+        f"{k}=${i+2}::jsonb" if k in jsonb_fields else f"{k}=${i+2}"
+        for i, k in enumerate(fields.keys())
+    )
     values = list(fields.values())
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -3399,6 +3886,299 @@ async def update_client(client_id: str, update: ClientUpdate, request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="Client not found")
     return _row_to_client(row)
+
+async def _get_client_or_404(conn, cid) -> dict:
+    row = await conn.fetchrow("SELECT * FROM clients WHERE id=$1 AND firm_id=$2", cid, FIRM_ID)
+    if not row:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return dict(row)
+
+def _parse_client_id(client_id: str):
+    try:
+        return _uuid_mod.UUID(client_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
+
+# ── AML/KYC: beneficial owners (s15/s17(b)) ─────────────────────────────────
+
+@app.get("/api/clients/{client_id}/beneficial-owners")
+async def list_beneficial_owners(client_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        rows = await conn.fetch(
+            "SELECT * FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2 ORDER BY created_at ASC",
+            cid, FIRM_ID
+        )
+    return [_row_to_beneficial_owner(r) for r in rows]
+
+@app.post("/api/clients/{client_id}/beneficial-owners", status_code=201)
+async def create_beneficial_owner(client_id: str, owner: BeneficialOwnerCreate, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        row = await conn.fetchrow("""
+            INSERT INTO beneficial_owners
+                (client_id, firm_id, owner_name, date_of_birth, nationality,
+                 id_or_passport_number, residential_address, ownership_or_control_basis,
+                 ownership_percentage)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+        """,
+        cid, FIRM_ID, owner.owner_name,
+        date.fromisoformat(owner.date_of_birth) if owner.date_of_birth else None,
+        owner.nationality, owner.id_or_passport_number, owner.residential_address,
+        owner.ownership_or_control_basis, owner.ownership_percentage,
+        )
+    return _row_to_beneficial_owner(row)
+
+@app.patch("/api/clients/{client_id}/beneficial-owners/{owner_id}")
+async def update_beneficial_owner(client_id: str, owner_id: str, update: BeneficialOwnerUpdate, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    try:
+        oid = _uuid_mod.UUID(owner_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="owner_id must be a valid UUID")
+    fields = {k: v for k, v in update.dict().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    if "verification_status" in fields and fields["verification_status"] not in VERIFICATION_STATUSES:
+        raise HTTPException(status_code=422, detail=f"verification_status must be one of: {', '.join(VERIFICATION_STATUSES)}")
+    for k in ("date_of_birth", "verified_date"):
+        if k in fields:
+            try:
+                fields[k] = date.fromisoformat(fields[k])
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"{k} must be in YYYY-MM-DD format")
+    if fields.get("verification_status") == "Verified":
+        fields["verified_by"] = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+        fields.setdefault("verified_date", datetime.utcnow().date())
+    set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
+    values = list(fields.values())
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE beneficial_owners SET {set_clauses} WHERE id=$1 AND client_id=$2 AND firm_id=${len(values)+3} RETURNING *",
+            oid, cid, *values, FIRM_ID
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Beneficial owner not found")
+    return _row_to_beneficial_owner(row)
+
+@app.delete("/api/clients/{client_id}/beneficial-owners/{owner_id}", status_code=204)
+async def delete_beneficial_owner(client_id: str, owner_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    try:
+        oid = _uuid_mod.UUID(owner_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="owner_id must be a valid UUID")
+    async with _db_pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM beneficial_owners WHERE id=$1 AND client_id=$2 AND firm_id=$3",
+            oid, cid, FIRM_ID
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Beneficial owner not found")
+
+# ── AML/KYC: authorized representatives (s17(d)) ────────────────────────────
+
+@app.get("/api/clients/{client_id}/authorized-representatives")
+async def list_authorized_representatives(client_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        rows = await conn.fetch(
+            "SELECT * FROM authorized_representatives WHERE client_id=$1 AND firm_id=$2 ORDER BY created_at ASC",
+            cid, FIRM_ID
+        )
+    return [_row_to_authorized_representative(r) for r in rows]
+
+@app.post("/api/clients/{client_id}/authorized-representatives", status_code=201)
+async def create_authorized_representative(client_id: str, rep: AuthorizedRepresentativeCreate, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    if rep.authority_basis is not None and rep.authority_basis not in AUTHORITY_BASIS_TYPES:
+        raise HTTPException(status_code=422, detail=f"authority_basis must be one of: {', '.join(AUTHORITY_BASIS_TYPES)}")
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        row = await conn.fetchrow("""
+            INSERT INTO authorized_representatives
+                (client_id, firm_id, full_name, position_or_relationship,
+                 id_or_passport_number, contact_details, authority_basis, authority_document_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        """,
+        cid, FIRM_ID, rep.full_name, rep.position_or_relationship,
+        rep.id_or_passport_number, rep.contact_details, rep.authority_basis,
+        _uuid_mod.UUID(rep.authority_document_id) if rep.authority_document_id else None,
+        )
+    return _row_to_authorized_representative(row)
+
+@app.patch("/api/clients/{client_id}/authorized-representatives/{rep_id}")
+async def update_authorized_representative(
+    client_id: str, rep_id: str, update: AuthorizedRepresentativeUpdate, request: Request
+):
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    try:
+        rid = _uuid_mod.UUID(rep_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="rep_id must be a valid UUID")
+    fields = {k: v for k, v in update.dict().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    if "authority_basis" in fields and fields["authority_basis"] not in AUTHORITY_BASIS_TYPES:
+        raise HTTPException(status_code=422, detail=f"authority_basis must be one of: {', '.join(AUTHORITY_BASIS_TYPES)}")
+    if "verification_status" in fields and fields["verification_status"] not in VERIFICATION_STATUSES:
+        raise HTTPException(status_code=422, detail=f"verification_status must be one of: {', '.join(VERIFICATION_STATUSES)}")
+    if "authority_document_id" in fields:
+        try:
+            fields["authority_document_id"] = _uuid_mod.UUID(fields["authority_document_id"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="authority_document_id must be a valid UUID")
+    if "verified_date" in fields:
+        try:
+            fields["verified_date"] = date.fromisoformat(fields["verified_date"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="verified_date must be in YYYY-MM-DD format")
+    set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
+    values = list(fields.values())
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE authorized_representatives SET {set_clauses} "
+            f"WHERE id=$1 AND client_id=$2 AND firm_id=${len(values)+3} RETURNING *",
+            rid, cid, *values, FIRM_ID
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Authorized representative not found")
+    return _row_to_authorized_representative(row)
+
+@app.delete("/api/clients/{client_id}/authorized-representatives/{rep_id}", status_code=204)
+async def delete_authorized_representative(client_id: str, rep_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    try:
+        rid = _uuid_mod.UUID(rep_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="rep_id must be a valid UUID")
+    async with _db_pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM authorized_representatives WHERE id=$1 AND client_id=$2 AND firm_id=$3",
+            rid, cid, FIRM_ID
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Authorized representative not found")
+
+# ── AML/KYC: compliance / PEP / compliance_status (s20, s24) ───────────────
+
+@app.get("/api/clients/{client_id}/compliance")
+async def get_client_compliance(client_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        client_row = await _get_client_or_404(conn, cid)
+        compliance_row = await conn.fetchrow(
+            "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+        owner_rows = await conn.fetch(
+            "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+    compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
+    status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
+    return {**compliance, **status}
+
+@app.patch("/api/clients/{client_id}/compliance")
+async def update_client_compliance(client_id: str, update: ClientComplianceUpdate, request: Request):
+    """
+    Upsert — client_compliance has no row for a client until the first
+    write here, rather than every client getting one at creation time
+    (most fields start meaningless — Unverified/NotAssessed/null — so
+    there's nothing to gain from a row existing before anyone has actually
+    looked at compliance for this client).
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    fields = {k: v for k, v in update.dict().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    if "pep_basis" in fields and fields["pep_basis"] not in PEP_BASIS_TYPES:
+        raise HTTPException(status_code=422, detail=f"pep_basis must be one of: {', '.join(PEP_BASIS_TYPES)}")
+    if "risk_rating" in fields and fields["risk_rating"] not in RISK_RATINGS:
+        raise HTTPException(status_code=422, detail=f"risk_rating must be one of: {', '.join(RISK_RATINGS)}")
+    if "identity_verification_status" in fields and fields["identity_verification_status"] not in VERIFICATION_STATUSES:
+        raise HTTPException(status_code=422, detail=f"identity_verification_status must be one of: {', '.join(VERIFICATION_STATUSES)}")
+    if "client_is_beneficial_owner" in fields and fields["client_is_beneficial_owner"] not in CLIENT_IS_BENEFICIAL_OWNER_VALUES:
+        raise HTTPException(status_code=422, detail=f"client_is_beneficial_owner must be one of: {', '.join(CLIENT_IS_BENEFICIAL_OWNER_VALUES)}")
+    for k in ("senior_management_approved_date", "retained_until"):
+        if k in fields:
+            try:
+                fields[k] = date.fromisoformat(fields[k])
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"{k} must be in YYYY-MM-DD format")
+    if "senior_management_approved_by" in fields:
+        try:
+            fields["senior_management_approved_by"] = _uuid_mod.UUID(fields["senior_management_approved_by"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="senior_management_approved_by must be a valid UUID")
+
+    # s20: senior management approval is mandatory once a client is flagged
+    # PEP — forced true here (not merely defaulted), so it can't be
+    # silently left false by omission when is_pep flips to true.
+    if fields.get("is_pep") is True:
+        fields["senior_management_approval_required"] = True
+
+    # conflict_check_reviewed_by/date are set server-side from whoever is
+    # actually marking it reviewed, not client-supplied — same pattern as
+    # beneficial_owners.verified_by/verified_date.
+    if fields.get("conflict_check_reviewed") is True:
+        fields["conflict_check_reviewed_by"] = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+        fields["conflict_check_reviewed_date"] = datetime.utcnow().date()
+    elif fields.get("conflict_check_reviewed") is False:
+        fields["conflict_check_reviewed_by"] = None
+        fields["conflict_check_reviewed_date"] = None
+
+    fields["updated_at"] = datetime.utcnow()
+
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        existing = await conn.fetchrow(
+            "SELECT id FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+        if existing:
+            set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
+            values = list(fields.values())
+            row = await conn.fetchrow(
+                f"UPDATE client_compliance SET {set_clauses} WHERE client_id=$1 AND firm_id=$2 "
+                f"RETURNING *",
+                cid, FIRM_ID, *values
+            )
+        else:
+            cols = ["client_id", "firm_id"] + list(fields.keys())
+            placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
+            row = await conn.fetchrow(
+                f"INSERT INTO client_compliance ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *",
+                cid, FIRM_ID, *fields.values()
+            )
+        client_row = await _get_client_or_404(conn, cid)
+        owner_rows = await conn.fetch(
+            "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+    compliance = _row_to_client_compliance(row)
+    status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
+    return {**compliance, **status}
 
 @app.get("/api/matters/template")
 async def download_matter_template():
@@ -3482,6 +4262,9 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
     if touched_date_fields:
         async with _db_pool.acquire() as conn:
             await _sync_conveyancing_calendar_events(conn, row, touched_date_fields)
+    if "status" in fields and row.get("client_id"):
+        async with _db_pool.acquire() as conn:
+            await _sync_client_relationship_ended(conn, row["client_id"])
     m = _row_to_matter(row)
     async with _db_pool.acquire() as conn:
         note_rows = await conn.fetch(

@@ -101,6 +101,12 @@ class FakeConnection:
                     return dict(c)
             return None
 
+        # get_client()'s compliance-badge addition (AML/KYC module) — this
+        # file doesn't exercise compliance data, only that get_client()
+        # still returns the right matters; see tests/test_client_compliance.py.
+        if q.startswith("SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2"):
+            return None
+
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
     async def fetch(self, query, *args):
@@ -133,6 +139,8 @@ class FakeConnection:
         if q.startswith("SELECT * FROM documents WHERE matter_id = ANY($1)"):
             return []
         if q.startswith("SELECT * FROM calendar_events WHERE matter_id = ANY($1)"):
+            return []
+        if q.startswith("SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2"):
             return []
 
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")

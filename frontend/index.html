@@ -1567,6 +1567,219 @@ select{cursor:pointer}
   </div>
 </div>
 
+<!-- ═══════════════ AML/KYC COMPLIANCE MODAL ═══════════════ -->
+<!-- Money Laundering and Proceeds of Crime Act [Chapter 9:24] ss15,17,20,24.
+     Progressive disclosure (Part 6): Individual vs entity vs trust/estate
+     fields toggle on client_type; beneficial ownership only shows for a
+     legal-person client_type; authorized representative only shows once
+     the "someone else is instructing" checkbox is ticked. -->
+<div id="compliance-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center;padding:2rem 0">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(700px,94vw);max-height:92vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+      <div style="font-weight:700;font-size:1rem">🛡 AML/KYC Compliance</div>
+      <button onclick="closeComplianceModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+    <div id="compliance-badge-row" style="margin-bottom:1rem"></div>
+
+    <div class="form-section-label">CLIENT TYPE &amp; IDENTITY — s17</div>
+    <div class="form-group">
+      <label>Client Type</label>
+      <select id="cc-client-type" onchange="onComplianceClientTypeChange()">
+        <option value="">— Not yet recorded —</option>
+      </select>
+    </div>
+
+    <div id="cc-individual-fields" style="display:none">
+      <div class="form-row">
+        <div class="form-group"><label>Date of Birth</label><input type="date" id="cc-date-of-birth"/></div>
+        <div class="form-group"><label>Place of Birth <span style="font-weight:400;color:var(--ink3)">(if not on ID)</span></label><input type="text" id="cc-place-of-birth"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>National ID Number</label><input type="text" id="cc-national-id"/></div>
+        <div class="form-group"><label>Passport Number</label><input type="text" id="cc-passport-number"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>ID Expiry Date</label><input type="date" id="cc-id-expiry"/></div>
+        <div class="form-group"><label>Occupation</label><input type="text" id="cc-occupation"/></div>
+      </div>
+      <div class="form-group"><label>Residential Address</label><input type="text" id="cc-residential-address"/></div>
+      <div class="form-group"><label>Employer / Business</label><input type="text" id="cc-employer"/></div>
+    </div>
+
+    <div id="cc-entity-fields" style="display:none">
+      <div class="form-row">
+        <div class="form-group"><label>Registered Name</label><input type="text" id="cc-registered-name"/></div>
+        <div class="form-group"><label>Trading Name</label><input type="text" id="cc-trading-name"/></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Registration Number</label><input type="text" id="cc-registration-number"/></div>
+        <div class="form-group"><label>Date Incorporated</label><input type="date" id="cc-date-incorporated"/></div>
+      </div>
+      <div class="form-group"><label>Registered Office Address</label><input type="text" id="cc-registered-office"/></div>
+      <div class="form-group"><label>Principal Business Address</label><input type="text" id="cc-principal-business-address"/></div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Proof of Incorporation <span style="font-weight:400;color:var(--ink3)">(Vault document ID)</span></label>
+          <input type="text" id="cc-proof-of-incorporation" placeholder="Upload to Vault first, paste document ID"/>
+        </div>
+        <div class="form-group">
+          <label>Governing Document <span style="font-weight:400;color:var(--ink3)">(MOI/constitution — Vault document ID)</span></label>
+          <input type="text" id="cc-governing-document" placeholder="Upload to Vault first, paste document ID"/>
+        </div>
+      </div>
+    </div>
+
+    <div id="cc-trust-fields" style="display:none">
+      <p style="font-size:0.75rem;color:var(--ink3);margin:0 0 0.4rem">One per line: <code>Name | ID number | Role</code> — e.g. <code>Tendai Moyo | 63-123456A78 | Trustee</code></p>
+      <div class="form-group"><label>Trustees</label><textarea id="cc-trustees" rows="3" placeholder="Name | ID number | Role"></textarea></div>
+      <div class="form-group"><label>Settlors</label><textarea id="cc-settlors" rows="2" placeholder="Name | ID number | Role"></textarea></div>
+      <div class="form-group"><label>Beneficiaries</label><textarea id="cc-beneficiaries" rows="3" placeholder="Name | ID number | Role"></textarea></div>
+    </div>
+
+    <div id="cc-beneficial-ownership-section" style="display:none;margin-top:0.5rem">
+      <div class="form-section-label">BENEFICIAL OWNERSHIP — s15 / s17(b)</div>
+      <div class="form-group">
+        <label>Is the client itself the beneficial owner?</label>
+        <select id="cc-is-beneficial-owner" onchange="onComplianceIsBoChange()">
+          <option value="">— Not yet assessed —</option>
+          <option value="Yes">Yes</option>
+          <option value="No">No — list beneficial owners below</option>
+          <option value="Unknown">Unknown</option>
+        </select>
+      </div>
+      <div id="cc-owners-list"></div>
+      <div id="cc-owners-add-form" style="display:none;background:var(--paper2);border-radius:8px;padding:0.75rem;margin-top:0.5rem">
+        <div class="form-row">
+          <div class="form-group"><label>Owner Name *</label><input type="text" id="cc-owner-name"/></div>
+          <div class="form-group"><label>ID / Passport Number</label><input type="text" id="cc-owner-id"/></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Nationality</label><input type="text" id="cc-owner-nationality"/></div>
+          <div class="form-group"><label>Ownership % <span style="font-weight:400;color:var(--ink3)">(optional)</span></label><input type="number" id="cc-owner-percentage" step="0.01" min="0" max="100"/></div>
+        </div>
+        <div class="form-group"><label>Ownership / Control Basis</label><input type="text" id="cc-owner-basis" placeholder='e.g. "60% shareholding" or "de facto control via management agreement"'/></div>
+        <button class="btn btn-outline btn-sm" onclick="addBeneficialOwner()">+ Add Owner</button>
+      </div>
+    </div>
+
+    <div class="form-section-label" style="margin-top:0.85rem">PERSON ACTING FOR THE CLIENT — s17(d)</div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;font-weight:500;margin-bottom:0.5rem">
+      <input type="checkbox" id="cc-has-representative" onchange="onComplianceHasRepChange()" style="width:auto"/>
+      Someone other than the client themselves is instructing the firm
+    </label>
+    <div id="cc-representatives-section" style="display:none">
+      <div id="cc-reps-list"></div>
+      <div style="background:var(--paper2);border-radius:8px;padding:0.75rem;margin-top:0.5rem">
+        <div class="form-row">
+          <div class="form-group"><label>Full Name *</label><input type="text" id="cc-rep-name"/></div>
+          <div class="form-group"><label>Position / Relationship</label><input type="text" id="cc-rep-position"/></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>ID / Passport Number</label><input type="text" id="cc-rep-id"/></div>
+          <div class="form-group"><label>Contact Details</label><input type="text" id="cc-rep-contact"/></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Authority Basis</label>
+            <select id="cc-rep-authority-basis">
+              <option value="">— Select —</option>
+              <option value="PowerOfAttorney">Power of Attorney</option>
+              <option value="BoardResolution">Board Resolution</option>
+              <option value="Mandate">Mandate</option>
+              <option value="LetterOfAdministration">Letter of Administration</option>
+              <option value="LetterOfExecutorship">Letter of Executorship</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="form-group"><label>Authority Document <span style="font-weight:400;color:var(--ink3)">(Vault document ID)</span></label><input type="text" id="cc-rep-document"/></div>
+        </div>
+        <button class="btn btn-outline btn-sm" onclick="addAuthorizedRepresentative()">+ Add Representative</button>
+      </div>
+    </div>
+
+    <div class="form-section-label" style="margin-top:0.85rem">COMPLIANCE / PEP — s20</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Identity Verification</label>
+        <select id="cc-identity-status">
+          <option value="Unverified">Unverified</option>
+          <option value="Pending">Pending</option>
+          <option value="Verified">Verified</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Risk Rating</label>
+        <select id="cc-risk-rating">
+          <option value="NotAssessed">Not Assessed</option>
+          <option value="Low">Low</option>
+          <option value="Medium">Medium</option>
+          <option value="High">High</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Is this client a Politically Exposed Person (PEP)?</label>
+      <select id="cc-is-pep" onchange="onComplianceIsPepChange()">
+        <option value="">— Not yet assessed —</option>
+        <option value="false">No</option>
+        <option value="true">Yes</option>
+      </select>
+      <p style="font-size:0.72rem;color:var(--ink3);margin-top:4px">Manual assessment based on your own knowledge — not automated screening against an external database.</p>
+    </div>
+    <div id="cc-pep-fields" style="display:none">
+      <div class="form-row">
+        <div class="form-group">
+          <label>PEP Basis</label>
+          <select id="cc-pep-basis">
+            <option value="">— Select —</option>
+            <option value="Self">Self</option>
+            <option value="BeneficialOwner">Beneficial Owner</option>
+            <option value="CloseAssociate">Close Associate</option>
+            <option value="NotApplicable">Not Applicable</option>
+          </select>
+        </div>
+        <div class="form-group"><label>PEP Position</label><input type="text" id="cc-pep-position"/></div>
+      </div>
+      <div class="form-group"><label>PEP Country</label><input type="text" id="cc-pep-country"/></div>
+      <div id="cc-sm-approval-box" style="background:#fdf6e8;border:1px solid var(--gold);border-radius:6px;padding:0.6rem 0.75rem;margin-bottom:0.6rem">
+        <div id="cc-sm-approval-status" style="font-size:0.8rem;font-weight:600"></div>
+        <button class="btn btn-gold btn-sm" style="width:auto;margin-top:6px" onclick="approveSeniorManagement()" id="cc-sm-approve-btn">✓ I approve as Senior Management</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Source of Wealth</label><textarea id="cc-source-of-wealth" rows="2"></textarea></div>
+      <div class="form-group"><label>Source of Funds</label><textarea id="cc-source-of-funds" rows="2"></textarea></div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:0.85rem;font-weight:500;margin-bottom:0.75rem">
+      <input type="checkbox" id="cc-enhanced-monitoring" style="width:auto"/>
+      Enhanced ongoing monitoring required
+    </label>
+
+    <div class="form-section-label">CONFLICT CHECK</div>
+    <div id="cc-conflict-result" style="display:none;margin-bottom:0.6rem;font-size:0.78rem;background:var(--paper2);border-radius:6px;padding:0.6rem 0.75rem"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:1rem;flex-wrap:wrap">
+      <button class="btn btn-outline btn-sm" style="width:auto" onclick="runClientConflictCheck()">🔍 Run Conflict Check</button>
+      <button class="btn btn-outline btn-sm" style="width:auto" onclick="markConflictReviewed()" id="cc-conflict-reviewed-btn">✓ Mark Reviewed — No Conflict</button>
+      <span id="cc-conflict-reviewed-note" style="font-size:0.75rem;color:var(--ink3)"></span>
+    </div>
+
+    <div class="form-section-label">RETENTION — s24 <span style="font-weight:400;text-transform:none;color:var(--ink3)">(flag only, no automatic deletion)</span></div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Relationship Ended <span style="font-weight:400;color:var(--ink3)">(auto — set once every matter is Closed)</span></label>
+        <input type="text" id="cc-relationship-ended" disabled style="background:var(--paper2)"/>
+      </div>
+      <div class="form-group">
+        <label>Retain Until <span style="font-weight:400;color:var(--ink3)">(enter per your firm's compliance officer)</span></label>
+        <input type="date" id="cc-retained-until"/>
+      </div>
+    </div>
+
+    <div id="compliance-modal-status" class="status" style="margin-bottom:0.5rem"></div>
+    <button class="btn btn-primary" style="width:100%" onclick="submitComplianceForm()">Save Compliance Info</button>
+  </div>
+</div>
+
 <!-- ═══════════════ NEW MATTER MODAL ═══════════════ -->
 <!-- Top-level, not nested inside any #tab-* div — a position:fixed overlay
      opened from outside its "home" tab (e.g. the Clients tab's "+ New
@@ -2521,9 +2734,17 @@ function renderClientDetailContent(client) {
               ${escHtml(client.full_name)}
             </h2>
             <span class="chip chip-gray">${clientMatters.length} matter${clientMatters.length !== 1 ? 's' : ''}</span>
+            ${complianceStatusChipHtml(client.compliance_status)}
           </div>
-          <button class="btn btn-outline btn-sm" onclick="openClientModal('${client.id}')">✎ Edit</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-outline btn-sm" onclick="openComplianceModal('${client.id}')">🛡 Compliance</button>
+            <button class="btn btn-outline btn-sm" onclick="openClientModal('${client.id}')">✎ Edit</button>
+          </div>
         </div>
+        ${client.compliance_missing && client.compliance_missing.length ? `
+          <div style="margin-top:0.5rem;font-size:0.78rem;color:var(--ink3)">
+            Missing: ${client.compliance_missing.map(escHtml).join(', ')}
+          </div>` : ''}
         <div style="margin-top:1rem;display:grid;grid-template-columns:1fr 1fr;gap:0.85rem">
           ${_clientDetailField('EMAIL', client.email)}
           ${_clientDetailField('PHONE', client.phone)}
@@ -2726,6 +2947,389 @@ async function submitClientForm() {
       await openClientDetail(editingId); // keep the open detail view in sync with the edit
     }
     setTimeout(() => closeClientModal(), 700);
+  } catch(e) {
+    statusMsg.className = 'status show error';
+    statusMsg.textContent = `Error: ${e.message}`;
+  }
+}
+
+// ── AML/KYC Client Compliance ────────────────────────────────────────────────
+// Money Laundering and Proceeds of Crime Act [Chapter 9:24] ss15,17,20,24.
+// See backend/main.py's "AML/KYC Client Compliance" migration block for the
+// full section-by-section citation of every field here.
+
+const CLIENT_TYPES = ['Individual', 'Company', 'Partnership', 'Trust', 'Estate', 'NonProfit', 'Government', 'Other'];
+const LEGAL_PERSON_CLIENT_TYPES = CLIENT_TYPES.filter(t => t !== 'Individual');
+const TRUST_CLIENT_TYPES = ['Trust', 'Estate'];
+
+function complianceStatusChipHtml(status) {
+  if (!status) return '';
+  const cls = status === 'Cleared' ? 'chip-green' : 'chip-red';
+  const icon = status === 'Cleared' ? '✓' : '⚠';
+  return `<span class="chip ${cls}" style="font-weight:700;text-transform:uppercase;letter-spacing:0.3px">${icon} ${escHtml(status)}</span>`;
+}
+
+let _complianceClientId = null;
+let _complianceOwners = [];
+let _complianceReps = [];
+let _complianceData = null;
+
+async function openComplianceModal(clientId) {
+  _complianceClientId = clientId;
+  const sel = document.getElementById('cc-client-type');
+  sel.innerHTML = '<option value="">— Not yet recorded —</option>' +
+    CLIENT_TYPES.map(t => `<option value="${t}">${t}</option>`).join('');
+
+  document.getElementById('compliance-modal-status').className = 'status';
+  document.getElementById('compliance-modal-status').textContent = '';
+  document.getElementById('cc-conflict-result').style.display = 'none';
+  document.getElementById('compliance-modal').style.display = 'flex';
+
+  try {
+    const [clientRes, complianceRes, ownersRes, repsRes] = await Promise.all([
+      fetch(`${API}/api/clients/${clientId}`),
+      fetch(`${API}/api/clients/${clientId}/compliance`),
+      fetch(`${API}/api/clients/${clientId}/beneficial-owners`),
+      fetch(`${API}/api/clients/${clientId}/authorized-representatives`),
+    ]);
+    const client = await clientRes.json();
+    _complianceData = await complianceRes.json();
+    _complianceOwners = await ownersRes.json();
+    _complianceReps = await repsRes.json();
+
+    document.getElementById('compliance-badge-row').innerHTML =
+      complianceStatusChipHtml(_complianceData.compliance_status) +
+      (_complianceData.missing && _complianceData.missing.length
+        ? `<div style="font-size:0.78rem;color:var(--ink3);margin-top:6px">Missing: ${_complianceData.missing.map(escHtml).join(', ')}</div>` : '');
+
+    sel.value = client.client_type || '';
+    document.getElementById('cc-date-of-birth').value = client.date_of_birth || '';
+    document.getElementById('cc-place-of-birth').value = client.place_of_birth || '';
+    document.getElementById('cc-national-id').value = client.national_id_number || '';
+    document.getElementById('cc-passport-number').value = client.passport_number || '';
+    document.getElementById('cc-id-expiry').value = client.id_expiry_date || '';
+    document.getElementById('cc-occupation').value = client.occupation || '';
+    document.getElementById('cc-residential-address').value = client.residential_address || '';
+    document.getElementById('cc-employer').value = client.employer_or_business || '';
+
+    document.getElementById('cc-registered-name').value = client.registered_name || '';
+    document.getElementById('cc-trading-name').value = client.trading_name || '';
+    document.getElementById('cc-registration-number').value = client.registration_number || '';
+    document.getElementById('cc-date-incorporated').value = client.date_incorporated || '';
+    document.getElementById('cc-registered-office').value = client.registered_office_address || '';
+    document.getElementById('cc-principal-business-address').value = client.principal_business_address || '';
+    document.getElementById('cc-proof-of-incorporation').value = client.proof_of_incorporation_document_id || '';
+    document.getElementById('cc-governing-document').value = client.governing_document_id || '';
+
+    document.getElementById('cc-trustees').value = _trustPartyListToText(client.trustees);
+    document.getElementById('cc-settlors').value = _trustPartyListToText(client.settlors);
+    document.getElementById('cc-beneficiaries').value = _trustPartyListToText(client.beneficiaries);
+
+    document.getElementById('cc-is-beneficial-owner').value = _complianceData.client_is_beneficial_owner || '';
+    document.getElementById('cc-identity-status').value = _complianceData.identity_verification_status || 'Unverified';
+    document.getElementById('cc-risk-rating').value = _complianceData.risk_rating || 'NotAssessed';
+    document.getElementById('cc-is-pep').value = _complianceData.is_pep === true ? 'true' : _complianceData.is_pep === false ? 'false' : '';
+    document.getElementById('cc-pep-basis').value = _complianceData.pep_basis || '';
+    document.getElementById('cc-pep-position').value = _complianceData.pep_position || '';
+    document.getElementById('cc-pep-country').value = _complianceData.pep_country || '';
+    document.getElementById('cc-source-of-wealth').value = _complianceData.source_of_wealth || '';
+    document.getElementById('cc-source-of-funds').value = _complianceData.source_of_funds || '';
+    document.getElementById('cc-enhanced-monitoring').checked = !!_complianceData.enhanced_monitoring_required;
+    document.getElementById('cc-relationship-ended').value = _complianceData.relationship_ended_date || 'Relationship still active';
+    document.getElementById('cc-retained-until').value = _complianceData.retained_until || '';
+    document.getElementById('cc-has-representative').checked = _complianceReps.length > 0;
+
+    onComplianceClientTypeChange();
+    onComplianceIsBoChange();
+    onComplianceHasRepChange();
+    onComplianceIsPepChange();
+    renderOwnersList();
+    renderRepsList();
+    renderConflictReviewedNote();
+  } catch(e) {
+    document.getElementById('compliance-modal-status').className = 'status show error';
+    document.getElementById('compliance-modal-status').textContent = `Error loading compliance data: ${e.message}`;
+  }
+}
+
+function closeComplianceModal() {
+  document.getElementById('compliance-modal').style.display = 'none';
+  _complianceClientId = null;
+}
+
+function _trustPartyListToText(list) {
+  return (list || []).map(p => [p.name, p.id_number || '', p.role || ''].join(' | ')).join('\n');
+}
+
+function _trustPartyTextToList(text) {
+  return text.split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const [name, id_number, role] = line.split('|').map(s => (s || '').trim());
+    return { name, id_number: id_number || null, role: role || null };
+  });
+}
+
+function onComplianceClientTypeChange() {
+  const type = document.getElementById('cc-client-type').value;
+  document.getElementById('cc-individual-fields').style.display = type === 'Individual' ? 'block' : 'none';
+  document.getElementById('cc-entity-fields').style.display = (type && LEGAL_PERSON_CLIENT_TYPES.includes(type)) ? 'block' : 'none';
+  document.getElementById('cc-trust-fields').style.display = TRUST_CLIENT_TYPES.includes(type) ? 'block' : 'none';
+  // Part 6: beneficial ownership prompt only for a legal-person client.
+  document.getElementById('cc-beneficial-ownership-section').style.display =
+    (type && LEGAL_PERSON_CLIENT_TYPES.includes(type)) ? 'block' : 'none';
+}
+
+function onComplianceIsBoChange() {
+  const isBo = document.getElementById('cc-is-beneficial-owner').value;
+  document.getElementById('cc-owners-add-form').style.display = isBo === 'No' ? 'block' : 'none';
+}
+
+function onComplianceHasRepChange() {
+  document.getElementById('cc-representatives-section').style.display =
+    document.getElementById('cc-has-representative').checked ? 'block' : 'none';
+}
+
+function onComplianceIsPepChange() {
+  const isPep = document.getElementById('cc-is-pep').value;
+  document.getElementById('cc-pep-fields').style.display = isPep === 'true' ? 'block' : 'none';
+  if (isPep !== 'true') return;
+  const approved = !!(_complianceData && _complianceData.senior_management_approved_by);
+  const box = document.getElementById('cc-sm-approval-status');
+  const btn = document.getElementById('cc-sm-approve-btn');
+  if (approved) {
+    box.textContent = `✓ Approved by senior management on ${_complianceData.senior_management_approved_date || ''}.`;
+    btn.style.display = 'none';
+  } else {
+    box.textContent = 's20: senior management approval is required before this client can be Cleared.';
+    btn.style.display = window._userId ? 'inline-flex' : 'none';
+    if (!window._userId) box.textContent += ' (Sign in to approve.)';
+  }
+}
+
+function renderOwnersList() {
+  const el = document.getElementById('cc-owners-list');
+  if (!_complianceOwners.length) {
+    el.innerHTML = '<p style="font-size:0.78rem;color:var(--ink3)">No beneficial owners recorded yet.</p>';
+    return;
+  }
+  el.innerHTML = _complianceOwners.map(o => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--paper3)">
+      <div style="font-size:0.82rem">
+        <strong>${escHtml(o.owner_name)}</strong>
+        ${o.ownership_percentage != null ? ` — ${o.ownership_percentage}%` : ''}
+        ${o.ownership_or_control_basis ? `<span style="color:var(--ink3)"> (${escHtml(o.ownership_or_control_basis)})</span>` : ''}
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span class="chip ${o.verification_status === 'Verified' ? 'chip-green' : 'chip-gray'}">${escHtml(o.verification_status)}</span>
+        ${o.verification_status !== 'Verified' ? `<button class="btn btn-outline btn-sm" style="width:auto;padding:2px 8px" onclick="verifyBeneficialOwner('${o.id}')">Verify</button>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+async function addBeneficialOwner() {
+  const name = document.getElementById('cc-owner-name').value.trim();
+  if (!name) return;
+  const payload = {
+    owner_name: name,
+    id_or_passport_number: document.getElementById('cc-owner-id').value.trim() || null,
+    nationality: document.getElementById('cc-owner-nationality').value.trim() || null,
+    ownership_percentage: document.getElementById('cc-owner-percentage').value ? parseFloat(document.getElementById('cc-owner-percentage').value) : null,
+    ownership_or_control_basis: document.getElementById('cc-owner-basis').value.trim() || null,
+  };
+  const res = await fetch(`${API}/api/clients/${_complianceClientId}/beneficial-owners`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+  });
+  if (!res.ok) return;
+  _complianceOwners.push(await res.json());
+  ['cc-owner-name','cc-owner-id','cc-owner-nationality','cc-owner-percentage','cc-owner-basis'].forEach(id => document.getElementById(id).value = '');
+  renderOwnersList();
+}
+
+async function verifyBeneficialOwner(ownerId) {
+  const res = await fetch(`${API}/api/clients/${_complianceClientId}/beneficial-owners/${ownerId}`, {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ verification_status: 'Verified' })
+  });
+  if (!res.ok) return;
+  const updated = await res.json();
+  _complianceOwners = _complianceOwners.map(o => o.id === ownerId ? updated : o);
+  renderOwnersList();
+}
+
+function renderRepsList() {
+  const el = document.getElementById('cc-reps-list');
+  if (!_complianceReps.length) {
+    el.innerHTML = '<p style="font-size:0.78rem;color:var(--ink3)">No authorized representatives recorded yet.</p>';
+    return;
+  }
+  el.innerHTML = _complianceReps.map(r => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--paper3)">
+      <div style="font-size:0.82rem">
+        <strong>${escHtml(r.full_name)}</strong>
+        ${r.position_or_relationship ? ` — ${escHtml(r.position_or_relationship)}` : ''}
+        ${r.authority_basis ? `<span class="chip chip-gray" style="margin-left:6px">${escHtml(r.authority_basis)}</span>` : ''}
+      </div>
+      <span class="chip ${r.verification_status === 'Verified' ? 'chip-green' : 'chip-gray'}">${escHtml(r.verification_status)}</span>
+    </div>
+  `).join('');
+}
+
+async function addAuthorizedRepresentative() {
+  const name = document.getElementById('cc-rep-name').value.trim();
+  if (!name) return;
+  const payload = {
+    full_name: name,
+    position_or_relationship: document.getElementById('cc-rep-position').value.trim() || null,
+    id_or_passport_number: document.getElementById('cc-rep-id').value.trim() || null,
+    contact_details: document.getElementById('cc-rep-contact').value.trim() || null,
+    authority_basis: document.getElementById('cc-rep-authority-basis').value || null,
+    authority_document_id: document.getElementById('cc-rep-document').value.trim() || null,
+  };
+  const res = await fetch(`${API}/api/clients/${_complianceClientId}/authorized-representatives`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+  });
+  if (!res.ok) return;
+  _complianceReps.push(await res.json());
+  ['cc-rep-name','cc-rep-position','cc-rep-id','cc-rep-contact','cc-rep-document'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('cc-rep-authority-basis').value = '';
+  renderRepsList();
+}
+
+async function approveSeniorManagement() {
+  if (!window._userId) return;
+  const res = await fetch(`${API}/api/clients/${_complianceClientId}/compliance`, {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ senior_management_approved_by: window._userId, senior_management_approved_date: new Date().toISOString().slice(0,10) })
+  });
+  if (!res.ok) return;
+  _complianceData = await res.json();
+  onComplianceIsPepChange();
+  document.getElementById('compliance-badge-row').innerHTML =
+    complianceStatusChipHtml(_complianceData.compliance_status) +
+    (_complianceData.missing.length ? `<div style="font-size:0.78rem;color:var(--ink3);margin-top:6px">Missing: ${_complianceData.missing.map(escHtml).join(', ')}</div>` : '');
+}
+
+function renderConflictReviewedNote() {
+  const note = document.getElementById('cc-conflict-reviewed-note');
+  note.textContent = _complianceData.conflict_check_reviewed
+    ? `✓ Reviewed ${_complianceData.conflict_check_reviewed_date || ''}` : 'Not yet reviewed';
+}
+
+async function runClientConflictCheck() {
+  const client = clients.find(c => c.id === _complianceClientId);
+  const name = client ? client.full_name : '';
+  const box = document.getElementById('cc-conflict-result');
+  box.style.display = 'block';
+  box.textContent = 'Checking…';
+  try {
+    // Reuses the existing New Matter conflict-check endpoint — a live
+    // fuzzy name-similarity search against every matter, not a separate
+    // client-compliance-specific mechanism.
+    const params = new URLSearchParams({ name, client_name: name });
+    const res = await fetch(`${API}/api/matters/check-conflict?${params}`);
+    const data = await res.json();
+    if (!data.matches || !data.matches.length) {
+      box.innerHTML = '✓ No similar existing matters found.';
+      return;
+    }
+    box.innerHTML = `⚠ <strong>${data.matches.length} similar matter(s) found</strong> — review before proceeding:<br/>` +
+      data.matches.map(m => `&nbsp;&nbsp;• ${escHtml(m.name)}${m.client_name ? ' — ' + escHtml(m.client_name) : ''} <span style="color:var(--ink3)">(${escHtml(m.status)})</span>`).join('<br/>');
+  } catch(e) {
+    box.textContent = `Error: ${e.message}`;
+  }
+}
+
+async function markConflictReviewed() {
+  const res = await fetch(`${API}/api/clients/${_complianceClientId}/compliance`, {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ conflict_check_reviewed: true })
+  });
+  if (!res.ok) return;
+  _complianceData = await res.json();
+  renderConflictReviewedNote();
+  document.getElementById('compliance-badge-row').innerHTML =
+    complianceStatusChipHtml(_complianceData.compliance_status) +
+    (_complianceData.missing.length ? `<div style="font-size:0.78rem;color:var(--ink3);margin-top:6px">Missing: ${_complianceData.missing.map(escHtml).join(', ')}</div>` : '');
+}
+
+async function submitComplianceForm() {
+  const statusMsg = document.getElementById('compliance-modal-status');
+  statusMsg.className = 'status show';
+  statusMsg.textContent = 'Saving…';
+
+  const type = document.getElementById('cc-client-type').value;
+  const clientPayload = { client_type: type || null };
+  if (type === 'Individual') {
+    Object.assign(clientPayload, {
+      date_of_birth: document.getElementById('cc-date-of-birth').value || null,
+      place_of_birth: document.getElementById('cc-place-of-birth').value.trim() || null,
+      national_id_number: document.getElementById('cc-national-id').value.trim() || null,
+      passport_number: document.getElementById('cc-passport-number').value.trim() || null,
+      id_expiry_date: document.getElementById('cc-id-expiry').value || null,
+      occupation: document.getElementById('cc-occupation').value.trim() || null,
+      residential_address: document.getElementById('cc-residential-address').value.trim() || null,
+      employer_or_business: document.getElementById('cc-employer').value.trim() || null,
+    });
+  } else if (LEGAL_PERSON_CLIENT_TYPES.includes(type)) {
+    Object.assign(clientPayload, {
+      registered_name: document.getElementById('cc-registered-name').value.trim() || null,
+      trading_name: document.getElementById('cc-trading-name').value.trim() || null,
+      registration_number: document.getElementById('cc-registration-number').value.trim() || null,
+      date_incorporated: document.getElementById('cc-date-incorporated').value || null,
+      registered_office_address: document.getElementById('cc-registered-office').value.trim() || null,
+      principal_business_address: document.getElementById('cc-principal-business-address').value.trim() || null,
+      proof_of_incorporation_document_id: document.getElementById('cc-proof-of-incorporation').value.trim() || null,
+      governing_document_id: document.getElementById('cc-governing-document').value.trim() || null,
+    });
+    if (TRUST_CLIENT_TYPES.includes(type)) {
+      Object.assign(clientPayload, {
+        trustees: _trustPartyTextToList(document.getElementById('cc-trustees').value),
+        settlors: _trustPartyTextToList(document.getElementById('cc-settlors').value),
+        beneficiaries: _trustPartyTextToList(document.getElementById('cc-beneficiaries').value),
+      });
+    }
+  }
+  // Strip nulls the PATCH endpoint would otherwise silently ignore anyway
+  // (Optional fields — None means "don't touch"), keeping the payload honest.
+  Object.keys(clientPayload).forEach(k => clientPayload[k] === null && delete clientPayload[k]);
+
+  const isPepRaw = document.getElementById('cc-is-pep').value;
+  const compliancePayload = {
+    identity_verification_status: document.getElementById('cc-identity-status').value,
+    risk_rating: document.getElementById('cc-risk-rating').value,
+    source_of_wealth: document.getElementById('cc-source-of-wealth').value.trim() || null,
+    source_of_funds: document.getElementById('cc-source-of-funds').value.trim() || null,
+    enhanced_monitoring_required: document.getElementById('cc-enhanced-monitoring').checked,
+    retained_until: document.getElementById('cc-retained-until').value || null,
+  };
+  if (isPepRaw !== '') compliancePayload.is_pep = isPepRaw === 'true';
+  if (LEGAL_PERSON_CLIENT_TYPES.includes(type)) {
+    const isBo = document.getElementById('cc-is-beneficial-owner').value;
+    if (isBo) compliancePayload.client_is_beneficial_owner = isBo;
+  }
+  if (isPepRaw === 'true') {
+    compliancePayload.pep_basis = document.getElementById('cc-pep-basis').value || null;
+    compliancePayload.pep_position = document.getElementById('cc-pep-position').value.trim() || null;
+    compliancePayload.pep_country = document.getElementById('cc-pep-country').value.trim() || null;
+  }
+  Object.keys(compliancePayload).forEach(k => compliancePayload[k] === null && delete compliancePayload[k]);
+
+  try {
+    if (Object.keys(clientPayload).length) {
+      const r1 = await fetch(`${API}/api/clients/${_complianceClientId}`, {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(clientPayload)
+      });
+      if (!r1.ok) { const e = await r1.json().catch(() => ({})); throw new Error(e.detail || 'Failed to save identity info'); }
+    }
+    if (Object.keys(compliancePayload).length) {
+      const r2 = await fetch(`${API}/api/clients/${_complianceClientId}/compliance`, {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(compliancePayload)
+      });
+      if (!r2.ok) { const e = await r2.json().catch(() => ({})); throw new Error(e.detail || 'Failed to save compliance info'); }
+      _complianceData = await r2.json();
+    }
+    statusMsg.className = 'status show success';
+    statusMsg.textContent = '✓ Compliance info saved.';
+    if (_currentClientDetailId === _complianceClientId) await openClientDetail(_complianceClientId);
+    setTimeout(() => closeComplianceModal(), 700);
   } catch(e) {
     statusMsg.className = 'status show error';
     statusMsg.textContent = `Error: ${e.message}`;

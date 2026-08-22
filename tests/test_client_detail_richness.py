@@ -32,6 +32,10 @@ class FakeConnection:
                 if c["id"] == args[0] and c["firm_id"] == args[1]:
                     return dict(c)
             return None
+        # get_client()'s compliance-badge addition (AML/KYC module) — not
+        # exercised here; see tests/test_client_compliance.py.
+        if q.startswith("SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2"):
+            return None
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
     async def fetch(self, query, *args):
@@ -53,6 +57,9 @@ class FakeConnection:
             matter_ids = set(args[0])
             today = date.today()
             return [dict(e) for e in self.calendar_events if e["matter_id"] in matter_ids and e["date"] >= today]
+
+        if q.startswith("SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2"):
+            return []
 
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
