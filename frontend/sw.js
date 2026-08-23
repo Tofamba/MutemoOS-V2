@@ -2,8 +2,9 @@
 //
 // Two jobs, deliberately kept separate:
 // 1. App-shell caching so the page itself (and its icons) still loads
-//    when offline or on a flaky connection -- cache-first for the static
-//    shell, network-only for everything under /api/ (data must always be
+//    when offline or on a flaky connection -- network-first for the
+//    shell (see the fetch handler below for why cache-first was wrong),
+//    network-only for everything under /api/ (data must always be
 //    fresh; a stale cached search result or document list would be worse
 //    than an error).
 // 2. Registering for Background Sync so a queued capture (see the
@@ -16,8 +17,19 @@
 //    foregrounded with connectivity restored); the sync event here is a
 //    strict bonus on top of that for browsers that support it, not the
 //    only path. Known limitation, not silently pretending otherwise.
-
-const SHELL_CACHE = "mutemo-shell-v1";
+//
+// v2: was cache-first for "/" -- correct for offline access, but it meant
+// a browser that had this worker installed never saw a newer index.html
+// after a deploy, ever, because a service worker only re-fetches its own
+// script (and re-runs install) when that script's bytes change; this
+// file hadn't changed since the shell was first cached, so "/" stayed
+// frozen at whatever was cached back then even after later deploys
+// shipped real UI changes (confirmed live: the AML/KYC compliance UI was
+// fully deployed and being served correctly, but browsers already
+// running the old worker kept rendering the pre-compliance page). The
+// cache name bump below forces every existing installation to discard
+// that stale entry the moment this file updates.
+const SHELL_CACHE = "mutemo-shell-v2";
 const SHELL_ASSETS = [
   "/",
   "/manifest.json",
@@ -45,11 +57,18 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.pathname.startsWith("/api/")) return; // never intercept API calls
 
+  // Network-first, cache as the offline/flaky-connection fallback only --
+  // deliberately not cache-first (see the v2 note above for the outage
+  // that caused). A successful network response also refreshes the
+  // cached copy, so the offline fallback doesn't itself go stale forever.
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).catch(() => cached);
-    })
+    fetch(event.request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(SHELL_CACHE).then((cache) => cache.put(event.request, copy));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
 
