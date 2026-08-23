@@ -21,6 +21,7 @@ import re
 import uuid
 from datetime import date, datetime, timezone
 
+import asyncpg
 import pytest
 from fastapi import HTTPException
 
@@ -40,6 +41,22 @@ from backend.main import (
     update_client,
     update_client_compliance,
 )
+
+# A user id that never exists in the fake `users` table -- simulates the
+# real Postgres foreign-key violation client_compliance.senior_management_
+# approved_by / conflict_check_reviewed_by would raise for a bogus id.
+INVALID_USER_ID = uuid.uuid4()
+
+
+def _raise_if_invalid_user_fk(row: dict) -> None:
+    for field in ("senior_management_approved_by", "conflict_check_reviewed_by"):
+        if row.get(field) == INVALID_USER_ID:
+            err = asyncpg.exceptions.ForeignKeyViolationError(
+                f'insert or update on table "client_compliance" violates foreign key constraint '
+                f'"client_compliance_{field}_fkey"'
+            )
+            err.constraint_name = f"client_compliance_{field}_fkey"
+            raise err
 
 
 class _FakeAcquireCtx:
@@ -113,6 +130,7 @@ class FakeConnection:
         if q.startswith("INSERT INTO client_compliance"):
             cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
             row = dict(zip(cols, args))
+            _raise_if_invalid_user_fk(row)
             row["id"] = uuid.uuid4()
             for k, default in m._DEFAULT_CLIENT_COMPLIANCE.items():
                 row.setdefault(k, default)
@@ -125,6 +143,7 @@ class FakeConnection:
             cols = re.findall(r"(\w+)=\$\d+", m_.group(1))
             cid, firm_id = args[0], args[1]
             values = args[2:2 + len(cols)]
+            _raise_if_invalid_user_fk(dict(zip(cols, values)))
             row = self.compliance[cid]
             for col, val in zip(cols, values):
                 row[col] = val
@@ -249,6 +268,25 @@ def test_setting_is_pep_true_forces_senior_management_approval_required(monkeypa
         str(client["id"]), ClientComplianceUpdate(is_pep=True), None
     ))
     assert result["senior_management_approval_required"] is True
+
+
+def test_invalid_senior_management_approver_id_returns_422_not_500(monkeypatch):
+    """A nonexistent user id previously surfaced as a raw 500 (asyncpg's
+    ForeignKeyViolationError going uncaught) -- update_client_compliance
+    must catch it and return a clean 422 instead."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(update_client_compliance(
+            str(client["id"]),
+            ClientComplianceUpdate(senior_management_approved_by=str(INVALID_USER_ID)),
+            None,
+        ))
+    assert exc_info.value.status_code == 422
+    assert "senior_management_approved_by" in exc_info.value.detail
+    assert "valid user ID" in exc_info.value.detail
 
 
 def test_compliance_status_blocked_until_pep_approved(monkeypatch):

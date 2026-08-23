@@ -4157,21 +4157,37 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         existing = await conn.fetchrow(
             "SELECT id FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
         )
-        if existing:
-            set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
-            values = list(fields.values())
-            row = await conn.fetchrow(
-                f"UPDATE client_compliance SET {set_clauses} WHERE client_id=$1 AND firm_id=$2 "
-                f"RETURNING *",
-                cid, FIRM_ID, *values
-            )
-        else:
-            cols = ["client_id", "firm_id"] + list(fields.keys())
-            placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
-            row = await conn.fetchrow(
-                f"INSERT INTO client_compliance ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *",
-                cid, FIRM_ID, *fields.values()
-            )
+        try:
+            if existing:
+                set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
+                values = list(fields.values())
+                row = await conn.fetchrow(
+                    f"UPDATE client_compliance SET {set_clauses} WHERE client_id=$1 AND firm_id=$2 "
+                    f"RETURNING *",
+                    cid, FIRM_ID, *values
+                )
+            else:
+                cols = ["client_id", "firm_id"] + list(fields.keys())
+                placeholders = ", ".join(f"${i+1}" for i in range(len(cols)))
+                row = await conn.fetchrow(
+                    f"INSERT INTO client_compliance ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *",
+                    cid, FIRM_ID, *fields.values()
+                )
+        except asyncpg.exceptions.ForeignKeyViolationError as e:
+            # senior_management_approved_by / conflict_check_reviewed_by both
+            # reference users(id) — a nonexistent id previously surfaced as a
+            # raw 500 (the FK constraint was correctly rejecting it, just
+            # not caught into a clean validation error). Constraint names
+            # are Postgres's default "{table}_{column}_fkey" — used to name
+            # which field actually failed rather than a generic message.
+            constraint = (e.constraint_name or "")
+            if "senior_management_approved_by" in constraint:
+                field = "senior_management_approved_by"
+            elif "conflict_check_reviewed_by" in constraint:
+                field = "conflict_check_reviewed_by"
+            else:
+                field = "a referenced field"
+            raise HTTPException(status_code=422, detail=f"{field} must be a valid user ID")
         client_row = await _get_client_or_404(conn, cid)
         owner_rows = await conn.fetch(
             "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
