@@ -174,6 +174,16 @@ async def run_migrations():
             attempts    INT NOT NULL DEFAULT 0,
             expires_at  TIMESTAMPTZ NOT NULL
         );
+        -- Defense-in-depth (multi-tenancy hardening, Part 2) -- not
+        -- currently exploitable: this deployment only ever has one firm
+        -- (Option B: one deployment per firm), so a phone-number
+        -- collision across firms can't happen in practice today. Added
+        -- anyway so a query against this table is never the one place
+        -- that silently assumes single-firm. phone stays the PRIMARY KEY
+        -- (unchanged) -- this is an additive column, not a PK migration.
+        -- Backfilled below (needs a bound FIRM_ID param -- this block has
+        -- none) rather than here.
+        ALTER TABLE otp_store ADD COLUMN IF NOT EXISTS firm_id UUID REFERENCES firms(id) ON DELETE CASCADE;
 
         CREATE TABLE IF NOT EXISTS matters (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -835,6 +845,19 @@ async def run_migrations():
             reassigned_at       TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         CREATE INDEX IF NOT EXISTS idx_reassignments_matter ON matter_reassignments(matter_id);
+        -- Defense-in-depth (multi-tenancy hardening, Part 2) -- not
+        -- currently exploitable: the one existing query against this
+        -- table (v_legal_corner_sla_status below) already correlates via
+        -- matter_id to an already firm-scoped matters row. Added so a
+        -- future direct query never has to re-derive firm scope through
+        -- a join. Backfilled from matters.firm_id further down, after
+        -- the matters table exists.
+        ALTER TABLE matter_reassignments ADD COLUMN IF NOT EXISTS firm_id UUID REFERENCES firms(id) ON DELETE CASCADE;
+        CREATE INDEX IF NOT EXISTS idx_reassignments_firm ON matter_reassignments(firm_id);
+        -- No bound parameter needed here (unlike otp_store) -- matters
+        -- already carries the right firm_id for every existing row.
+        UPDATE matter_reassignments r SET firm_id = m.firm_id
+        FROM matters m WHERE m.id = r.matter_id AND r.firm_id IS NULL;
 
         -- API keys for server-to-server auth (Legal Corner subscriber platform)
         CREATE TABLE IF NOT EXISTS firm_api_keys (
@@ -868,7 +891,7 @@ async def run_migrations():
                 WHEN now() > m.sla_deadline THEN true
                 ELSE false
             END AS is_overdue,
-            (SELECT count(*) FROM matter_reassignments r WHERE r.matter_id = m.id) AS reassignment_count
+            (SELECT count(*) FROM matter_reassignments r WHERE r.matter_id = m.id AND r.firm_id = m.firm_id) AS reassignment_count
         FROM matters m
         LEFT JOIN users u ON u.id = m.assigned_lawyer_id;
 
@@ -916,6 +939,13 @@ async def run_migrations():
         ON CONFLICT (id) DO NOTHING
         """,
         FIRM_ID, FIRM_NAME, "S&M", "Harare", "Zimbabwe")
+
+        # Backfill otp_store.firm_id (Part 2, multi-tenancy hardening) --
+        # needs a bound FIRM_ID param, so it can't live in the big
+        # unparameterized migration block above.
+        await conn.execute(
+            "UPDATE otp_store SET firm_id=$1 WHERE firm_id IS NULL", FIRM_ID
+        )
 
         await conn.execute("""
         INSERT INTO reminder_settings (firm_id)
@@ -1409,10 +1439,10 @@ async def request_otp(req: OTPRequestBody):
     expires = datetime.utcnow() + timedelta(seconds=OTP_TTL_SECONDS)
     async with _db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO otp_store (phone, code, attempts, expires_at)
-            VALUES ($1, $2, 0, $3)
-            ON CONFLICT (phone) DO UPDATE SET code=$2, attempts=0, expires_at=$3
-        """, phone, code, expires)
+            INSERT INTO otp_store (phone, code, attempts, expires_at, firm_id)
+            VALUES ($1, $2, 0, $3, $4)
+            ON CONFLICT (phone) DO UPDATE SET code=$2, attempts=0, expires_at=$3, firm_id=$4
+        """, phone, code, expires, FIRM_ID)
 
     channel = await asyncio.to_thread(_send_otp_code, phone, known_email, code)
     if not channel:
@@ -1436,23 +1466,29 @@ async def verify_otp(req: OTPVerifyBody, response: Response):
     async with _db_pool.acquire() as conn:
         # Clean expired entries
         await conn.execute("DELETE FROM otp_store WHERE expires_at < NOW()")
-        entry = await conn.fetchrow("SELECT * FROM otp_store WHERE phone=$1", phone)
+        # firm_id=$2 is defense-in-depth (Part 2, multi-tenancy hardening),
+        # not a functional change under Option B -- phone remains the
+        # actual PRIMARY KEY, so this can't yet change which row matches,
+        # only make the intent explicit for whenever a second firm exists.
+        entry = await conn.fetchrow("SELECT * FROM otp_store WHERE phone=$1 AND firm_id=$2", phone, FIRM_ID)
 
         if not entry:
             raise HTTPException(status_code=401, detail="No active code for this number. Request a new one.")
 
         new_attempts = entry["attempts"] + 1
         if new_attempts > MAX_OTP_ATTEMPTS:
-            await conn.execute("DELETE FROM otp_store WHERE phone=$1", phone)
+            await conn.execute("DELETE FROM otp_store WHERE phone=$1 AND firm_id=$2", phone, FIRM_ID)
             raise HTTPException(status_code=429, detail="Too many attempts. Request a new code.")
 
-        await conn.execute("UPDATE otp_store SET attempts=$1 WHERE phone=$2", new_attempts, phone)
+        await conn.execute(
+            "UPDATE otp_store SET attempts=$1 WHERE phone=$2 AND firm_id=$3", new_attempts, phone, FIRM_ID
+        )
 
         if not hmac.compare_digest(entry["code"], req.code.strip()):
             raise HTTPException(status_code=401, detail="Incorrect code.")
 
         # Success — look up existing user, or provision from a matching invite
-        await conn.execute("DELETE FROM otp_store WHERE phone=$1", phone)
+        await conn.execute("DELETE FROM otp_store WHERE phone=$1 AND firm_id=$2", phone, FIRM_ID)
         user = await conn.fetchrow(
             "SELECT * FROM users WHERE firm_id=$1 AND phone=$2 AND is_active=TRUE",
             FIRM_ID, phone
@@ -2281,11 +2317,11 @@ async def reassign_matter_spec(matter_id: str, req: ReassignRequest, request: Re
         # Record audit trail
         await conn.execute("""
             INSERT INTO matter_reassignments
-                (matter_id, from_lawyer_id, to_lawyer_id, reassigned_by_id, reason)
-            VALUES ($1, $2, $3, $4, $5)
+                (matter_id, from_lawyer_id, to_lawyer_id, reassigned_by_id, reason, firm_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
         """,
         matter_uuid, matter.get("assigned_lawyer_id"),
-        to_lawyer_uuid, user_id, req.reason
+        to_lawyer_uuid, user_id, req.reason, matter["firm_id"]
         )
 
         # Update matter
