@@ -2023,9 +2023,69 @@ select{cursor:pointer}
 <script>
 const API = '';  // relative — works on localhost and when hosted (frontend served by same app)
 
-// Wrap fetch to always include credentials (needed for Basic Auth)
+// ── Stale Cloudflare Access session detection ────────────────────────────────
+// On the real domain, Cloudflare Access sits in front of this entire app.
+// When its own session cookie expires mid-use (independent of this app's own
+// OTP login), it intercepts subsequent /api/ requests before they ever reach
+// this app -- either an HTML login/interstitial page in place of the expected
+// JSON (same-origin redirect, fetch() follows it and resolves normally), or
+// fetch() itself rejecting with a network-ish error (cross-origin redirect
+// blocked by CORS -- matches this app's own prior "Failed to fetch" reports
+// on the custom domain). Both look identical to plain data loss from inside
+// an ordinary `.then(r => r.json())` call site: an empty clients/matters/
+// search list, not an error. Caught once here, in the fetch wrapper every
+// call site already goes through, rather than requiring 100+ individual call
+// sites to each check for it.
+let _staleSessionShown = false;
+function _showStaleSessionNotice() {
+  if (_staleSessionShown) return;
+  _staleSessionShown = true;
+  const el = document.createElement('div');
+  el.id = 'stale-session-notice';
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(20,20,20,0.55);z-index:3000;display:flex;align-items:center;justify-content:center';
+  el.innerHTML = `
+    <div style="background:white;max-width:380px;width:90%;border-radius:10px;padding:2rem;box-shadow:0 10px 40px rgba(0,0,0,0.25);text-align:center">
+      <div style="font-size:2rem;margin-bottom:0.5rem">🔒</div>
+      <div style="font-weight:700;font-size:1.05rem;color:var(--ink);margin-bottom:0.5rem">Your session has expired</div>
+      <div style="font-size:0.85rem;color:var(--ink2);margin-bottom:1.25rem;line-height:1.5">Please refresh and log in again. Nothing has been lost — your clients, matters, and documents are all still there.</div>
+      <button class="btn btn-primary" style="width:100%" onclick="_forceFreshNavigation()">Refresh &amp; Log In</button>
+    </div>`;
+  document.body.appendChild(el);
+}
+
+// A plain location.reload() isn't reliable for recovering from this state:
+// if the network fetch for "/" hits the same redirect/CORS behavior, sw.js's
+// fetch handler (network-first, cache as fallback) can silently fall back to
+// its cached shell -- landing the user right back on this exact stale page
+// with no visible change, which is the specific "logout does nothing"
+// failure being fixed here. A cache-busting query param forces a real
+// network request for a URL the service worker has never cached, so its
+// fallback branch has nothing stale to serve even if that branch is hit.
+function _forceFreshNavigation() {
+  location.href = location.origin + location.pathname + '?_reauth=' + Date.now();
+}
+
+// Wrap fetch to always include credentials (needed for Basic Auth), and to
+// catch the stale-session failure mode above for every /api/ call.
 const _fetch = window.fetch.bind(window);
-window.fetch = (url, opts = {}) => _fetch(url, { credentials: 'include', ...opts });
+window.fetch = async (url, opts = {}) => {
+  const isApiCall = typeof url === 'string' && url.includes('/api/');
+  let response;
+  try {
+    response = await _fetch(url, { credentials: 'include', ...opts });
+  } catch (err) {
+    if (isApiCall) _showStaleSessionNotice();
+    throw err;
+  }
+  if (isApiCall) {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      _showStaleSessionNotice();
+      throw new Error('Stale session: received an HTML page instead of the expected API response (expired Cloudflare Access session).');
+    }
+  }
+  return response;
+};
 let matters = [];
 let pendingFiles = [];
 let selectedMatterId = null;
@@ -2233,8 +2293,18 @@ function showLoginStatus(msg, type) {
 }
 
 async function logout() {
-  await fetch(`${API}/api/auth/logout`, {method: 'POST'});
-  location.reload();
+  // Today's bug: an unguarded await here meant a stale-session network
+  // failure (see the fetch wrapper above) threw right here and aborted the
+  // function before location.reload() ever ran -- the button visibly did
+  // nothing. The backend call is best-effort: what actually matters for
+  // "log out" to work in a broken state is always reaching the forced
+  // navigation below, not this specific request succeeding.
+  try {
+    await fetch(`${API}/api/auth/logout`, {method: 'POST'});
+  } catch (err) {
+    // Swallowed deliberately -- see comment above.
+  }
+  _forceFreshNavigation();
 }
 
 
