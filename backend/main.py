@@ -955,9 +955,19 @@ async def run_migrations():
     print("[db] schema migrations complete")
 
 # ── Firm identity ─────────────────────────────────────────────────────────────
+# Multi-tenancy model: Option B (one deployment per firm) — full writeup in
+# README.md's "Multi-Tenancy" section. Short version: FIRM_ID below is a
+# fixed constant for the entire lifetime of this process, read once from
+# MUTEMO_FIRM_ID at startup. There is exactly one firm's data in this
+# deployment's Postgres/Chroma instance, ever. Many tables (and Chroma
+# chunk metadata) also carry a firm_id column that most queries scope by
+# — that's defense-in-depth / future-proofing, not evidence this instance
+# actually serves more than one firm. It doesn't. Don't remove those
+# columns/filters, but don't read their presence as "multi-tenancy is
+# live" either. Second firm = its own Railway service + its own FIRM_ID,
+# not a second row in this one.
 FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "")
 FIRM_CITY = os.environ.get("MUTEMO_FIRM_CITY", "Harare, Zimbabwe")
-# Fixed firm UUID for Nyari's deployment. Second firm gets its own Railway instance + its own FIRM_ID.
 FIRM_ID_STR = os.environ.get("MUTEMO_FIRM_ID", "a1b2c3d4-0000-0000-0000-000000000001")
 import uuid as _uuid_mod
 FIRM_ID = _uuid_mod.UUID(FIRM_ID_STR)

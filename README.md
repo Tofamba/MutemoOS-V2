@@ -504,7 +504,7 @@ As of v2.1, this reconciliation also runs automatically on every startup — com
 
 ## Multi-Tenancy
 
-MutemoOS v2 uses **instance-level multi-tenancy** — each client firm runs on its own Railway service with its own PostgreSQL database and persistent volume.
+MutemoOS v2 uses **instance-level multi-tenancy (Option B)** — each client firm runs on its own Railway service with its own PostgreSQL database, its own ChromaDB volume, and its own `FIRM_ID`. This is the live tenancy boundary. There is no shared database serving multiple firms, and no per-request firm resolution beyond the fixed `FIRM_ID` constant a process is started with — see its definition in `backend/main.py` (search `Multi-tenancy model`).
 
 To deploy a second firm:
 1. Create a new Railway service from the same repo
@@ -516,6 +516,19 @@ To deploy a second firm:
 The two instances share no data. Each has its own database, vector store, and subdomain.
 
 > `mutemo-legal-feed`'s `pusher.py` currently only supports pushing to a single firm via `MUTEMOS_FIRM_ID` — there is no existing multi-firm example there to reuse. Extending it to push to more than one firm instance is still a from-scratch task.
+
+### `firm_id` columns: defense-in-depth, not evidence of shared-schema multi-tenancy
+
+Several tables carry a `firm_id` column and most queries in `main.py` scope by it: `clients`, `matters`, `client_compliance`, `beneficial_owners`, `authorized_representatives`, `otp_store`, `matter_reassignments`, and (as of the same pass) ChromaDB's `firm_precedents` collection metadata. The last three were hardened in an August 2026 pass (see git history for `Multi-tenancy Part 1/2/3`); the rest predate it. **Read all of it as defense-in-depth and future-proofing, not as evidence that any deployment actually serves more than one firm.** It doesn't, and can't under Option B: `FIRM_ID` is a single fixed constant, read once from `MUTEMO_FIRM_ID` at process start, for the entire lifetime of that process. There is exactly one firm's data in any given deployment's Postgres and Chroma instance, ever.
+
+A query missing a `firm_id` filter is a real code-quality bug worth fixing, but it is not currently exploitable — there is no second firm's row for it to leak, because none exists in that database. `tests/test_two_firm_isolation.py` verifies the isolation mechanism itself by simulating two firms' data coexisting in the same test double (swapping `FIRM_ID` between two hypothetical firms against one fake connection/collection) — the only way to meaningfully exercise this under Option B, since no real deployment ever actually has two firms' data to test against.
+
+**What would justify migrating to Option A** (shared schema, self-service firm onboarding without a new Railway service + Postgres + Cloudflare Access setup per firm):
+- A real second paying firm needing onboarding faster than a multi-day deploy/DNS/Cloudflare Access cycle allows
+- Enough firms that N separate Railway services becomes an operational cost/maintenance burden rather than a safety property
+- A genuine multi-firm requirement Option B's per-firm-deployment model structurally can't serve (e.g. one shared trial/demo environment)
+
+None of these are true as of August 2026. Until one is, stay on Option B: it makes a whole class of cross-firm bugs structurally impossible rather than merely query-filtered away, and the operational cost of N deployments is low at the current firm count.
 
 ---
 
