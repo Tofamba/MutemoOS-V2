@@ -3667,6 +3667,28 @@ async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
             results[source] = entries
     return results
 
+# TEMPORARY — one-time backfill for Multi-tenancy hardening (Part 3): puts
+# firm_id into every pre-existing firm_precedents chunk's Chroma metadata
+# so _semantic_search_firm()'s new where={"firm_id": ...} filter doesn't
+# make already-indexed documents invisible. Same in-process reuse pattern
+# as /api/admin/backfill-chunk-hashes above and for the same reason:
+# `railway run` executes on the operator's machine, not inside the
+# container, so it can't reach the private DB host or the volume the
+# standalone script needs. Remove this endpoint once the one-time backfill
+# has been confirmed applied to production.
+@app.post("/api/admin/backfill-chroma-firm-id")
+async def admin_backfill_chroma_firm_id(request: Request):
+    require_admin_token(request)
+    from scripts.backfill_chroma_firm_id import build_plan, apply_plan
+
+    firm_col, _, _ = get_chroma_collections()
+
+    async with _db_pool.acquire() as conn:
+        plan = await build_plan(conn, lambda: firm_col, FIRM_ID)
+        summary = await apply_plan(plan, lambda: firm_col)
+
+    return summary
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
@@ -6503,6 +6525,16 @@ def index_chunks_in_chroma(chunks: list, collection_type: str = "firm"):
             # passed straight from a Postgres row on reconciliation repairs.
             "content_hash": c.get("content_hash") or "",
         } for c in chunks]
+        if collection_type == "firm":
+            # Multi-tenancy hardening (Part 3) -- firm_precedents is the one
+            # Chroma collection holding actual firm client/matter documents;
+            # legal_updates/zlr_index are shared corpora deliberately visible
+            # to every firm and stay unscoped. Backfilled onto pre-existing
+            # chunks by scripts/backfill_chroma_firm_id.py (this write path
+            # alone only covers chunks indexed from here on). Consumed by
+            # _semantic_search_firm()'s explicit where filter below.
+            for meta in metadatas:
+                meta["firm_id"] = str(FIRM_ID)
         # upsert, not add: add() raises/silently fails on an id that's
         # already present (e.g. reconciliation repairing a chunk whose
         # Chroma entry exists but has drifted) — upsert() correctly
@@ -8199,13 +8231,20 @@ def _semantic_search_firm(req, chunks: list) -> list:
         if firm_col.count() > 0:
             query_vec = embed_texts([req.query])[0]
             if hasattr(query_vec[0], "__len__"): query_vec = query_vec[0]
-            where = {}
+            # Multi-tenancy hardening (Part 3) -- defense-in-depth on top of
+            # the existing Postgres-side scoping (chunk_by_id.get(cid) below
+            # already drops results for another firm's chunk_id, since
+            # `chunks` is queried firm-scoped by the caller). Explicit here
+            # too so a cross-firm leak can't happen silently if that
+            # Postgres pre-filtering is ever weakened or bypassed.
+            # firm_id is always present; Chroma's where clause allows only
+            # one top-level operator, so a second condition (matter_id) must
+            # be combined via $and rather than added as a second dict key.
+            where = {"firm_id": str(FIRM_ID)}
             if req.matter_id:
-                where["matter_id"] = req.matter_id
+                where = {"$and": [where, {"matter_id": req.matter_id}]}
             n_fetch = max(req.limit * 4, 20)
-            query_kwargs = {"query_embeddings": [query_vec], "n_results": n_fetch}
-            if where:
-                query_kwargs["where"] = where
+            query_kwargs = {"query_embeddings": [query_vec], "n_results": n_fetch, "where": where}
             res = firm_col.query(**query_kwargs)
             ids = res["ids"][0] if res["ids"] else []
             distances = res["distances"][0] if res["distances"] else []
