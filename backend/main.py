@@ -40,6 +40,7 @@ from backend.numbering import (
 from backend.case_binder import provision_case_binder
 from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text
 from backend.conveyancing import CONVEYANCING_MILESTONES
+from backend.matter_stages import resolve_stage_sequence, stage_storage_field
 from backend.deadline_engine import try_compute_deadline
 from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
 from backend.authority_ranker import rerank
@@ -2691,6 +2692,13 @@ class MatterUpdate(BaseModel):
     conveyancing_transfer_date: Optional[str] = None                # ISO date string
     conveyancing_rates_clearance_expiry: Optional[str] = None       # ISO date string
     conveyancing_bond_registration_deadline: Optional[str] = None   # ISO date string
+    # Matter Progress Tracker (visual stepper) — generic current-stage
+    # field for matter_type values without a type-specific column
+    # (backend/matter_stages.py). Validated against that matter's
+    # resolved stage sequence in update_matter(), not against a fixed
+    # list here — which sequence applies depends on the matter's own
+    # matter_type/practice_area.
+    stage: Optional[str] = None
 
 class ClientCreate(BaseModel):
     full_name: str
@@ -3103,6 +3111,36 @@ def _row_to_matter(row) -> dict:
         d["fee_balance"] = (d.get("amount_billed") or 0.0) - (d.get("amount_received") or 0.0)
     else:
         d["fee_balance"] = None
+    # Matter Progress Tracker (visual stepper) — stage_info is None (not
+    # an empty tracker) when this matter_type/practice_area has no
+    # defined sequence, so the frontend falls back to the plain-text
+    # status chip cleanly. days_in_stage computed from the raw
+    # stage_updated_at before it gets stringified below — normalized to
+    # UTC-aware first since it's written as naive (datetime.utcnow(),
+    # matching last_activity's convention elsewhere) but may round-trip
+    # back from Postgres as either naive or tz-aware depending on
+    # asyncpg/driver behavior; assuming one or the other crashed this on
+    # the naive path (can't subtract offset-naive and offset-aware).
+    sequence = resolve_stage_sequence(d.get("matter_type"), d.get("practice_area"))
+    if sequence:
+        field = stage_storage_field(d.get("matter_type"), d.get("practice_area"))
+        current_stage = d.get(field)
+        days_in_stage = None
+        if d.get("stage_updated_at"):
+            stage_updated = d["stage_updated_at"]
+            if stage_updated.tzinfo is None:
+                stage_updated = stage_updated.replace(tzinfo=timezone.utc)
+            days_in_stage = (datetime.now(timezone.utc) - stage_updated).days
+        d["stage_info"] = {
+            "sequence": sequence,
+            "current_stage": current_stage,
+            "current_index": sequence.index(current_stage) if current_stage in sequence else None,
+            "days_in_stage": days_in_stage,
+        }
+    else:
+        d["stage_info"] = None
+    if d.get("stage_updated_at"):
+        d["stage_updated_at"] = d["stage_updated_at"].isoformat()
     return d
 
 def _row_to_client(row) -> dict:
@@ -4235,6 +4273,28 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             status_code=422,
             detail=f"conveyancing_milestone must be one of: {', '.join(CONVEYANCING_MILESTONES)}"
         )
+    if "stage" in fields:
+        # Which sequence applies depends on the matter's own matter_type/
+        # practice_area — read from this same PATCH if being set together,
+        # otherwise from the matter's existing stored values.
+        mt, pa = fields.get("matter_type"), fields.get("practice_area")
+        if mt is None or pa is None:
+            async with _db_pool.acquire() as conn:
+                existing = await conn.fetchrow(
+                    "SELECT matter_type, practice_area FROM matters WHERE id=$1 AND firm_id=$2",
+                    _uuid_mod.UUID(matter_id), FIRM_ID
+                )
+            if not existing:
+                raise HTTPException(status_code=404, detail="Matter not found")
+            mt = mt if mt is not None else existing["matter_type"]
+            pa = pa if pa is not None else existing["practice_area"]
+        sequence = resolve_stage_sequence(mt, pa)
+        if not sequence:
+            raise HTTPException(status_code=422, detail="This matter type has no defined stage sequence")
+        if fields["stage"] not in sequence:
+            raise HTTPException(status_code=422, detail=f"stage must be one of: {', '.join(sequence)}")
+    if "stage" in fields or "conveyancing_milestone" in fields:
+        fields["stage_updated_at"] = datetime.utcnow()
     conveyancing_date_fields = (
         "conveyancing_transfer_date", "conveyancing_rates_clearance_expiry",
         "conveyancing_bond_registration_deadline",

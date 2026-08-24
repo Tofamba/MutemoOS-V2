@@ -234,6 +234,18 @@ select{cursor:pointer}
 .matter-section:last-child{border-bottom:none}
 .matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
 
+/* ── Matter Progress Tracker (visual stepper) ── */
+.stage-tracker{display:flex;align-items:flex-start;overflow-x:auto;padding:4px 2px 6px}
+.stage-node{flex:1;min-width:88px;display:flex;flex-direction:column;align-items:center;position:relative;text-align:center}
+.stage-node:not(:first-child)::before{content:'';position:absolute;top:13px;left:-50%;width:100%;height:2px;background:var(--border);z-index:0}
+.stage-node.completed:not(:first-child)::before{background:var(--green2)}
+.stage-dot{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:var(--white);border:2px solid var(--border);color:var(--ink3);z-index:1;flex-shrink:0}
+.stage-node.completed .stage-dot{background:var(--green2);border-color:var(--green2);color:white}
+.stage-node.current .stage-dot{background:var(--gold2);border-color:var(--gold2);color:var(--green);box-shadow:0 0 0 4px rgba(184,146,42,0.22)}
+.stage-label{font-size:0.62rem;color:var(--ink3);margin-top:6px;line-height:1.25;max-width:90px}
+.stage-node.current .stage-label{color:var(--ink);font-weight:700}
+.stage-node.completed .stage-label{color:var(--ink2)}
+
 /* ── Doc item ── */
 .doc-item{display:flex;align-items:center;gap:10px;padding:0.6rem 0.75rem;border-radius:8px;background:var(--white);border:1px solid var(--border);margin-bottom:6px;transition:border-color .15s}
 .doc-item:hover{border-color:var(--green)}
@@ -3603,6 +3615,56 @@ const CONVEYANCING_MILESTONES = [
   'Deeds Registered', 'Transfer Complete',
 ];
 
+// ── Matter Progress Tracker (visual stepper) ─────────────────────────────────
+// Stage sequence + current position + days-in-stage all come from the
+// matter object itself (matter.stage_info, computed server-side by
+// backend/matter_stages.py + _row_to_matter()) — nothing to duplicate
+// here. The only client-side logic needed is which field to PATCH when
+// advancing, mirroring backend/matter_stages.py's stage_storage_field():
+// conveyancing keeps using the existing conveyancing_milestone column;
+// every other matter_type with a defined sequence uses the generic
+// `stage` column.
+function stageStorageField(matter) {
+  return (matter.matter_type === 'conveyancing' || matter.practice_area === 'Conveyancing/Property')
+    ? 'conveyancing_milestone' : 'stage';
+}
+
+function matterStageTrackerHtml(matter) {
+  const info = matter.stage_info;
+  if (!info) return ''; // no defined sequence for this matter_type — fall back to the plain-text status chip only
+  const { sequence, current_stage, current_index, days_in_stage } = info;
+
+  const nodesHtml = sequence.map((stage, i) => {
+    const completed = current_index !== null && i < current_index;
+    const current = current_index !== null && i === current_index;
+    const cls = current ? 'current' : (completed ? 'completed' : '');
+    return `
+      <div class="stage-node ${cls}">
+        <div class="stage-dot">${completed ? '✓' : (i + 1)}</div>
+        <div class="stage-label">${escHtml(stage)}</div>
+      </div>`;
+  }).join('');
+
+  const nextStage = current_index === null ? sequence[0]
+    : (current_index < sequence.length - 1 ? sequence[current_index + 1] : null);
+  const field = stageStorageField(matter);
+  const daysLabel = current_stage
+    ? (days_in_stage != null ? `${days_in_stage} day${days_in_stage !== 1 ? 's' : ''} in this stage` : '')
+    : 'Not started yet';
+
+  return `
+    <div class="matter-section" style="background:var(--white)">
+      <div class="matter-section-title">📶 Progress Tracker</div>
+      <div class="stage-tracker">${nodesHtml}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;flex-wrap:wrap;gap:8px">
+        <span style="font-size:0.72rem;color:var(--ink3)">${escHtml(daysLabel)}</span>
+        ${nextStage ? `<button class="btn btn-gold btn-sm" style="width:auto"
+            onclick="updateMatterFieldAndRefresh('${matter.id}','${field}','${nextStage.replace(/'/g, "\\'")}')">
+            Move to: ${escHtml(nextStage)} →</button>` : ''}
+      </div>
+    </div>`;
+}
+
 function populatePracticeAreaSelects() {
   ['new-matter-practice-area', 'nm-practice-area'].forEach(id => {
     const select = document.getElementById(id);
@@ -3753,6 +3815,8 @@ async function renderMatterPanel(id) {
     const status = matter.status || 'Active';
     const notes = matter.progress_notes || [];
     const html = `
+      ${matterStageTrackerHtml(matter)}
+
       <!-- Matter metadata controls -->
       <div class="matter-section" style="background:var(--white)">
         <div class="matter-section-title">📋 Matter Details</div>
@@ -3819,16 +3883,9 @@ async function renderMatterPanel(id) {
       <!-- Conveyancing — only shown for practice_area = 'Conveyancing/Property' -->
       <div class="matter-section" style="background:var(--white)">
         <div class="matter-section-title">🏠 Conveyancing</div>
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px">
-          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:70px">MILESTONE</label>
-          <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
-                  onchange="updateMatterFieldAndRefresh('${id}','conveyancing_milestone',this.value)">
-            <option value="">— Select —</option>
-            ${CONVEYANCING_MILESTONES.map(s =>
-              `<option value="${s}" ${s === matter.conveyancing_milestone ? 'selected' : ''}>${s}</option>`
-            ).join('')}
-          </select>
-        </div>
+        <!-- Milestone is now set via the Progress Tracker stepper at the
+             top of this panel (matterStageTrackerHtml) rather than a
+             separate dropdown here — one control for one field. -->
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:100px">PROPERTY ADDRESS</label>
