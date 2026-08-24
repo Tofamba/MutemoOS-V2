@@ -331,6 +331,17 @@ async def run_migrations():
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_rates_clearance_expiry DATE;
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS conveyancing_bond_registration_deadline DATE;
 
+        -- Matter Progress Tracker (visual stepper) -- generic current-stage
+        -- column for matter_type values whose stage sequence isn't backed
+        -- by an existing type-specific column. Conveyancing keeps using
+        -- conveyancing_milestone above (see backend/matter_stages.py).
+        -- stage_updated_at is shared across both storage fields -- set
+        -- whenever either `stage` or `conveyancing_milestone` changes --
+        -- so "days in this stage" is computed the same way regardless of
+        -- which column actually holds the value.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS stage TEXT;
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS stage_updated_at TIMESTAMPTZ;
+
         CREATE TABLE IF NOT EXISTS progress_notes (
             id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             matter_id   UUID NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
