@@ -32,6 +32,17 @@ from backend.main import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fake_firm_identity(monkeypatch):
+    # _run_document_search_job() now resolves firm name/city live via
+    # get_firm_identity() (backend/main.py) rather than the frozen
+    # FIRM_NAME/FIRM_CITY constants -- not what these tests exercise.
+    import backend.main as m
+    async def _fake():
+        return {"name": "Sawyer & Mkushi", "city": "Harare"}
+    monkeypatch.setattr(m, "get_firm_identity", _fake)
+
+
 # ── _combine_attached_documents (pure) ───────────────────────────────────
 
 def test_combine_single_document_is_unlabeled_passthrough():
@@ -127,7 +138,8 @@ def _fake_pipeline(monkeypatch, m, captured):
     monkeypatch.setattr(m, "_semantic_search_firm", lambda req, chunks: [])
     monkeypatch.setattr(m, "_semantic_search_legal", lambda req, chunks: [])
 
-    def fake_synthesise(query, results, legal_results, zlr_results, attached_doc_text=None, attached_doc_name=None):
+    def fake_synthesise(query, results, legal_results, zlr_results, attached_doc_text=None, attached_doc_name=None,
+                         deadline_info=None, research_map=None, firm_name=None, firm_city=None):
         captured["attached_doc_text"] = attached_doc_text
         captured["attached_doc_name"] = attached_doc_name
         return "ANSWER"

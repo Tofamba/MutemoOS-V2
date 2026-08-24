@@ -38,6 +38,17 @@ from backend.main import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fake_firm_identity(monkeypatch):
+    # _run_plain_search_job() now resolves firm name/city live via
+    # get_firm_identity() (backend/main.py) rather than the frozen
+    # FIRM_NAME/FIRM_CITY constants -- not what these tests exercise.
+    import backend.main as m
+    async def _fake():
+        return {"name": "Sawyer & Mkushi", "city": "Harare"}
+    monkeypatch.setattr(m, "get_firm_identity", _fake)
+
+
 def _empty_chunk_pool(monkeypatch, m):
     class FakeConn:
         async def fetch(self, query, *args):
@@ -111,7 +122,8 @@ def _fake_full_pipeline(monkeypatch, m, captured):
         "max_similarity_score": 0.85, "source_tier_breakdown": {"authority": 1, "context": 0},
     })
 
-    def fake_synthesise(query, results, legal_results, zlr_results, deadline_info=None, research_map=None):
+    def fake_synthesise(query, results, legal_results, zlr_results, deadline_info=None, research_map=None,
+                         firm_name=None, firm_city=None):
         captured["query"] = query
         captured["results"] = results
         return "SYNTHESISED ANSWER"

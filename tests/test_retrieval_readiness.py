@@ -234,6 +234,9 @@ def test_generate_affidavit_is_not_gated(monkeypatch):
         content = [type("C", (), {"text": "AFFIDAVIT TEXT"})()]
 
     monkeypatch.setattr(m.client.messages, "create", lambda **k: _FakeMsg())
+    async def _fake_firm_identity():
+        return {"name": "Sawyer & Mkushi", "city": "Harare"}
+    monkeypatch.setattr(m, "get_firm_identity", _fake_firm_identity)
 
     req = AffidavitRequest(matter_summary="A dispute over unpaid rent.")
     result = asyncio.run(generate_affidavit(req, None))

@@ -22,7 +22,21 @@ import json
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from backend.main import _normalize_for_match, _verify_quote_in_text, review_contract
+
+
+@pytest.fixture(autouse=True)
+def _fake_firm_identity(monkeypatch):
+    # review_contract() now resolves the firm name/city live via
+    # get_firm_identity() (backend/main.py) instead of the frozen
+    # FIRM_NAME/FIRM_CITY constants -- these tests aren't exercising that
+    # lookup, so stub it rather than wiring up a fake `firms` row per test.
+    import backend.main as m
+    async def _fake():
+        return {"name": "Sawyer & Mkushi", "city": "Harare"}
+    monkeypatch.setattr(m, "get_firm_identity", _fake)
 
 
 # ── _verify_quote_in_text ────────────────────────────────────────────────────

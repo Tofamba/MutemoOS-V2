@@ -932,6 +932,27 @@ FIRM_ID_STR = os.environ.get("MUTEMO_FIRM_ID", "a1b2c3d4-0000-0000-0000-00000000
 import uuid as _uuid_mod
 FIRM_ID = _uuid_mod.UUID(FIRM_ID_STR)
 
+async def get_firm_identity() -> dict:
+    """
+    Live DB lookup for this deployment's firm name/city — NOT the
+    FIRM_NAME/FIRM_CITY env-derived constants above, which are frozen at
+    process start. PATCH /api/settings can rename the firm (firms.name/
+    city) without a restart; a prompt built from the stale constant would
+    keep drafting documents under the old name until the next deploy.
+    Used specifically for AI system prompts (contract review, legal
+    research, affidavit, document drafting) where that staleness would
+    land directly in generated legal documents — everywhere else in this
+    file still reads the plain constants, unchanged.
+
+    Falls back to the constants only if the firms row is somehow missing
+    a name (defensive; run_migrations() always seeds one).
+    """
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT name, city FROM firms WHERE id=$1", FIRM_ID)
+    name = (row["name"] if row else None) or FIRM_NAME
+    city = (row["city"] if row else None) or FIRM_CITY
+    return {"name": name, "city": city}
+
 # ── RBAC helpers ──────────────────────────────────────────────────────────────
 ROLE_WEIGHTS = {"admin": 4, "partner": 3, "associate": 2, "secretary": 1}
 
@@ -7359,9 +7380,11 @@ async def _run_plain_search_job(job_id: str, req: SearchRequest, user: dict):
 
         synthesis_context = format_context(results[:5], legal_results[:3], zlr_results[:3])
 
+        firm = await get_firm_identity()
         answer = await asyncio.to_thread(
             synthesise_answer_sync, req.query, results[:5], legal_results[:3], zlr_results[:3],
-            deadline_info=deadline_info, research_map=research_map
+            deadline_info=deadline_info, research_map=research_map,
+            firm_name=firm["name"], firm_city=firm["city"],
         )
 
         answer, qc_log = verify_citations(answer, synthesis_context)
@@ -7652,8 +7675,10 @@ async def _run_document_search_job(
         # silently omitted so the lifecycle trace is honest about what ran.
         print(f"[search_job:{job_id}] RESEARCH_AGENT_SKIPPED")
 
+        firm = await get_firm_identity()
         answer = await asyncio.to_thread(
-            synthesise_answer_sync, query, results[:5], legal_results[:3], zlr_results[:3], doc_text, filename
+            synthesise_answer_sync, query, results[:5], legal_results[:3], zlr_results[:3], doc_text, filename,
+            firm_name=firm["name"], firm_city=firm["city"],
         )
         print(f"[search_job:{job_id}] SYNTHESIS_COMPLETE")
 
@@ -7799,7 +7824,7 @@ async def get_search_job_status(job_id: str, request: Request):
 # negative isn't the same kind of check. Those are flagged separately as
 # unverified-by-quote rather than silently treated the same as a verified one.
 
-CONTRACT_REVIEW_SYSTEM = """You are a contract review assistant for {FIRM_NAME}, Harare, reviewing
+CONTRACT_REVIEW_SYSTEM = """You are a contract review assistant for {FIRM_NAME}, {FIRM_CITY}, reviewing
 documents under Zimbabwean law. Analyse the contract and identify genuine
 issues only — do not manufacture findings to pad out the list. Use the
 submit_contract_review tool to report your findings.
@@ -7946,6 +7971,7 @@ async def review_contract(
     """
     user = await get_current_user(request)
     _check_permission(user, "draft:document")
+    firm = await get_firm_identity()
 
     content = await file.read()
     filename = file.filename or "contract"
@@ -8015,7 +8041,7 @@ Review this contract now and call submit_contract_review with your findings."""
             # pattern already used for the search/grounding endpoint
             # elsewhere in this file.
             max_tokens=min(6000 + len(review_text) // 5, 16000) if review_text else 4096,
-            system=CONTRACT_REVIEW_SYSTEM.format(FIRM_NAME=FIRM_NAME),
+            system=CONTRACT_REVIEW_SYSTEM.format(FIRM_NAME=firm["name"], FIRM_CITY=firm["city"]),
             tools=[CONTRACT_REVIEW_TOOL],
             tool_choice={"type": "tool", "name": "submit_contract_review"},
             messages=[{"role": "user", "content": prompt}]
@@ -8247,7 +8273,15 @@ def synthesise_answer_sync(query: str, results: list, legal_results: list, zlr_r
                             attached_doc_text: Optional[str] = None,
                             attached_doc_name: Optional[str] = None,
                             deadline_info: Optional[dict] = None,
-                            research_map: Optional[dict] = None) -> str:
+                            research_map: Optional[dict] = None,
+                            firm_name: Optional[str] = None,
+                            firm_city: Optional[str] = None) -> str:
+    # Sync function (runs via asyncio.to_thread from the async job runners
+    # below) — can't await a DB call itself, so callers resolve
+    # get_firm_identity() beforehand and pass the live values in. Falls
+    # back to the frozen constants only if a caller doesn't pass them.
+    firm_name = firm_name or FIRM_NAME
+    firm_city = firm_city or FIRM_CITY
     if not results and not legal_results and not zlr_results and not attached_doc_text:
         return None
     context = format_context(results, legal_results, zlr_results)
@@ -8317,7 +8351,7 @@ RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT
             # rather than one branch guessing a fixed number.
             max_tokens=min(8000 + len(attached_doc_text) // 5, 24000) if attached_doc_text
                        else min(8000 + len(context) // 5, 24000),
-            messages=[{"role": "user", "content": f"""You are a legal research assistant for {FIRM_NAME}, Harare.
+            messages=[{"role": "user", "content": f"""You are a legal research assistant for {firm_name}, {firm_city}.
 Today's date: {datetime.utcnow().strftime('%Y-%m-%d')}
 
 Query: {query}
@@ -8357,7 +8391,7 @@ Professional, direct{
 
 # ── Affidavit Generator ───────────────────────────────────────────────────────
 
-AFFIDAVIT_SYSTEM = """You are a legal drafting assistant for {FIRM_NAME}, Harare.
+AFFIDAVIT_SYSTEM = """You are a legal drafting assistant for {FIRM_NAME}, {FIRM_CITY}.
 Draft affidavits in proper Zimbabwe High Court form per SI 202/2021.
 - Full court caption with case number, party names and designations
 - Opening: deponent full name, ID, capacity, competency declaration
@@ -8366,7 +8400,7 @@ Draft affidavits in proper Zimbabwe High Court form per SI 202/2021.
 - Commissioner of oaths block at end
 - Use [_____] for unknown specifics"""
 
-DOCUMENT_SYSTEM_BASE = """You are a legal drafting assistant for {FIRM_NAME}, Harare, drafting for the
+DOCUMENT_SYSTEM_BASE = """You are a legal drafting assistant for {FIRM_NAME}, {FIRM_CITY}, drafting for the
 Zimbabwean legal system. Produce a complete, properly formatted document —
 not a template or outline. Use [_____] for any specific detail (dates,
 amounts, ID numbers) not supplied. Number paragraphs/clauses where that is
@@ -8601,6 +8635,7 @@ choose the most standard Zimbabwean legal form that fits the stated purpose.""",
 async def generate_affidavit(req: AffidavitRequest, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "draft:affidavit")
+    firm = await get_firm_identity()
     precedent_block = ""
     if req.precedent_context:
         fname = req.precedent_context.get("filename", "precedent")
@@ -8626,7 +8661,7 @@ Draft the complete affidavit in proper Zimbabwe High Court form. Number all para
         msg = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=4096,
-            system=AFFIDAVIT_SYSTEM.format(FIRM_NAME=FIRM_NAME),
+            system=AFFIDAVIT_SYSTEM.format(FIRM_NAME=firm["name"], FIRM_CITY=firm["city"]),
             messages=[{"role": "user", "content": prompt}]
         )
         return {"affidavit": msg.content[0].text}
@@ -8823,7 +8858,7 @@ LITIGATION_DOC_TYPES = {
     "urgent_chamber", "notice_of_appeal", "review", "heads_of_argument",
 }
 
-def _call_document_generation_model(prompt: str, max_tokens: int):
+def _call_document_generation_model(prompt: str, max_tokens: int, firm_name: str, firm_city: str):
     """
     Synchronous Anthropic call factored out so it can run via
     asyncio.to_thread() from inside the background job below — calling
@@ -8831,11 +8866,15 @@ def _call_document_generation_model(prompt: str, max_tokens: int):
     for the whole generation, stalling every other concurrent request
     (including other jobs' status polls) for however long this document
     takes, defeating the point of moving this to a background job.
+
+    firm_name/firm_city are resolved by the async caller (get_firm_identity())
+    before this runs, not read from the frozen FIRM_NAME/FIRM_CITY
+    constants here — this function can't await a DB call itself.
     """
     return client.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=max_tokens,
-        system=DOCUMENT_SYSTEM_BASE.format(FIRM_NAME=FIRM_NAME),
+        system=DOCUMENT_SYSTEM_BASE.format(FIRM_NAME=firm_name, FIRM_CITY=firm_city),
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -8998,7 +9037,8 @@ Draft the complete document now."""
             6000 + len(req.facts + (req.instructions or '') + precedent_block + retrieved_block) // 5,
             20000,
         )
-        msg = await asyncio.to_thread(_call_document_generation_model, prompt, max_tokens)
+        firm = await get_firm_identity()
+        msg = await asyncio.to_thread(_call_document_generation_model, prompt, max_tokens, firm["name"], firm["city"])
         print(f"[generate_job:{job_id}] SYNTHESIS_COMPLETE")
 
         document_text = msg.content[0].text
