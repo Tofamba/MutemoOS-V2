@@ -7354,17 +7354,34 @@ def parse_zlr_headnote(text: str) -> dict:
         "summary": None, "zimlii_url": None,
     }
     # Old-style printed-report citation ("YYYY (N) ZLR NNN") -- this is
-    # the judgment's OWN citation only if it appears in the header; the
-    # same pattern also matches whenever the judgment quotes a precedent
-    # case elsewhere in its reasoning (e.g. "...as held in PTC v Mahachi
-    # 1999 (1) ZLR 176 (H)..."), which a full-body scan can't distinguish
-    # from the judgment's own citation. Restricted to the header zone
-    # (matching how case_name below only looks at lines[:5]) and captures
-    # only the matched span, not the whole line -- previously stored the
-    # entire line, which produced full sentence fragments as "citation"
-    # whenever the header itself ran past word-wrap onto one long line.
+    # the judgment's OWN citation only if it appears as a standalone
+    # header/caption line; the same pattern also matches whenever the
+    # judgment quotes a precedent case elsewhere in its reasoning (e.g.
+    # "...as held in PTC v Mahachi 1999 (1) ZLR 176 (H)..."), which a
+    # full-body scan can't distinguish from the judgment's own citation.
+    #
+    # A line-POSITION cutoff (e.g. "only the first N lines") was tried and
+    # confirmed too fragile live: real headers land at wildly different
+    # line offsets depending on source formatting (docx vs. pdf, cover
+    # pages, coram blocks of varying length), so a tight cutoff missed
+    # many genuine citations entirely while a loose one let body-quoted
+    # precedents back in.
+    #
+    # A line-LENGTH filter is far more reliable: every confirmed false
+    # positive found in the live corpus was a full sentence quoting a
+    # precedent (consistently 80-150+ chars — "as held in X v Y ..." or
+    # similar framing), while a genuine header/caption line is just the
+    # citation itself, maybe with a short case-name prefix, essentially
+    # never running past ~70 chars. Scans the whole document (no position
+    # limit) but skips any line long enough to be body prose rather than
+    # a caption -- and still captures only the matched span, not the
+    # whole line, so even a same-length false positive can't produce a
+    # multi-sentence "citation" the way the original bug did.
+    CAPTION_LINE_MAX_CHARS = 70
     citation_pattern = re.compile(r'\d{4}\s*\(\d+\)\s*ZLR\s*\d+')
-    for line in lines[:10]:
+    for line in lines:
+        if len(line) > CAPTION_LINE_MAX_CHARS:
+            continue
         m = citation_pattern.search(line)
         if m:
             result["citation"] = m.group(0).strip()
@@ -7373,9 +7390,12 @@ def parse_zlr_headnote(text: str) -> dict:
     # during a citation backfill: a full-body scan can lock onto a
     # different, cross-referenced/related matter's judgment number quoted
     # within the reasoning (e.g. a consolidated or appeal-linked case)
-    # instead of this judgment's own. Restricted to the same header zone.
+    # instead of this judgment's own. Same caption-line-length heuristic
+    # applied here for the same reason a position cutoff proved fragile.
     judgment_number_pattern = re.compile(r'(?:Judgment No\.?\s*)?((?:HH|SC|CCZ|LC|HB|HM|HMT)[-\s]?\d+[-/]\d+)', re.IGNORECASE)
-    for line in lines[:10]:
+    for line in lines:
+        if len(line) > CAPTION_LINE_MAX_CHARS:
+            continue
         m = judgment_number_pattern.search(line)
         if m:
             result["judgment_number"] = m.group(1).strip()
