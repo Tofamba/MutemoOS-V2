@@ -3978,6 +3978,25 @@ async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = "")
                             hh608_found_rank = rank
                             break
 
+            # Separate from the top-20 timing runs above: is HH 608-26
+            # findable ANYWHERE in the full corpus at this ef, or does
+            # raising ef genuinely not help because its raw similarity
+            # score just isn't competitive against this query, however
+            # far the search explores? A null top-20 rank alone can't
+            # tell those two apart.
+            full_rank = None
+            full_similarity = None
+            if target_id:
+                full_res = temp_col.query(query_embeddings=[hh608_vec], n_results=n)
+                full_ids = full_res["ids"][0] if full_res["ids"] else []
+                full_metas = full_res["metadatas"][0] if full_res.get("metadatas") else []
+                full_dists = full_res["distances"][0] if full_res.get("distances") else []
+                for rank, (rid, meta, dist) in enumerate(zip(full_ids, full_metas, full_dists)):
+                    if meta and str(meta.get("document_id")) == target_id:
+                        full_rank = rank
+                        full_similarity = round(max(0.0, 1.0 - dist), 4)
+                        break
+
             latencies_ms.sort()
             results_by_ef[str(ef)] = {
                 "avg_ms": round(sum(latencies_ms) / len(latencies_ms), 2),
@@ -3985,7 +4004,10 @@ async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = "")
                 "p95_ms": round(latencies_ms[int(len(latencies_ms) * 0.95)], 2),
                 "min_ms": round(latencies_ms[0], 2),
                 "max_ms": round(latencies_ms[-1], 2),
-                "hh608_found_rank": hh608_found_rank,
+                "hh608_found_rank_top20": hh608_found_rank,
+                "hh608_rank_full_corpus": full_rank,
+                "hh608_similarity_full_corpus": full_similarity,
+                "full_corpus_result_count": len(full_ids) if target_id else None,
             }
         finally:
             _chroma_client.delete_collection(temp_name)
