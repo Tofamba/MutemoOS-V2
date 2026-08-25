@@ -3764,6 +3764,120 @@ async def admin_zlr_item_status(request: Request, zimlii_url: str = "", citation
         "chroma_zlr_matches_by_document_id": chroma_matches,
     }
 
+# TEMPORARY — traces exactly what /api/zlr/search's own code path
+# (_zlr_semantic_search) returns for a given query, before the item-level
+# limit cutoff, so "is HH 608-26 actually retrievable" can be answered
+# from real ranked output instead of theory. Runs the identical retrieval
+# _zlr_semantic_search() itself does (same Postgres chunk fetch, same
+# Chroma query call) rather than a separate/simplified version, and
+# reports both a small limit (matching production defaults) and a large
+# one (effectively unbounded) so a low-limit exclusion vs. a genuine
+# absence from Chroma results can be told apart. Remove once no longer
+# needed.
+@app.get("/api/admin/debug-zlr-search")
+async def admin_debug_zlr_search(request: Request, query: str, target_zimlii_url: str = ""):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        chunk_rows = await conn.fetch(
+            "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='zlr'", FIRM_ID
+        )
+        target_entry = None
+        if target_zimlii_url:
+            target_row = await conn.fetchrow(
+                "SELECT id, citation, case_name FROM zlr_entries WHERE firm_id=$1 AND zimlii_url=$2",
+                FIRM_ID, target_zimlii_url
+            )
+            if target_row:
+                target_entry = dict(target_row)
+                target_entry["id"] = str(target_entry["id"])
+    zlr_chunks = [dict(r) for r in chunk_rows]
+
+    _, _, zlr_col = get_chroma_collections()
+    raw_candidates = []
+    raw_error = None
+    try:
+        if zlr_col.count() > 0:
+            query_vec = embed_texts([query])[0]
+            if hasattr(query_vec[0], "__len__"):
+                query_vec = query_vec[0]
+            # Effectively unbounded n_results -- the full raw candidate set
+            # Chroma's own vector search returns for this query, before any
+            # item-level dedup/limit is applied, so a "ranked outside the
+            # normal top N" case is visible instead of hidden by the cutoff.
+            res = zlr_col.query(query_embeddings=[query_vec], n_results=zlr_col.count())
+            ids = res["ids"][0] if res["ids"] else []
+            distances = res["distances"][0] if res["distances"] else []
+            chunk_by_id = {c["id"]: c for c in zlr_chunks}
+            for rank, (cid, dist) in enumerate(zip(ids, distances)):
+                chunk = chunk_by_id.get(cid)
+                raw_candidates.append({
+                    "rank": rank,
+                    "chroma_chunk_id": cid,
+                    "similarity": round(max(0.0, 1.0 - dist), 4),
+                    "found_in_postgres_chunk_by_id": chunk is not None,
+                    "document_id": chunk["document_id"] if chunk else None,
+                    "citation": chunk.get("citation") if chunk else None,
+                    "case_name": chunk.get("case_name") if chunk else None,
+                })
+    except Exception as e:
+        raw_error = str(e)
+
+    target_rank = None
+    target_ranks = []
+    if target_entry:
+        for c in raw_candidates:
+            if c["document_id"] == target_entry["id"]:
+                target_ranks.append(c["rank"])
+        target_rank = min(target_ranks) if target_ranks else None
+
+    # What the real function actually returns, at production's real
+    # per-call limit (3, per the /api/search and /api/search/document
+    # call sites) and item-level dedup applied -- the literal output
+    # that feeds synthesis today.
+    real_results_limit3 = _zlr_semantic_search(zlr_chunks, query, None, 3)
+
+    return {
+        "query": query,
+        "total_zlr_chunks_in_postgres": len(zlr_chunks),
+        "chroma_zlr_collection_count": zlr_col.count(),
+        "chroma_query_error": raw_error,
+        "target_zimlii_url": target_zimlii_url or None,
+        "target_entry": target_entry,
+        "target_item_best_rank_in_raw_chroma_results": target_rank,
+        "target_item_all_chunk_ranks": target_ranks,
+        "top_20_raw_candidates": raw_candidates[:20],
+        "real_zlr_semantic_search_output_at_limit_3": real_results_limit3,
+    }
+
+# TEMPORARY — direct read of the firms table for this deployment, to
+# settle definitively whether get_firm_identity() (which always reads
+# FIRM_ID's row) is resolving to the wrong name/city, vs. some other
+# explanation for a wrongly-branded research memo. Per Option B
+# multi-tenancy (see FIRM_ID's own comment block above), this deployment
+# should have exactly one firms row -- reports the full table, not just
+# FIRM_ID's row, so an unexpected second row would be visible too, even
+# though nothing in this codebase's request-handling logic ever looks up
+# a firm by anything other than the fixed FIRM_ID constant. Remove once
+# no longer needed.
+@app.get("/api/admin/debug-firm-identity")
+async def admin_debug_firm_identity(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        all_firms = await conn.fetch("SELECT id, name, short_name, city, country FROM firms")
+        this_firm = await conn.fetchrow(
+            "SELECT id, name, short_name, city, country FROM firms WHERE id=$1", FIRM_ID
+        )
+    resolved = await get_firm_identity()
+    return {
+        "env_MUTEMO_FIRM_ID": FIRM_ID_STR,
+        "env_MUTEMO_FIRM_NAME": FIRM_NAME,
+        "env_MUTEMO_FIRM_CITY": FIRM_CITY,
+        "firm_id_constant": str(FIRM_ID),
+        "all_firms_rows": [dict(r) | {"id": str(r["id"])} for r in all_firms],
+        "row_for_this_firm_id": (dict(this_firm) | {"id": str(this_firm["id"])}) if this_firm else None,
+        "get_firm_identity_resolved": resolved,
+    }
+
 # TEMPORARY — broad search across zlr_entries (not scoped to one exact
 # citation/URL) to check whether a name match found via real search
 # corresponds to something already in the corpus before today's JSC push,
