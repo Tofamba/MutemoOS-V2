@@ -3677,6 +3677,87 @@ async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
             results[source] = entries
     return results
 
+# TEMPORARY — diagnostic for investigating why a specific pushed ZLR/
+# judgment item does or doesn't show up in search. Checks all three
+# stages independently rather than inferring from one: does the
+# zlr_entries row exist and what state is it in (chunk_count, whether
+# raw_text ever got populated — the give-away for whether
+# _process_zlr_background() ran to completion or died partway through),
+# do matching rows exist in the `chunks` Postgres table, and — the part
+# that actually answers "is this searchable" — does Chroma's own zlr
+# collection have a chunk with matching citation metadata, queried
+# directly against Chroma rather than inferred from Postgres alone.
+# Remove once no longer needed.
+@app.get("/api/admin/zlr-item-status")
+async def admin_zlr_item_status(request: Request, zimlii_url: str = "", citation: str = ""):
+    require_admin_token(request)
+    if not zimlii_url and not citation:
+        raise HTTPException(status_code=400, detail="Provide zimlii_url or citation")
+
+    async with _db_pool.acquire() as conn:
+        if zimlii_url:
+            entry_row = await conn.fetchrow(
+                "SELECT * FROM zlr_entries WHERE firm_id=$1 AND zimlii_url=$2",
+                FIRM_ID, zimlii_url
+            )
+        else:
+            entry_row = await conn.fetchrow(
+                "SELECT * FROM zlr_entries WHERE firm_id=$1 AND citation=$2",
+                FIRM_ID, citation
+            )
+
+        entry = None
+        pg_chunks = []
+        if entry_row:
+            entry = dict(entry_row)
+            entry["id"] = str(entry["id"])
+            entry["firm_id"] = str(entry["firm_id"])
+            if entry.get("uploaded_at"):
+                entry["uploaded_at"] = entry["uploaded_at"].isoformat()
+            # raw_text can be large -- report length, not the full text
+            entry["raw_text_length"] = len(entry.get("raw_text") or "")
+            entry.pop("raw_text", None)
+
+            chunk_rows = await conn.fetch(
+                "SELECT id, chunk_index, citation, case_name, LEFT(text, 120) AS text_preview "
+                "FROM chunks WHERE firm_id=$1 AND chunk_source='zlr' AND zlr_item_id=$2",
+                FIRM_ID, entry["id"]
+            )
+            pg_chunks = [dict(r) for r in chunk_rows]
+
+    # Query Chroma's zlr collection directly, by metadata -- not inferred
+    # from Postgres, and not requiring the chunk ids found above (so this
+    # still finds something even if the Postgres `chunks` insert itself
+    # is what failed, isolating that from a Chroma-indexing failure).
+    _, _, zlr_col = get_chroma_collections()
+    chroma_matches = []
+    search_citation = citation or (entry.get("citation") if entry else None)
+    if search_citation:
+        try:
+            chroma_result = zlr_col.get(
+                where={"citation": search_citation}, include=["metadatas", "documents"]
+            )
+            for cid, meta, doc in zip(
+                chroma_result.get("ids", []),
+                chroma_result.get("metadatas", []),
+                chroma_result.get("documents", []),
+            ):
+                chroma_matches.append({
+                    "chunk_id": cid,
+                    "metadata": meta,
+                    "text_preview": (doc or "")[:120],
+                })
+        except Exception as e:
+            chroma_matches = [{"error": str(e)}]
+
+    return {
+        "queried_zimlii_url": zimlii_url or None,
+        "queried_citation": citation or None,
+        "zlr_entries_row": entry,
+        "postgres_chunks": pg_chunks,
+        "chroma_zlr_matches_by_citation": chroma_matches,
+    }
+
 # TEMPORARY — one-time backfill for Multi-tenancy hardening (Part 3): puts
 # firm_id into every pre-existing firm_precedents chunk's Chroma metadata
 # so _semantic_search_firm()'s new where={"firm_id": ...} filter doesn't
