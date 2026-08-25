@@ -3913,9 +3913,20 @@ async def admin_fix_firm_name(request: Request):
 # recall of a known-missing item at each ef (so a fix can be verified
 # effective before touching production, not just fast). Remove once no
 # longer needed.
-@app.post("/api/admin/benchmark-hnsw-ef")
-async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = ""):
-    require_admin_token(request)
+def _run_hnsw_ef_benchmark_sync(target_id: Optional[str]) -> dict:
+    """
+    All the CPU/IO-bound Chroma work for the ef benchmark, kept as a
+    plain sync function and run via asyncio.to_thread by the endpoint
+    below -- matching how every other Chroma call in this file is
+    invoked (index_chunks_in_chroma, _zlr_semantic_search, etc). Calling
+    chromadb's synchronous API directly inside an `async def` route (the
+    first version of this endpoint) blocks the single event loop for the
+    whole benchmark's duration -- confirmed live: a repeated poll loop
+    against this endpoint caused unrelated /health requests on the same
+    worker to time out until each run finished. asyncio.to_thread moves
+    this off the event loop so the rest of the app stays responsive
+    while a benchmark run is in progress.
+    """
     import time as _time_mod
 
     ef_values = [10, 50, 100, 200]
@@ -3930,15 +3941,6 @@ async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = "")
     n = len(ids)
     if n == 0:
         raise HTTPException(status_code=400, detail="zlr_index collection is empty, nothing to benchmark")
-
-    target_id = None
-    if target_zimlii_url:
-        async with _db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id FROM zlr_entries WHERE firm_id=$1 AND zimlii_url=$2", FIRM_ID, target_zimlii_url
-            )
-            if row:
-                target_id = str(row["id"])
 
     # Fixed set of query vectors for consistent, comparable timing across
     # ef values: the real "HH 608-26" query (to directly test recall of
@@ -3986,6 +3988,7 @@ async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = "")
             # tell those two apart.
             full_rank = None
             full_similarity = None
+            full_ids = []
             if target_id:
                 full_res = temp_col.query(query_embeddings=[hh608_vec], n_results=n)
                 full_ids = full_res["ids"][0] if full_res["ids"] else []
@@ -4015,11 +4018,25 @@ async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = "")
     return {
         "collection_size": n,
         "repetitions_per_ef": repetitions,
-        "target_zimlii_url": target_zimlii_url or None,
         "target_document_id": target_id,
         "results_by_ef": results_by_ef,
         "note": "Temp collections created and deleted per ef trial; production zlr_index untouched.",
     }
+
+@app.post("/api/admin/benchmark-hnsw-ef")
+async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = ""):
+    require_admin_token(request)
+    target_id = None
+    if target_zimlii_url:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM zlr_entries WHERE firm_id=$1 AND zimlii_url=$2", FIRM_ID, target_zimlii_url
+            )
+            if row:
+                target_id = str(row["id"])
+    result = await asyncio.to_thread(_run_hnsw_ef_benchmark_sync, target_id)
+    result["target_zimlii_url"] = target_zimlii_url or None
+    return result
 
 # TEMPORARY — broad search across zlr_entries (not scoped to one exact
 # citation/URL) to check whether a name match found via real search
