@@ -3758,6 +3758,123 @@ async def admin_zlr_item_status(request: Request, zimlii_url: str = "", citation
         "chroma_zlr_matches_by_citation": chroma_matches,
     }
 
+# TEMPORARY — broad search across zlr_entries (not scoped to one exact
+# citation/URL) to check whether a name match found via real search
+# corresponds to something already in the corpus before today's JSC push,
+# vs. genuinely being one of today's items (which -- per
+# /api/admin/zlr-item-status -- have zero Chroma matches, so a real
+# semantic-search hit for one of them would itself be suspicious).
+# Remove once no longer needed.
+@app.get("/api/admin/search-zlr-entries")
+async def admin_search_zlr_entries(request: Request, case_name_like: str, limit: int = 20):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, filename, source, citation, case_name, court, judge, "
+            "judgment_date, chunk_count, uploaded_at, zimlii_url "
+            "FROM zlr_entries WHERE firm_id=$1 AND case_name ILIKE $2 "
+            "ORDER BY uploaded_at DESC LIMIT $3",
+            FIRM_ID, f"%{case_name_like}%", limit
+        )
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["id"] = str(d["id"])
+        if d.get("uploaded_at"):
+            d["uploaded_at"] = d["uploaded_at"].isoformat()
+        results.append(d)
+    return {"query": case_name_like, "matches": results}
+
+# TEMPORARY — reindex a single already-processed zlr_entries row that never
+# made it into Chroma. Reuses the row's own already-extracted raw_text
+# (no re-download, no re-scrape) and replicates _process_zlr_background()'s
+# exact enriched_text/chunk_text/index_chunks_in_chroma() steps -- this is
+# NOT the broad /api/admin/reindex-from-db (which walks every zlr_entries
+# row firm-wide and would re-embed the whole historical corpus, including
+# entries that are already correctly indexed); this touches only the one
+# row named by zimlii_url. Deletes that row's existing (orphaned) Postgres
+# chunks first so a retry doesn't accumulate duplicates. Remove once no
+# longer needed.
+@app.post("/api/admin/reindex-zlr-entry")
+async def admin_reindex_zlr_entry(request: Request, zimlii_url: str):
+    require_admin_token(request)
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM zlr_entries WHERE firm_id=$1 AND zimlii_url=$2",
+            FIRM_ID, zimlii_url
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="No zlr_entries row for that zimlii_url")
+        entry = dict(row)
+        if not entry.get("raw_text"):
+            raise HTTPException(status_code=400, detail="Entry has no raw_text to reindex from")
+
+        item_id = str(entry["id"])
+        subject_chains = entry.get("subject_chains")
+        if isinstance(subject_chains, str):
+            try:
+                subject_chains = json.loads(subject_chains)
+            except Exception:
+                subject_chains = []
+
+        enriched_text = f"""CASE: {entry.get('case_name') or ''}
+CITATION: {entry.get('citation') or ''}
+JUDGMENT: {entry.get('judgment_number') or ''}
+COURT: {entry.get('court') or ''}
+JUDGE: {entry.get('judge') or ''}
+CATEGORY: {entry.get('taxonomy_category') or ''}
+SUBJECT: {' | '.join(subject_chains or [])}
+SUMMARY: {entry.get('summary') or ''}
+
+FULL TEXT:
+{entry['raw_text']}"""
+
+        new_chunks = chunk_text(enriched_text, 1, item_id, "zlr")
+        for c in new_chunks:
+            c["chunk_source"] = "zlr"
+            c["zlr_item_id"] = item_id
+            c["citation"] = entry.get("citation")
+            c["case_name"] = entry.get("case_name")
+            c["taxonomy_category"] = entry.get("taxonomy_category")
+
+        await conn.execute(
+            "DELETE FROM chunks WHERE firm_id=$1 AND chunk_source='zlr' AND zlr_item_id=$2",
+            FIRM_ID, item_id
+        )
+
+        index_error = None
+        if new_chunks:
+            try:
+                await asyncio.to_thread(index_chunks_in_chroma, new_chunks, "zlr")
+            except Exception as e:
+                index_error = str(e)
+
+            for c in new_chunks:
+                await conn.execute("""
+                    INSERT INTO chunks (id, firm_id, document_id, matter_id, chunk_source,
+                                       text, chunk_index, page_number, zlr_item_id, citation,
+                                       case_name, taxonomy_category, created_at)
+                    VALUES ($1,$2,$3,'zlr','zlr',$4,$5,$6,$7,$8,$9,$10,NOW())
+                    ON CONFLICT (id) DO NOTHING
+                """,
+                c["id"], FIRM_ID, _uuid_mod.UUID(item_id),
+                c["text"], c["chunk_index"], c.get("page_number", 1),
+                item_id, c.get("citation"), c.get("case_name"), c.get("taxonomy_category")
+                )
+
+        await conn.execute(
+            "UPDATE zlr_entries SET chunk_count=$1 WHERE id=$2",
+            len(new_chunks), _uuid_mod.UUID(item_id)
+        )
+
+    return {
+        "zimlii_url": zimlii_url,
+        "item_id": item_id,
+        "new_chunk_count": len(new_chunks),
+        "index_chunks_in_chroma_error": index_error,
+    }
+
 # TEMPORARY — one-time backfill for Multi-tenancy hardening (Part 3): puts
 # firm_id into every pre-existing firm_precedents chunk's Chroma metadata
 # so _semantic_search_firm()'s new where={"firm_id": ...} filter doesn't
