@@ -4038,6 +4038,66 @@ async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = "")
     result["target_zimlii_url"] = target_zimlii_url or None
     return result
 
+# TEMPORARY — read-only impact assessment for the two extraction bugs
+# found investigating garbled zlr_entries.citation values: (1)
+# parse_zlr_headnote()'s citation regex matches a precedent citation
+# referenced anywhere in the judgment's own body text (not the
+# judgment's own citation) and stores the whole line, not just the
+# match; (2) extract_pdf_text()'s blanket exception fallback decodes raw
+# bytes as UTF-8 on any pdfplumber failure, so non-PDF content
+# (confirmed: RTF) sails through as "extracted text" when a file is
+# mislabeled/misclassified as PDF. Counts real rows against a few
+# heuristics rather than guessing at scope. No writes. Remove once no
+# longer needed.
+@app.get("/api/admin/scope-citation-bugs")
+async def admin_scope_citation_bugs(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM zlr_entries WHERE firm_id=$1", FIRM_ID)
+        # Heuristic for "garbled" (sentence-fragment) citations: a real
+        # citation is short (well under 40 chars); parse_zlr_headnote's
+        # bug stores a whole line, which tends to run long.
+        long_citations = await conn.fetch(
+            "SELECT id, citation, case_name, zimlii_url FROM zlr_entries "
+            "WHERE firm_id=$1 AND citation IS NOT NULL AND length(citation) > 60 "
+            "ORDER BY uploaded_at DESC LIMIT 25",
+            FIRM_ID
+        )
+        long_citation_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM zlr_entries WHERE firm_id=$1 AND citation IS NOT NULL AND length(citation) > 60",
+            FIRM_ID
+        )
+        # Heuristic for RTF-markup-contaminated raw_text: distinctive RTF
+        # control-word fragments that would never appear in genuine
+        # judgment prose. Matched without the leading backslash
+        # deliberately -- Postgres's LIKE engine treats '\' as its own
+        # escape character on top of string-literal parsing, and these
+        # substrings are distinctive enough on their own that the extra
+        # escaping complexity isn't worth the risk of getting it wrong.
+        rtf_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM zlr_entries WHERE firm_id=$1 AND "
+            "(raw_text LIKE '%pard%plain%' OR raw_text LIKE '%rtf1%' OR raw_text LIKE '%ltrpar%')",
+            FIRM_ID
+        )
+        rtf_rows = await conn.fetch(
+            "SELECT id, filename, source, citation, zimlii_url FROM zlr_entries WHERE firm_id=$1 AND "
+            "(raw_text LIKE '%pard%plain%' OR raw_text LIKE '%rtf1%' OR raw_text LIKE '%ltrpar%') LIMIT 25",
+            FIRM_ID
+        )
+    return {
+        "total_zlr_entries": total,
+        "long_garbled_citation_count": long_citation_count,
+        "long_garbled_citation_sample": [
+            {"id": str(r["id"]), "citation": r["citation"][:150], "case_name": r["case_name"], "zimlii_url": r["zimlii_url"]}
+            for r in long_citations
+        ],
+        "rtf_contaminated_count": rtf_count,
+        "rtf_contaminated_sample": [
+            {"id": str(r["id"]), "filename": r["filename"], "source": r["source"], "citation": r["citation"], "zimlii_url": r["zimlii_url"]}
+            for r in rtf_rows
+        ],
+    }
+
 # TEMPORARY — broad search across zlr_entries (not scoped to one exact
 # citation/URL) to check whether a name match found via real search
 # corresponds to something already in the corpus before today's JSC push,
