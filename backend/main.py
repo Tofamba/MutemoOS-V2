@@ -4080,7 +4080,8 @@ async def admin_scope_citation_bugs(request: Request):
             FIRM_ID
         )
         rtf_rows = await conn.fetch(
-            "SELECT id, filename, source, citation, zimlii_url FROM zlr_entries WHERE firm_id=$1 AND "
+            "SELECT id, filename, source, citation, zimlii_url, LEFT(raw_text, 400) AS text_preview "
+            "FROM zlr_entries WHERE firm_id=$1 AND "
             "(raw_text LIKE '%pard%plain%' OR raw_text LIKE '%rtf1%' OR raw_text LIKE '%ltrpar%') LIMIT 25",
             FIRM_ID
         )
@@ -4093,7 +4094,8 @@ async def admin_scope_citation_bugs(request: Request):
         ],
         "rtf_contaminated_count": rtf_count,
         "rtf_contaminated_sample": [
-            {"id": str(r["id"]), "filename": r["filename"], "source": r["source"], "citation": r["citation"], "zimlii_url": r["zimlii_url"]}
+            {"id": str(r["id"]), "filename": r["filename"], "source": r["source"], "citation": r["citation"],
+             "zimlii_url": r["zimlii_url"], "text_preview": r["text_preview"]}
             for r in rtf_rows
         ],
     }
