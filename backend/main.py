@@ -3878,6 +3878,32 @@ async def admin_debug_firm_identity(request: Request):
         "get_firm_identity_resolved": resolved,
     }
 
+# TEMPORARY — one-shot, single-purpose data fix. debug-firm-identity
+# confirmed this deployment's one-and-only firms row (Option B multi-
+# tenancy, id=FIRM_ID) has name='The Legal Corner' while
+# MUTEMO_FIRM_NAME/short_name/city/country all correctly identify this as
+# Sawyer & Mkushi's deployment -- explaining research memos signed "The
+# Legal Corner, Harare" (get_firm_identity() was reading real DB data
+# correctly; the DB data itself was wrong). The legitimate fix path,
+# PATCH /api/settings, requires a real authenticated admin/partner
+# session (admin:settings permission) which isn't available here, so
+# this corrects the one specific known-bad field via the same
+# admin-token gate the other temporary diagnostics use. Hardcoded target
+# value, not an arbitrary-write endpoint. Remove once no longer needed.
+@app.post("/api/admin/fix-firm-name")
+async def admin_fix_firm_name(request: Request):
+    require_admin_token(request)
+    correct_name = "Sawyer & Mkushi"
+    async with _db_pool.acquire() as conn:
+        before = await conn.fetchrow("SELECT name FROM firms WHERE id=$1", FIRM_ID)
+        await conn.execute("UPDATE firms SET name=$1 WHERE id=$2", correct_name, FIRM_ID)
+        after = await conn.fetchrow("SELECT name FROM firms WHERE id=$1", FIRM_ID)
+    return {
+        "firm_id": str(FIRM_ID),
+        "name_before": before["name"] if before else None,
+        "name_after": after["name"] if after else None,
+    }
+
 # TEMPORARY — broad search across zlr_entries (not scoped to one exact
 # citation/URL) to check whether a name match found via real search
 # corresponds to something already in the corpus before today's JSC push,
