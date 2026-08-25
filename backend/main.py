@@ -7369,8 +7369,14 @@ def parse_zlr_headnote(text: str) -> dict:
         if m:
             result["citation"] = m.group(0).strip()
             break
-    for line in lines:
-        m = re.search(r'(?:Judgment No\.?\s*)?((?:HH|SC|CCZ|LC|HB|HM|HMT)[-\s]?\d+[-/]\d+)', line, re.IGNORECASE)
+    # Same false-positive risk as the citation regex above, confirmed live
+    # during a citation backfill: a full-body scan can lock onto a
+    # different, cross-referenced/related matter's judgment number quoted
+    # within the reasoning (e.g. a consolidated or appeal-linked case)
+    # instead of this judgment's own. Restricted to the same header zone.
+    judgment_number_pattern = re.compile(r'(?:Judgment No\.?\s*)?((?:HH|SC|CCZ|LC|HB|HM|HMT)[-\s]?\d+[-/]\d+)', re.IGNORECASE)
+    for line in lines[:10]:
+        m = judgment_number_pattern.search(line)
         if m:
             result["judgment_number"] = m.group(1).strip()
             break
