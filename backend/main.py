@@ -3904,6 +3904,101 @@ async def admin_fix_firm_name(request: Request):
         "name_after": after["name"] if after else None,
     }
 
+# TEMPORARY — non-destructive HNSW search_ef benchmark. Copies the real
+# zlr_index vectors (already-computed embeddings, no re-embedding needed
+# except for the query vectors themselves) into disposable temp
+# collections, one per candidate ef value, each deleted immediately after
+# its trial. Never touches the real "zlr_index" collection's data or
+# config. Measures both query latency (the tradeoff question) and actual
+# recall of a known-missing item at each ef (so a fix can be verified
+# effective before touching production, not just fast). Remove once no
+# longer needed.
+@app.post("/api/admin/benchmark-hnsw-ef")
+async def admin_benchmark_hnsw_ef(request: Request, target_zimlii_url: str = ""):
+    require_admin_token(request)
+    import time as _time_mod
+
+    ef_values = [10, 50, 100, 200]
+    repetitions = 15
+
+    _, _, zlr_col = get_chroma_collections()
+    dump = zlr_col.get(include=["embeddings", "documents", "metadatas"])
+    ids = dump["ids"]
+    embeddings = dump["embeddings"]
+    documents = dump["documents"]
+    metadatas = dump["metadatas"]
+    n = len(ids)
+    if n == 0:
+        raise HTTPException(status_code=400, detail="zlr_index collection is empty, nothing to benchmark")
+
+    target_id = None
+    if target_zimlii_url:
+        async with _db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM zlr_entries WHERE firm_id=$1 AND zimlii_url=$2", FIRM_ID, target_zimlii_url
+            )
+            if row:
+                target_id = str(row["id"])
+
+    # Fixed set of query vectors for consistent, comparable timing across
+    # ef values: the real "HH 608-26" query (to directly test recall of
+    # the known-missing item) plus a spread of real corpus embeddings
+    # standing in for realistic query traffic, so the latency numbers
+    # aren't a single-query fluke.
+    hh608_vec = embed_texts(["HH 608-26"])[0]
+    if hasattr(hh608_vec[0], "__len__"):
+        hh608_vec = hh608_vec[0]
+    sample_idxs = list(range(0, n, max(1, n // 8)))[:8]
+    query_vecs = [hh608_vec] + [embeddings[i] for i in sample_idxs]
+
+    results_by_ef = {}
+
+    for ef in ef_values:
+        temp_name = f"zlr_bench_ef{ef}_{_uuid_mod.uuid4().hex[:8]}"
+        temp_col = _chroma_client.create_collection(
+            temp_name,
+            metadata={"hnsw:space": "cosine", "hnsw:construction_ef": 100, "hnsw:search_ef": ef},
+        )
+        try:
+            temp_col.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+
+            latencies_ms = []
+            hh608_found_rank = None
+            for rep in range(repetitions):
+                qv = query_vecs[rep % len(query_vecs)]
+                t0 = _time_mod.perf_counter()
+                res = temp_col.query(query_embeddings=[qv], n_results=min(20, n))
+                t1 = _time_mod.perf_counter()
+                latencies_ms.append((t1 - t0) * 1000)
+                if qv is hh608_vec:
+                    res_ids = res["ids"][0] if res["ids"] else []
+                    res_metas = res["metadatas"][0] if res.get("metadatas") else []
+                    for rank, (rid, meta) in enumerate(zip(res_ids, res_metas)):
+                        if target_id and meta and str(meta.get("document_id")) == target_id:
+                            hh608_found_rank = rank
+                            break
+
+            latencies_ms.sort()
+            results_by_ef[str(ef)] = {
+                "avg_ms": round(sum(latencies_ms) / len(latencies_ms), 2),
+                "median_ms": round(latencies_ms[len(latencies_ms) // 2], 2),
+                "p95_ms": round(latencies_ms[int(len(latencies_ms) * 0.95)], 2),
+                "min_ms": round(latencies_ms[0], 2),
+                "max_ms": round(latencies_ms[-1], 2),
+                "hh608_found_rank": hh608_found_rank,
+            }
+        finally:
+            _chroma_client.delete_collection(temp_name)
+
+    return {
+        "collection_size": n,
+        "repetitions_per_ef": repetitions,
+        "target_zimlii_url": target_zimlii_url or None,
+        "target_document_id": target_id,
+        "results_by_ef": results_by_ef,
+        "note": "Temp collections created and deleted per ef trial; production zlr_index untouched.",
+    }
+
 # TEMPORARY — broad search across zlr_entries (not scoped to one exact
 # citation/URL) to check whether a name match found via real search
 # corresponds to something already in the corpus before today's JSC push,
