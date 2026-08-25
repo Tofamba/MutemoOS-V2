@@ -3729,13 +3729,19 @@ async def admin_zlr_item_status(request: Request, zimlii_url: str = "", citation
     # from Postgres, and not requiring the chunk ids found above (so this
     # still finds something even if the Postgres `chunks` insert itself
     # is what failed, isolating that from a Chroma-indexing failure).
+    #
+    # index_chunks_in_chroma()/chunk_text() do NOT write a "citation" key
+    # into Chroma metadata for zlr chunks -- the only identifying field is
+    # "document_id" (set to the zlr_entries.id / item_id passed into
+    # chunk_text() as doc_id). Querying by "citation" here always returns
+    # zero results regardless of whether indexing actually succeeded --
+    # confirmed by reading chunk_text()/index_chunks_in_chroma() directly.
     _, _, zlr_col = get_chroma_collections()
     chroma_matches = []
-    search_citation = citation or (entry.get("citation") if entry else None)
-    if search_citation:
+    if entry:
         try:
             chroma_result = zlr_col.get(
-                where={"citation": search_citation}, include=["metadatas", "documents"]
+                where={"document_id": entry["id"]}, include=["metadatas", "documents"]
             )
             for cid, meta, doc in zip(
                 chroma_result.get("ids", []),
@@ -3755,7 +3761,7 @@ async def admin_zlr_item_status(request: Request, zimlii_url: str = "", citation
         "queried_citation": citation or None,
         "zlr_entries_row": entry,
         "postgres_chunks": pg_chunks,
-        "chroma_zlr_matches_by_citation": chroma_matches,
+        "chroma_zlr_matches_by_document_id": chroma_matches,
     }
 
 # TEMPORARY — broad search across zlr_entries (not scoped to one exact
