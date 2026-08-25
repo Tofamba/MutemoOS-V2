@@ -4098,6 +4098,140 @@ async def admin_scope_citation_bugs(request: Request):
         ],
     }
 
+# TEMPORARY — backfill for the 20 zlr_entries affected by the two
+# extraction bugs sized by scope-citation-bugs above. Preview by default
+# (apply=false); pass apply=true to actually write. For RTF-contaminated
+# entries, the currently-stored raw_text IS genuine RTF markup (confirmed
+# via scope-citation-bugs' samples) -- extract_rtf_text() can clean it
+# directly, no re-scrape or original file needed. For every affected
+# entry, re-runs parse_zlr_headnote() (now fixed: header-zone-only,
+# match-span-only citation extraction) against the (possibly newly
+# cleaned) text to get a corrected citation, falling back to
+# judgment_number the same way _process_zlr_background() now does; no
+# scraper_meta is available for historical entries, so that priority
+# level of the fix doesn't apply retroactively -- only new pushes get
+# that benefit. Re-chunks and reindexes into Chroma exactly like
+# reindex-zlr-entry above, so corrected data flows into search, not just
+# the zlr_entries row. Remove once no longer needed.
+@app.post("/api/admin/backfill-citation-rtf-fixes")
+async def admin_backfill_citation_rtf_fixes(request: Request, apply: bool = False):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rtf_rows = await conn.fetch(
+            "SELECT id FROM zlr_entries WHERE firm_id=$1 AND "
+            "(raw_text LIKE '%pard%plain%' OR raw_text LIKE '%rtf1%' OR raw_text LIKE '%ltrpar%')",
+            FIRM_ID
+        )
+        rtf_ids = {str(r["id"]) for r in rtf_rows}
+
+        long_citation_rows = await conn.fetch(
+            "SELECT id FROM zlr_entries WHERE firm_id=$1 AND citation IS NOT NULL AND length(citation) > 60",
+            FIRM_ID
+        )
+        target_ids = rtf_ids | {str(r["id"]) for r in long_citation_rows}
+
+        if not target_ids:
+            return {"dry_run": not apply, "targeted_count": 0, "changes": []}
+
+        rows = await conn.fetch(
+            "SELECT * FROM zlr_entries WHERE firm_id=$1 AND id = ANY($2::uuid[])",
+            FIRM_ID, [_uuid_mod.UUID(i) for i in target_ids]
+        )
+
+        changes = []
+        for row in rows:
+            entry = dict(row)
+            item_id = str(entry["id"])
+            is_rtf = item_id in rtf_ids
+            raw_text = entry.get("raw_text") or ""
+
+            working_text = raw_text
+            rtf_clean_failed = False
+            if is_rtf:
+                cleaned = extract_rtf_text(raw_text.encode("utf-8"))
+                if cleaned and cleaned.strip():
+                    working_text = cleaned
+                else:
+                    rtf_clean_failed = True
+
+            parsed = parse_zlr_headnote(working_text) if working_text else {}
+            new_citation = parsed.get("citation") or parsed.get("judgment_number") or entry.get("citation")
+
+            change = {
+                "id": item_id,
+                "filename": entry.get("filename"),
+                "was_rtf_contaminated": is_rtf,
+                "rtf_clean_failed": rtf_clean_failed,
+                "old_citation": (entry.get("citation") or "")[:150],
+                "new_citation": new_citation,
+                "raw_text_changed": is_rtf and not rtf_clean_failed,
+            }
+
+            if apply and not rtf_clean_failed:
+                subject_chains = entry.get("subject_chains")
+                if isinstance(subject_chains, str):
+                    try:
+                        subject_chains = json.loads(subject_chains)
+                    except Exception:
+                        subject_chains = []
+
+                final_text = working_text
+                await conn.execute(
+                    "UPDATE zlr_entries SET citation=$1, raw_text=$2 WHERE id=$3",
+                    new_citation, final_text, entry["id"]
+                )
+
+                enriched_text = f"""CASE: {entry.get('case_name') or ''}
+CITATION: {new_citation or ''}
+JUDGMENT: {entry.get('judgment_number') or ''}
+COURT: {entry.get('court') or ''}
+JUDGE: {entry.get('judge') or ''}
+CATEGORY: {entry.get('taxonomy_category') or ''}
+SUBJECT: {' | '.join(subject_chains or [])}
+SUMMARY: {entry.get('summary') or ''}
+
+FULL TEXT:
+{final_text}"""
+                new_chunks = chunk_text(enriched_text, 1, item_id, "zlr")
+                for c in new_chunks:
+                    c["chunk_source"] = "zlr"
+                    c["zlr_item_id"] = item_id
+                    c["citation"] = new_citation
+                    c["case_name"] = entry.get("case_name")
+                    c["taxonomy_category"] = entry.get("taxonomy_category")
+
+                await conn.execute(
+                    "DELETE FROM chunks WHERE firm_id=$1 AND chunk_source='zlr' AND zlr_item_id=$2",
+                    FIRM_ID, item_id
+                )
+                index_error = None
+                if new_chunks:
+                    try:
+                        await asyncio.to_thread(index_chunks_in_chroma, new_chunks, "zlr")
+                    except Exception as e:
+                        index_error = str(e)
+                    for c in new_chunks:
+                        await conn.execute("""
+                            INSERT INTO chunks (id, firm_id, document_id, matter_id, chunk_source,
+                                               text, chunk_index, page_number, zlr_item_id, citation,
+                                               case_name, taxonomy_category, created_at)
+                            VALUES ($1,$2,$3,'zlr','zlr',$4,$5,$6,$7,$8,$9,$10,NOW())
+                            ON CONFLICT (id) DO NOTHING
+                        """,
+                        c["id"], FIRM_ID, _uuid_mod.UUID(item_id),
+                        c["text"], c["chunk_index"], c.get("page_number", 1),
+                        item_id, c.get("citation"), c.get("case_name"), c.get("taxonomy_category")
+                        )
+                await conn.execute(
+                    "UPDATE zlr_entries SET chunk_count=$1 WHERE id=$2", len(new_chunks), entry["id"]
+                )
+                change["new_chunk_count"] = len(new_chunks)
+                change["index_error"] = index_error
+
+            changes.append(change)
+
+    return {"dry_run": not apply, "targeted_count": len(rows), "changes": changes}
+
 # TEMPORARY — broad search across zlr_entries (not scoped to one exact
 # citation/URL) to check whether a name match found via real search
 # corresponds to something already in the corpus before today's JSC push,
@@ -6866,7 +7000,27 @@ def extract_pdf_text(content: bytes):
         final_pages = [p for p in pages if p and p.strip()]
         return "\n\n".join(final_pages), max(1, total_pages), ocr_used, avg_confidence
     except Exception:
-        return content.decode("utf-8", errors="replace"), 1, False, None
+        # Previously fell back to a raw UTF-8 decode of the undecodable
+        # bytes. For content that isn't actually a valid PDF -- confirmed
+        # cause of RTF markup ("\par \pard\plain...") ending up indexed as
+        # judgment text for a couple of legacy ZimLII entries that were
+        # RTF content saved/served under a .pdf name -- that silently
+        # stored binary/markup garbage as if it were the real text.
+        # Returning empty text lets the caller's normal "no text
+        # extracted" handling deal with it honestly instead.
+        return "", 1, False, None
+
+def extract_rtf_text(content: bytes) -> str:
+    """Real RTF-to-text extraction, not a plain byte decode. Genuine RTF
+    files were previously routed through the same handling as .txt (a raw
+    UTF-8 decode), which leaves every control word ("\\pard", "\\rtf1",
+    etc.) in the output verbatim -- confirmed as the source of RTF markup
+    contaminating a couple of legacy ZimLII entries' indexed text."""
+    try:
+        from striprtf.striprtf import rtf_to_text
+        return rtf_to_text(content.decode("utf-8", errors="replace"))
+    except Exception:
+        return ""
 
 def ocr_pdf_pages(content: bytes, page_indices: list) -> dict:
     """Returns {page_index: (text, confidence)} for each successfully-OCR'd page."""
@@ -7199,9 +7353,21 @@ def parse_zlr_headnote(text: str) -> dict:
         "subject_chains": [], "taxonomy_category": None,
         "summary": None, "zimlii_url": None,
     }
-    for line in lines:
-        if re.search(r'\d{4}\s*\(\d+\)\s*ZLR\s*\d+', line):
-            result["citation"] = line.strip()
+    # Old-style printed-report citation ("YYYY (N) ZLR NNN") -- this is
+    # the judgment's OWN citation only if it appears in the header; the
+    # same pattern also matches whenever the judgment quotes a precedent
+    # case elsewhere in its reasoning (e.g. "...as held in PTC v Mahachi
+    # 1999 (1) ZLR 176 (H)..."), which a full-body scan can't distinguish
+    # from the judgment's own citation. Restricted to the header zone
+    # (matching how case_name below only looks at lines[:5]) and captures
+    # only the matched span, not the whole line -- previously stored the
+    # entire line, which produced full sentence fragments as "citation"
+    # whenever the header itself ran past word-wrap onto one long line.
+    citation_pattern = re.compile(r'\d{4}\s*\(\d+\)\s*ZLR\s*\d+')
+    for line in lines[:10]:
+        m = citation_pattern.search(line)
+        if m:
+            result["citation"] = m.group(0).strip()
             break
     for line in lines:
         m = re.search(r'(?:Judgment No\.?\s*)?((?:HH|SC|CCZ|LC|HB|HM|HMT)[-\s]?\d+[-/]\d+)', line, re.IGNORECASE)
@@ -7361,14 +7527,27 @@ async def _process_zlr_background(item_id: str, content: bytes, filename: str, e
 
     if content:
         try:
-            if ext == "pdf":
+            # A couple of legacy ZimLII entries were confirmed to be RTF
+            # content saved/served under a .pdf filename -- the extension
+            # alone isn't trustworthy. Sniff the real content type for the
+            # PDF case specifically (the one confirmed to occur) rather
+            # than trusting `ext`, and route to the real RTF extractor
+            # instead of extract_pdf_text() choking on non-PDF bytes.
+            effective_ext = ext
+            if ext == "pdf" and not content.startswith(b"%PDF-"):
+                if content.lstrip()[:10].startswith(b"{\\rtf"):
+                    effective_ext = "rtf"
+
+            if effective_ext == "pdf":
                 text, page_count, ocr_used, ocr_confidence = extract_pdf_text(content)
-            elif ext in ("docx", "doc"):
+            elif effective_ext in ("docx", "doc"):
                 text = extract_docx_text(content)
-            elif ext in ("txt", "rtf"):
+            elif effective_ext == "rtf":
+                text = extract_rtf_text(content)
+            elif effective_ext == "txt":
                 text = content.decode("utf-8", errors="replace")
-            elif ext in ("jpg", "jpeg", "png", "webp"):
-                text, ocr_confidence = ocr_image_bytes(content, ext)
+            elif effective_ext in ("jpg", "jpeg", "png", "webp"):
+                text, ocr_confidence = ocr_image_bytes(content, effective_ext)
                 ocr_used = True
             else:
                 text = content.decode("utf-8", errors="replace")
@@ -7382,19 +7561,35 @@ async def _process_zlr_background(item_id: str, content: bytes, filename: str, e
         text = scraper_meta["summary"]
 
     if not text:
-        async with _db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE zlr_entries SET status='error' WHERE id=$1",
-                _uuid_mod.UUID(item_id)
-            )
+        # zlr_entries has no `status` column (confirmed by grep -- nothing
+        # else in this file references one either); the row is simply left
+        # as-is, with no raw_text/chunk_count ever populated, rather than
+        # raising UndefinedColumnError on this early-exit path.
         return
 
     parsed = parse_zlr_headnote(text)
 
-    # Fill any gaps in what parse_zlr_headnote found from raw text with
-    # whatever the scraper already told us directly (most reliable when
-    # there's no PDF/full text to parse from).
-    for key in ("case_name", "citation", "court", "judge", "judgment_date", "summary"):
+    # scraper_meta's citation (JSC's own structured citation/judgment-number
+    # field, when present) is more reliable than parse_zlr_headnote()'s
+    # regex-based extraction from raw text, which can only recognize the
+    # old-style printed-report format ("YYYY (N) ZLR NNN") and has no way
+    # to tell "this judgment's own citation" apart from a precedent it
+    # happens to quote elsewhere in its reasoning. Prefer it outright
+    # rather than only filling in when parsing found nothing -- the old
+    # "fill only if empty" logic let a wrong-but-non-empty parsed value
+    # silently block a correct scraper-supplied one. Falls further back to
+    # judgment_number (the modern HH/SC/CCZ-style reference,
+    # parse_zlr_headnote()'s one genuinely reliable identifier field) when
+    # neither the scraper nor the old-style regex found anything.
+    if scraper_meta.get("citation"):
+        parsed["citation"] = scraper_meta["citation"]
+    elif not parsed.get("citation") and parsed.get("judgment_number"):
+        parsed["citation"] = parsed["judgment_number"]
+
+    # Fill any remaining gaps in what parse_zlr_headnote found from raw
+    # text with whatever the scraper already told us directly (most
+    # reliable when there's no PDF/full text to parse from).
+    for key in ("case_name", "court", "judge", "judgment_date", "summary"):
         if not parsed.get(key) and scraper_meta.get(key):
             parsed[key] = scraper_meta[key]
     if parsed.get("taxonomy_category") == "General" or not parsed.get("summary") or len(parsed.get("subject_chains", [])) == 0:
