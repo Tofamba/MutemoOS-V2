@@ -41,37 +41,74 @@ The normal invite flow (`POST /api/admin/invite`) requires an existing admin to 
 - It doesn't create a `users` row directly — it creates an `invites` row (role `admin`) and reuses the exact same phone/OTP login path everyone else goes through. The first admin becomes a real, normal user on their first login, not a special-cased account.
 - Call it once, with the firm's intended first admin's phone/email/display name, then have that person log in normally via the phone/OTP screen to complete setup.
 
-## Step 3 — Legal corpus (shared base via R2 snapshot)
+## Step 3 — Legal corpus (existing backlog + going-forward feed)
 
-Decision (confirmed): every new firm starts from the same shared ZLR/legislation
-corpus, then builds its own firm-specific precedents on top via Rapid Precedent
-Capture and manual uploads. This is NOT a live shared corpus service. Instead:
+Every new firm starts from the same shared ZLR/legislation corpus, then builds
+its own firm-specific precedents on top via Rapid Precedent Capture and manual
+uploads. Two genuinely separate pieces, confirmed via direct investigation of
+`mutemo-legal-feed` (2026-08-26) — don't conflate them:
 
-- The corpus snapshot lives in the existing Cloudflare R2 bucket (same
-  infrastructure already used for the document Vault) at a dedicated path,
-  e.g. `corpus-snapshots/latest/` — an export of the ZLR/legislation Chroma
-  collection including embeddings and metadata, not just raw text, so it
-  restores directly without needing to re-embed on the new firm's instance.
-- Whenever the scraper/ingestion pipeline successfully adds new statutes or
-  case law (on the reference deployment), export the updated corpus
-  collection and push it to that R2 path, replacing or versioning the
-  previous snapshot.
-- For a new firm's onboarding, download the snapshot from R2 and restore it
-  directly into the firm's own Chroma instance — no live scraping against
-  the new deployment, no cross-firm database access. This should be fast
-  and require no new external network access beyond what Claude Code
-  already has to R2.
+**Going forward (new content from the moment of onboarding onward): already solved, just needs config, not a build.**
+`mutemo-legal-feed/pusher.py`'s `_load_firms()` genuinely supports up to 10
+firms via `FIRM_1_*` through `FIRM_10_*` env vars, and `push_with_retry()`
+pushes every scraped item to every registered firm independently, with its own
+retry/failure logging per firm — this is real, working, generic code, not
+hardcoded to Sawyer & Mkushi. (**README.md's claim that this is "still a
+from-scratch task" is stale/wrong** — flag that if you see it repeated
+elsewhere; it was true once, isn't anymore. Fix the doc if you're touching
+that section anyway.) The live feed service just doesn't have a second firm
+*configured* — as of 2026-08-26 its env vars only include `FIRM_1_*`. Add
+`FIRM_2_BASE_URL`, `FIRM_2_SERVICE_TOKEN` (matching the new firm's own
+`LEGAL_FEED_SERVICE_TOKEN`), `FIRM_2_ID`, and `FIRM_2_NAME` to
+`mutemo-legal-feed`'s environment, and every future scrape starts flowing to
+the new firm automatically. A few minutes of config, not a project.
+
+**Historical backlog (everything scraped before the new firm existed): a real gap, now closed by `scripts/copy_shared_corpus_to_new_firm.py`.**
+Fixing the feed config alone leaves a new firm's Search Vault empty on day one
+— it only accumulates content going forward, at the scraper's daily cadence,
+which reads as "broken" to a new paying customer even though nothing is
+actually wrong. Run this script once per new firm, at onboarding time:
+
+```
+# Against the reference (source) firm's environment:
+python3 scripts/copy_shared_corpus_to_new_firm.py export \
+    --database-url <source DATABASE_URL> --chroma-path <source Chroma volume path> \
+    --firm-id <source firm_id> --out corpus_export.json
+
+# Against the new (target) firm's environment:
+python3 scripts/copy_shared_corpus_to_new_firm.py import \
+    --database-url <target DATABASE_URL> --chroma-path <target Chroma volume path> \
+    --firm-id <new firm_id> --in corpus_export.json --apply   # omit --apply for a dry-run preview first
+```
+
+- Copies `legal_updates`/`zlr_entries`/`chunks` rows (`chunk_source IN
+  ('legal','zlr')` only) from Postgres, plus matching vectors from Chroma's
+  `legal_updates`/`zlr_index` collections — **never `firm_precedents`**, which
+  is the source firm's own private client documents and must never cross into
+  another firm's data. The script enforces this exclusion; don't build an
+  alternative path that skips it.
+- Row/vector ids are preserved exactly (not regenerated) — only `firm_id` is
+  remapped. This matters: `chunks.id` doubles as the Chroma chunk id, and a
+  chunk copied into Chroma but not resolvable against the target's own
+  Postgres `chunks` table (or vice versa) is silently unfindable in a real
+  search, not obviously broken. Tested end-to-end against two real throwaway
+  Postgres+Chroma instances specifically to catch this — confirmed a real
+  query on the target resolves to the correct judgment via a real Postgres
+  lookup, not just that rows/vectors exist. See the script's own docstring
+  and commit history for the full test writeup.
+- Idempotent (`ON CONFLICT DO NOTHING` / `upsert`) — safe to re-run `import`
+  against the same target without duplicating anything.
 - The firm's own documents/precedents (Vault uploads, case-binder
   auto-provisioned docs, Rapid Precedent Capture) are written with that
   firm's `firm_id` in the chunk metadata from the moment of ingestion —
-  already true architecturally after this session's ChromaDB isolation
-  work, so no extra step is needed to keep firm-specific content separate
-  from the shared base.
-- If the export/snapshot script doesn't exist yet, that's a prerequisite
-  to build (a short, one-time script — export collection, push to R2)
-  before the next firm's onboarding. Flag it rather than falling back to
-  a live re-scrape per firm as a permanent pattern.
-- Verify the `firm_id` metadata field is present on every embedded chunk from the start (this was a backfill fix on the first firm — for a new firm, it should be correct by default since the code now writes it at ingestion time; confirm this rather than assuming).
+  already true architecturally after the ChromaDB isolation work, so no
+  extra step is needed to keep firm-specific content separate from the
+  shared base going forward.
+- This replaces the earlier-considered R2-snapshot-pipeline design for this
+  step. That's still worth building eventually if onboarding becomes frequent
+  enough to want a repeatable, always-fresh snapshot rather than a one-time
+  export/import — it isn't the minimum bar for getting one new firm launched
+  non-empty, which is what this script is for.
 
 ## Step 4 — Domain and Cloudflare Access
 
@@ -88,6 +125,7 @@ Run the same real-data-first discipline used for every feature shipped this sess
 - [ ] Log in as the firm's first real user; confirm `get_firm_identity()` resolves correctly — generate a test AI document (affidavit/contract review) and confirm the firm's actual name appears in the output, not a placeholder or another firm's name.
 - [ ] Create a test client/matter through the intake flow; confirm the case-binder auto-provisioning and sentinel-matter behavior work correctly on this fresh instance.
 - [ ] Run a real search; confirm firm-document search returns results scoped to this firm only (this is the step that broke on the very first firm's Part 3 rollout because a backfill script wasn't run — a fresh firm shouldn't need that backfill, since chunks are written with `firm_id` from day one, but confirm this explicitly rather than assuming the code path is exercised correctly).
+- [ ] Run a real ZLR/legislation search for a query you know the shared corpus can answer, and confirm it returns real results — not "no relevant documents found." Confirms `copy_shared_corpus_to_new_firm.py`'s import actually landed correctly, not just that the script exited without an error (the exact Postgres/Chroma consistency risk it was built and tested to guard against).
 - [ ] Confirm the AML compliance module (Beneficial Ownership, PEP, conflict check) renders and functions in the UI — not just via API, given this exact gap was found and fixed on the first firm.
 - [ ] Confirm the PWA installs correctly on a real device for this new subdomain (manifest/service-worker scoped correctly per-origin — this should work automatically since each subdomain is its own origin, but verify once).
 
@@ -99,5 +137,6 @@ Run the same real-data-first discipline used for every feature shipped this sess
 ## Known limitations to flag to the user, not silently work around
 
 - This process is currently manual/semi-scripted, not self-service. If firm count grows enough that this becomes the bottleneck (see README.md's Option A trigger condition), that's a signal to build real self-service provisioning — not to start improvising shortcuts in this checklist.
-- The legal corpus duplication-per-firm (Step 3) has a real, growing storage cost as firm count increases. Worth monitoring, not urgent yet.
+- The legal corpus duplication-per-firm (Step 3's `copy_shared_corpus_to_new_firm.py`) has a real, growing storage cost as firm count increases — full Postgres rows + Chroma vectors, copied whole, per firm. Worth monitoring, not urgent yet. If it becomes worth avoiding the duplication itself (not just making it repeatable), that's a bigger architectural change, not a tweak to this script.
+- Don't forget the `mutemo-legal-feed` `FIRM_{n}_*` config step (Step 3) alongside the corpus copy — they're separate actions covering separate content (historical backlog vs. going forward), and doing only one leaves the other silently missing.
 - **Bulk staff import doesn't exist.** Confirmed via direct check of both the API and the UI, 2026-08-25/26: `POST /api/admin/invite` takes one invite per call — no batch/array parameter — and the frontend's "Invite New User" panel is a single-entry form (name/email/phone/role, one submit button), no CSV upload or multi-row entry. For a firm with 5-10 lawyers, that's 5-10 individual invite submissions, each triggering its own Cloudflare Access rule addition and invite email. There is no faster path today — don't imply one to the client, and don't try to script around `POST /api/admin/invite` in a loop as an unannounced workaround without flagging that this is filling a real product gap, not using a supported bulk feature.
