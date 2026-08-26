@@ -6368,6 +6368,39 @@ function showDraftStatus(msg, type) {
 document.getElementById('draft-editor')?.addEventListener('input', updateDraftWordCount);
 
 // ── Contract Review ───────────────────────────────────────────────────────────
+// Separate token pool from _searchPollToken/_draftPollToken — sharing one
+// would let a new submission in one feature silently cancel an in-flight
+// poll in another even though their result panels don't overlap.
+let _crPollToken = 0;
+
+// Polls /api/contract-review/status/{jobId} (see backend/main.py
+// _run_contract_review_job). Fire-and-poll, same pattern as Search Vault's
+// document search and Draft Document — extraction + generation + per-finding
+// verification held behind one request could exceed Cloudflare's ~100s edge
+// timeout on a long/dense contract.
+function pollContractReviewJob(jobId, myToken) {
+  return pollJobStatus(
+    `${API}/api/contract-review/status/${jobId}`,
+    () => myToken !== _crPollToken,
+    {
+      onComplete: (data) => {
+        if (!data.result) {
+          console.warn('[contract_review_job_poll] status=complete but data.result is missing:', data);
+          showCrStatus('Review job completed without a result. Please try again.', 'error');
+          return;
+        }
+        renderContractReview(data.result);
+      },
+      onFailed: (error) => {
+        showCrStatus(`Review failed: ${error}`, 'error');
+      },
+      onError: (e) => {
+        showCrStatus(`Review failed: ${e.message}`, 'error');
+      },
+    }
+  );
+}
+
 async function runContractReview() {
   const fileInput = document.getElementById('cr-file');
   const file = fileInput.files[0];
@@ -6377,6 +6410,8 @@ async function runContractReview() {
   document.getElementById('cr-loading').style.display = 'block';
   document.getElementById('cr-btn').disabled = true;
   showCrStatus('', '');
+
+  const myToken = ++_crPollToken;
 
   const formData = new FormData();
   formData.append('file', file);
@@ -6390,12 +6425,15 @@ async function runContractReview() {
       throw new Error(err.detail || 'Review failed');
     }
     const data = await res.json();
-    renderContractReview(data);
+    if (myToken !== _crPollToken) return;
+    await pollContractReviewJob(data.job_id, myToken);
   } catch(e) {
-    showCrStatus(`Review failed: ${e.message}`, 'error');
+    if (myToken === _crPollToken) showCrStatus(`Review failed: ${e.message}`, 'error');
   } finally {
-    document.getElementById('cr-loading').style.display = 'none';
-    document.getElementById('cr-btn').disabled = false;
+    if (myToken === _crPollToken) {
+      document.getElementById('cr-loading').style.display = 'none';
+      document.getElementById('cr-btn').disabled = false;
+    }
   }
 }
 

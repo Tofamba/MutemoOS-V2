@@ -35,18 +35,8 @@ from backend.main import (
     FIRM_NAME,
     generate_affidavit,
     get_firm_identity,
-    review_contract,
     synthesise_answer_sync,
 )
-
-
-class FakeUploadFile:
-    def __init__(self, filename, content: bytes):
-        self.filename = filename
-        self._content = content
-
-    async def read(self):
-        return self._content
 
 
 class _FakeAcquireCtx:
@@ -105,6 +95,22 @@ def test_get_firm_identity_falls_back_to_constants_when_firm_row_has_no_name(mon
 
 # ── Contract review: system prompt traces to the DB ──────────────────────
 
+async def _run_contract_review_job_for_test(job_id: str, content: bytes, filename: str):
+    """
+    _run_contract_review_job() (backend/main.py) assumes _search_jobs[job_id]
+    already exists -- the real POST /api/contract-review creates that entry
+    before spawning the job as a background task. Mirrors the same
+    pre-population tests/test_contract_review_verification.py's _run_job
+    helper does.
+    """
+    m._search_jobs[job_id] = {
+        "status": m.JobStatus.PENDING, "result": None, "error": None,
+        "firm_id": "test-firm", "created_at": m.datetime.utcnow().isoformat(),
+    }
+    await m._run_contract_review_job(job_id, content, filename, None)
+    m._search_jobs.pop(job_id, None)
+
+
 def test_contract_review_prompt_uses_the_live_firm_name_not_the_constant(monkeypatch):
     monkeypatch.setattr(m, "get_firm_identity", lambda: _async_return({"name": DIFFERENT_FIRM_NAME, "city": DIFFERENT_FIRM_CITY}))
     captured = {}
@@ -115,9 +121,14 @@ def test_contract_review_prompt_uses_the_live_firm_name_not_the_constant(monkeyp
         return SimpleNamespace(content=[tool_use_block], stop_reason="tool_use", usage=SimpleNamespace(output_tokens=1))
 
     monkeypatch.setattr(m.client.messages, "create", fake_create)
-    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
-    asyncio.run(review_contract(None, upload, None))
+    # review_contract() itself now only creates a job and returns
+    # immediately (2026-08-26 fire-and-poll conversion, matching
+    # /api/generate-document/api/search/document) -- the Anthropic call
+    # this test needs to observe happens inside _run_contract_review_job,
+    # so that's what must be awaited to completion here, not the endpoint
+    # function.
+    asyncio.run(_run_contract_review_job_for_test("test-job-1", b"Some contract body text.", "contract.txt"))
 
     assert DIFFERENT_FIRM_NAME in captured["system"]
     assert DIFFERENT_FIRM_CITY in captured["system"]
@@ -127,9 +138,12 @@ def test_contract_review_prompt_uses_the_live_firm_name_not_the_constant(monkeyp
 def test_contract_review_prompt_is_byte_identical_for_the_real_current_firm(monkeypatch):
     """Zero-regression check: get_firm_identity() returning exactly what's
     actually seeded for Sawyer & Mkushi today (name=FIRM_NAME, city=
-    "Harare" -- the literal run_migrations() seeds, not derived from
-    FIRM_CITY) must produce the exact same system prompt the old
-    hardcoded-constant template did."""
+    "Harare") must produce the exact same system prompt the old
+    hardcoded-constant template did. (Prior to commit 1b4046f,
+    run_migrations()'s INSERT INTO firms seed hardcoded "Harare" directly
+    rather than deriving it from MUTEMO_FIRM_CITY -- fixed there; this
+    test's fixture value is independent of that and still accurately
+    reflects what's actually seeded for this firm today.)"""
     monkeypatch.setattr(m, "get_firm_identity", lambda: _async_return({"name": FIRM_NAME, "city": "Harare"}))
     captured = {}
 
@@ -139,9 +153,8 @@ def test_contract_review_prompt_is_byte_identical_for_the_real_current_firm(monk
         return SimpleNamespace(content=[tool_use_block], stop_reason="tool_use", usage=SimpleNamespace(output_tokens=1))
 
     monkeypatch.setattr(m.client.messages, "create", fake_create)
-    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
-    asyncio.run(review_contract(None, upload, None))
+    asyncio.run(_run_contract_review_job_for_test("test-job-2", b"Some contract body text.", "contract.txt"))
 
     old_template_output = CONTRACT_REVIEW_SYSTEM.format(FIRM_NAME=FIRM_NAME, FIRM_CITY="Harare")
     assert captured["system"] == old_template_output

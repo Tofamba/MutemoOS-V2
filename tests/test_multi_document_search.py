@@ -158,7 +158,14 @@ def test_run_document_search_job_single_file_matches_prior_unlabeled_shape(monke
     job_id = "job-1"
     _search_jobs[job_id] = {"status": JobStatus.PENDING, "result": None, "error": None,
                              "firm_id": "f1", "created_at": "2026-01-01T00:00:00"}
-    files = [{"filename": "lease.pdf", "content": b"Rent is $500 per month."}]
+    # .txt, not .pdf -- this content is plain text, and .pdf routes through
+    # extract_pdf_text()'s real pdfplumber parsing, which correctly returns
+    # empty text for content that isn't genuine PDF binary (see
+    # extract_pdf_text()'s docstring/history) rather than blindly decoding
+    # it as if it were extracted text. These tests are about multi-document
+    # combination/labeling, not PDF extraction, so .txt is both accurate to
+    # the fixture data and avoids exercising unrelated extraction logic.
+    files = [{"filename": "lease.txt", "content": b"Rent is $500 per month."}]
 
     asyncio.run(_run_document_search_job(
         job_id, files, "is the rent reasonable?", {"id": None}, None, True, 8,
@@ -168,11 +175,11 @@ def test_run_document_search_job_single_file_matches_prior_unlabeled_shape(monke
     result = _search_jobs[job_id]["result"]
     assert result["answer"] == "ANSWER"
     assert len(result["attached_documents"]) == 1
-    assert result["attached_documents"][0]["filename"] == "lease.pdf"
+    assert result["attached_documents"][0]["filename"] == "lease.txt"
 
     # Single-file synthesis input is unlabeled, exactly as before this change.
     assert captured["attached_doc_text"] == "Rent is $500 per month."
-    assert captured["attached_doc_name"] == "lease.pdf"
+    assert captured["attached_doc_name"] == "lease.txt"
     del _search_jobs[job_id]
 
 
@@ -185,9 +192,10 @@ def test_run_document_search_job_two_files_both_considered_and_labeled(monkeypat
     job_id = "job-2"
     _search_jobs[job_id] = {"status": JobStatus.PENDING, "result": None, "error": None,
                              "firm_id": "f1", "created_at": "2026-01-01T00:00:00"}
+    # .txt, not .pdf -- see the single-file test above for why.
     files = [
-        {"filename": "lease.pdf", "content": b"Rent is $500 per month."},
-        {"filename": "invoice.pdf", "content": b"Invoice total: $500 for March."},
+        {"filename": "lease.txt", "content": b"Rent is $500 per month."},
+        {"filename": "invoice.txt", "content": b"Invoice total: $500 for March."},
     ]
 
     asyncio.run(_run_document_search_job(
@@ -196,14 +204,14 @@ def test_run_document_search_job_two_files_both_considered_and_labeled(monkeypat
 
     result = _search_jobs[job_id]["result"]
     assert len(result["attached_documents"]) == 2
-    assert {d["filename"] for d in result["attached_documents"]} == {"lease.pdf", "invoice.pdf"}
+    assert {d["filename"] for d in result["attached_documents"]} == {"lease.txt", "invoice.txt"}
 
     # Both documents actually reached synthesis, clearly separated/labeled.
-    assert "=== DOCUMENT: lease.pdf ===" in captured["attached_doc_text"]
-    assert "=== DOCUMENT: invoice.pdf ===" in captured["attached_doc_text"]
+    assert "=== DOCUMENT: lease.txt ===" in captured["attached_doc_text"]
+    assert "=== DOCUMENT: invoice.txt ===" in captured["attached_doc_text"]
     assert "Rent is $500 per month." in captured["attached_doc_text"]
     assert "Invoice total: $500 for March." in captured["attached_doc_text"]
-    assert captured["attached_doc_name"] == "lease.pdf, invoice.pdf"
+    assert captured["attached_doc_name"] == "lease.txt, invoice.txt"
     del _search_jobs[job_id]
 
 
@@ -220,8 +228,9 @@ def test_run_document_search_job_removed_file_excluded_from_consideration(monkey
     job_id = "job-3"
     _search_jobs[job_id] = {"status": JobStatus.PENDING, "result": None, "error": None,
                              "firm_id": "f1", "created_at": "2026-01-01T00:00:00"}
-    # Only "lease.pdf" is sent — "invoice.pdf" was removed client-side before search.
-    files = [{"filename": "lease.pdf", "content": b"Rent is $500 per month."}]
+    # Only "lease.txt" is sent — "invoice.txt" was removed client-side before
+    # search. (.txt, not .pdf -- see the single-file test above for why.)
+    files = [{"filename": "lease.txt", "content": b"Rent is $500 per month."}]
 
     asyncio.run(_run_document_search_job(
         job_id, files, "is the rent reasonable?", {"id": None}, None, True, 8,
@@ -229,6 +238,6 @@ def test_run_document_search_job_removed_file_excluded_from_consideration(monkey
 
     result = _search_jobs[job_id]["result"]
     assert len(result["attached_documents"]) == 1
-    assert result["attached_documents"][0]["filename"] == "lease.pdf"
-    assert "invoice.pdf" not in captured["attached_doc_text"]
+    assert result["attached_documents"][0]["filename"] == "lease.txt"
+    assert "invoice.txt" not in captured["attached_doc_text"]
     del _search_jobs[job_id]

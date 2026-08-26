@@ -8138,56 +8138,54 @@ def _verify_quote_in_text(quote: str, doc_text: str) -> bool:
             return True
     return False
 
-@app.post("/api/contract-review")
-async def review_contract(
-    request: Request,
-    file: UploadFile = File(...),
-    focus_areas: Optional[str] = Form(None),
-):
+async def _run_contract_review_job(job_id: str, content: bytes, filename: str, focus_areas: Optional[str]):
     """
-    Upload a contract and get a structured review: missing clauses, risky
-    terms, non-standard wording, ambiguities, and Zimbabwe-specific
-    compliance concerns — each finding independently verified against the
-    actual document text before being returned. Not stored, same as
-    Search Vault's document upload — this is a one-off analysis tool.
+    Background job for /api/contract-review -- see that endpoint's docstring
+    for why this runs as fire-and-poll rather than a single synchronous
+    request/response. Contains the full original synchronous logic
+    unchanged (extraction, stage-1 Sonnet generation, stage-2 per-finding
+    verification); only the control flow at the boundaries changed --
+    HTTPException raises became ValueError (caught uniformly below and
+    written into the job's error field, same pattern as
+    _run_document_search_job/_run_document_generation_job), and the final
+    return became a write into _search_jobs[job_id]["result"].
     """
-    user = await get_current_user(request)
-    _check_permission(user, "draft:document")
-    firm = await get_firm_identity()
-
-    content = await file.read()
-    filename = file.filename or "contract"
-    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-    ocr_confidence = None
-
+    _search_jobs[job_id]["status"] = JobStatus.RUNNING
+    print(f"[contract_review_job:{job_id}] STARTED")
     try:
-        if ext == "pdf":
-            doc_text, _, _, ocr_confidence = extract_pdf_text(content)
-        elif ext in ("docx", "doc"):
-            doc_text = extract_docx_text(content)
-        elif ext in ("jpg", "jpeg", "png", "webp"):
-            doc_text, ocr_confidence = ocr_image_bytes(content, ext)
-            if not doc_text:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Could not read text from this image. Make sure the photo is clear, "
-                           "well-lit, and the document fills most of the frame."
-                )
-        else:
-            doc_text = content.decode("utf-8", errors="replace")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Could not read document: {e}")
+        firm = await get_firm_identity()
 
-    if not doc_text or not doc_text.strip():
-        raise HTTPException(status_code=422, detail="No readable text found in the uploaded document.")
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+        ocr_confidence = None
+        try:
+            if ext == "pdf":
+                doc_text, _, _, ocr_confidence = extract_pdf_text(content)
+            elif ext in ("docx", "doc"):
+                doc_text = extract_docx_text(content)
+            elif ext in ("jpg", "jpeg", "png", "webp"):
+                doc_text, ocr_confidence = ocr_image_bytes(content, ext)
+                if not doc_text:
+                    raise ValueError(
+                        "Could not read text from this image. Make sure the photo is clear, "
+                        "well-lit, and the document fills most of the frame."
+                    )
+            else:
+                doc_text = content.decode("utf-8", errors="replace")
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"Could not read document: {e}")
 
-    truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
-    review_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+        if not doc_text or not doc_text.strip():
+            raise ValueError("No readable text found in the uploaded document.")
 
-    focus_line = f"\n\nPay particular attention to: {focus_areas}" if focus_areas else ""
-    prompt = f"""Contract to review ({filename}):
+        print(f"[contract_review_job:{job_id}] EXTRACTION_COMPLETE")
+
+        truncated = len(doc_text) > MAX_ATTACHED_DOC_CHARS
+        review_text = doc_text[:MAX_ATTACHED_DOC_CHARS]
+
+        focus_line = f"\n\nPay particular attention to: {focus_areas}" if focus_areas else ""
+        prompt = f"""Contract to review ({filename}):
 ---
 {review_text}
 ---
@@ -8195,7 +8193,6 @@ async def review_contract(
 
 Review this contract now and call submit_contract_review with your findings."""
 
-    try:
         # asyncio.to_thread is required here, not optional -- confirmed by a
         # real production incident: a request landed right as a deploy was
         # rolling over, the (then-)direct client.messages.create() call
@@ -8231,111 +8228,192 @@ Review this contract now and call submit_contract_review with your findings."""
         tool_use = next((b for b in msg.content if b.type == "tool_use"), None)
         review = tool_use.input if tool_use else {"overall_summary": "", "findings": []}
         if msg.stop_reason == "max_tokens":
-            print(f"[contract-review] generation hit max_tokens (usage={msg.usage}) -- "
+            print(f"[contract_review_job:{job_id}] generation hit max_tokens (usage={msg.usage}) -- "
                   f"output was likely cut off mid-structure")
+        print(f"[contract_review_job:{job_id}] GENERATION_COMPLETE")
+
+        # Stage 2 — verify each finding's quote against the real document text.
+        # unverified_absence findings (no quote — a "missing clause" claim)
+        # can't be checked this way; they're marked distinctly so the UI can
+        # show them with appropriately lower confidence, not silently equal
+        # to a verified quote-backed finding.
+        findings_raw = review.get("findings", [])
+        if isinstance(findings_raw, str):
+            # Observed in production on a real employment contract, repeatedly:
+            # the model flattens `findings` into a JSON-encoded string instead
+            # of emitting a native array in the tool-use input. The first two
+            # occurrences produced a complete, cleanly closed string that
+            # json.loads() recovers correctly (see the isinstance(dict) guard
+            # below for the per-item shape check). A later occurrence on the
+            # same document instead cut off mid-string with no closing
+            # bracket -- that's max_tokens truncation compounding on top of
+            # the same string-flattening behaviour (the escaping overhead from
+            # stringifying the array eats extra output budget, which is part
+            # of why max_tokens was scaled up above and the system prompt now
+            # explicitly forbids this). json.loads() correctly refuses to
+            # fabricate a partial list from truncated JSON in that case, so
+            # this recovery step only ever succeeds on genuinely complete
+            # content -- every recovered item still has to pass the
+            # isinstance(dict) check below like any other finding, so this
+            # doesn't weaken the guard against genuinely malformed input.
+            try:
+                parsed = json.loads(findings_raw)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if isinstance(parsed, list):
+                print(f"[contract_review_job:{job_id}] findings field was a JSON-encoded string; "
+                      f"recovered {len(parsed)} item(s) via json.loads()")
+                findings_raw = parsed
+
+        if not isinstance(findings_raw, list):
+            # Defensive guard against a wrong-typed top-level `findings` value
+            # that recovery couldn't fix (e.g. genuinely not JSON, or JSON
+            # truncated mid-string by max_tokens). Observed in practice, before
+            # any of this existed, as a wildly inflated dropped_unverified_count
+            # (11047 on a 9-page contract) with zero findings shown — because
+            # `for f in "some string"` iterates one character at a time and
+            # every "item" then fails the isinstance(f, dict) check below, so
+            # the per-item guard (which exists for a single malformed *entry*
+            # inside an otherwise-valid list) silently absorbed the whole thing
+            # as thousands of individually "dropped" findings. Fail loudly
+            # instead of returning what would look like a clean "no issues
+            # flagged" result — the entire point of two-stage verification is
+            # to never show a misleading result, and a silently-empty findings
+            # list after a malformed generation is exactly that.
+            print(f"[contract_review_job:{job_id}] findings field was not recoverable as a list "
+                  f"(type={type(findings_raw).__name__}, stop_reason={msg.stop_reason}): "
+                  f"{findings_raw!r:.3000}")
+            truncated_hint = (
+                " The model's response was cut off before completing — this contract may need "
+                "a shorter focus_areas request, or is hitting a generation length limit."
+                if msg.stop_reason == "max_tokens" else ""
+            )
+            raise ValueError(
+                "The contract review didn't come back in the expected format. "
+                "This is a generation error, not a clean review — please try again."
+                + truncated_hint
+            )
+
+        verified_findings = []
+        dropped_count = 0
+        for f in findings_raw:
+            if not isinstance(f, dict):
+                # Defensive guard — the tool schema requires each finding to be
+                # an object, and this hit production once already (a finding
+                # came back as a plain string instead), crashing the whole
+                # request. Skip anything malformed rather than fail the whole
+                # job over one bad entry.
+                print(f"[contract_review_job:{job_id}] Skipping malformed finding (not an object): {f!r}")
+                dropped_count += 1
+                continue
+            quote = f.get("quote")
+            if not quote:
+                f["verification"] = "unverifiable_absence_claim"
+                verified_findings.append(f)
+                continue
+            if _verify_quote_in_text(quote, doc_text):
+                f["verification"] = "verified"
+                verified_findings.append(f)
+            else:
+                # The model claimed this text exists in the contract, but it
+                # doesn't — this is exactly the fabrication risk the two-stage
+                # design exists to catch. Drop it rather than show something
+                # that could be a hallucinated citation-equivalent.
+                dropped_count += 1
+                print(f"[contract_review_job:{job_id}] Dropped unverified finding '{f.get('title')}' — quoted text not found in document")
+
+        result = {
+            "overall_summary": review.get("overall_summary", ""),
+            "findings": verified_findings,
+            "dropped_unverified_count": dropped_count,
+            "document": {
+                "filename": filename, "truncated": truncated,
+                "ocr_confidence": ocr_confidence,
+                "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
+            },
+        }
+
+        _search_jobs[job_id]["result"] = result
+        _search_jobs[job_id]["status"] = JobStatus.COMPLETE
+        print(f"[contract_review_job:{job_id}] COMPLETE")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Contract review failed: {e}")
+        print(f"[contract_review_job:{job_id}] FAILED: {e}")
+        _search_jobs[job_id]["error"] = str(e)
+        _search_jobs[job_id]["status"] = JobStatus.FAILED
 
-    # Stage 2 — verify each finding's quote against the real document text.
-    # unverified_absence findings (no quote — a "missing clause" claim)
-    # can't be checked this way; they're marked distinctly so the UI can
-    # show them with appropriately lower confidence, not silently equal
-    # to a verified quote-backed finding.
-    findings_raw = review.get("findings", [])
-    if isinstance(findings_raw, str):
-        # Observed in production on a real employment contract, repeatedly:
-        # the model flattens `findings` into a JSON-encoded string instead
-        # of emitting a native array in the tool-use input. The first two
-        # occurrences produced a complete, cleanly closed string that
-        # json.loads() recovers correctly (see the isinstance(dict) guard
-        # below for the per-item shape check). A later occurrence on the
-        # same document instead cut off mid-string with no closing
-        # bracket -- that's max_tokens truncation compounding on top of
-        # the same string-flattening behaviour (the escaping overhead from
-        # stringifying the array eats extra output budget, which is part
-        # of why max_tokens was scaled up above and the system prompt now
-        # explicitly forbids this). json.loads() correctly refuses to
-        # fabricate a partial list from truncated JSON in that case, so
-        # this recovery step only ever succeeds on genuinely complete
-        # content -- every recovered item still has to pass the
-        # isinstance(dict) check below like any other finding, so this
-        # doesn't weaken the guard against genuinely malformed input.
-        try:
-            parsed = json.loads(findings_raw)
-        except (json.JSONDecodeError, ValueError):
-            parsed = None
-        if isinstance(parsed, list):
-            print(f"[contract-review] findings field was a JSON-encoded string; "
-                  f"recovered {len(parsed)} item(s) via json.loads()")
-            findings_raw = parsed
+@app.post("/api/contract-review", status_code=202)
+async def review_contract(
+    request: Request,
+    file: UploadFile = File(...),
+    focus_areas: Optional[str] = Form(None),
+):
+    """
+    Upload a contract and get a structured review: missing clauses, risky
+    terms, non-standard wording, ambiguities, and Zimbabwe-specific
+    compliance concerns — each finding independently verified against the
+    actual document text before being returned. Not stored, same as
+    Search Vault's document upload — this is a one-off analysis tool.
 
-    if not isinstance(findings_raw, list):
-        # Defensive guard against a wrong-typed top-level `findings` value
-        # that recovery couldn't fix (e.g. genuinely not JSON, or JSON
-        # truncated mid-string by max_tokens). Observed in practice, before
-        # any of this existed, as a wildly inflated dropped_unverified_count
-        # (11047 on a 9-page contract) with zero findings shown — because
-        # `for f in "some string"` iterates one character at a time and
-        # every "item" then fails the isinstance(f, dict) check below, so
-        # the per-item guard (which exists for a single malformed *entry*
-        # inside an otherwise-valid list) silently absorbed the whole thing
-        # as thousands of individually "dropped" findings. Fail loudly
-        # instead of returning what would look like a clean "no issues
-        # flagged" result — the entire point of two-stage verification is
-        # to never show a misleading result, and a silently-empty findings
-        # list after a malformed generation is exactly that.
-        print(f"[contract-review] findings field was not recoverable as a list "
-              f"(type={type(findings_raw).__name__}, stop_reason={msg.stop_reason}): "
-              f"{findings_raw!r:.3000}")
-        truncated_hint = (
-            " The model's response was cut off before completing — this contract may need "
-            "a shorter focus_areas request, or is hitting a generation length limit."
-            if msg.stop_reason == "max_tokens" else ""
-        )
-        raise HTTPException(
-            status_code=502,
-            detail="The contract review didn't come back in the expected format. "
-                   "This is a generation error, not a clean review — please try again."
-                   + truncated_hint
-        )
+    Runs as a fire-and-poll background job rather than a single synchronous
+    request/response, same pattern and same job store (_search_jobs) as
+    /api/generate-document and /api/search/document -- extraction + Sonnet
+    generation (up to 16000 tokens on long/dense contracts, see
+    _run_contract_review_job's max_tokens comment) + per-finding
+    verification, held behind one synchronous request, is exactly the
+    pipeline shape that was already found to regularly exceed Cloudflare's
+    ~100s edge timeout on /api/generate-document before that got converted.
+    Confirmed via investigation (2026-08-26) that this endpoint had never
+    received the same fix despite an already-documented blocking-event-loop
+    incident on this exact endpoint (see _run_contract_review_job) and a
+    structurally identical pipeline to /api/generate-document's own
+    pre-fix incident. Returns a job_id immediately; poll
+    /api/contract-review/status/{job_id} for progress and the eventual result.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
 
-    verified_findings = []
-    dropped_count = 0
-    for f in findings_raw:
-        if not isinstance(f, dict):
-            # Defensive guard — the tool schema requires each finding to be
-            # an object, and this hit production once already (a finding
-            # came back as a plain string instead), crashing the whole
-            # request. Skip anything malformed rather than 500 the entire
-            # review over one bad entry.
-            print(f"[contract-review] Skipping malformed finding (not an object): {f!r}")
-            dropped_count += 1
-            continue
-        quote = f.get("quote")
-        if not quote:
-            f["verification"] = "unverifiable_absence_claim"
-            verified_findings.append(f)
-            continue
-        if _verify_quote_in_text(quote, doc_text):
-            f["verification"] = "verified"
-            verified_findings.append(f)
-        else:
-            # The model claimed this text exists in the contract, but it
-            # doesn't — this is exactly the fabrication risk the two-stage
-            # design exists to catch. Drop it rather than show something
-            # that could be a hallucinated citation-equivalent.
-            dropped_count += 1
-            print(f"[contract-review] Dropped unverified finding '{f.get('title')}' — quoted text not found in document")
+    # Read the file upfront -- UploadFile is tied to this request/response
+    # cycle and must not be relied on after it ends, same reasoning as
+    # job_files in search_with_document above.
+    content = await file.read()
+    filename = file.filename or "contract"
+
+    now = datetime.utcnow()
+    for jid, job in list(_search_jobs.items()):
+        if now - datetime.fromisoformat(job["created_at"]) > _SEARCH_JOB_MAX_AGE:
+            del _search_jobs[jid]
+
+    job_id = str(_uuid_mod.uuid4())
+
+    _search_jobs[job_id] = {
+        "status": JobStatus.PENDING,
+        "result": None,
+        "error": None,
+        "firm_id": str(user.get("firm_id") or FIRM_ID),
+        "created_at": now.isoformat(),
+    }
+
+    asyncio.create_task(_run_contract_review_job(job_id, content, filename, focus_areas))
+
+    return {"job_id": job_id, "status": "pending"}
+
+@app.get("/api/contract-review/status/{job_id}")
+async def get_contract_review_job_status(job_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "draft:document")
+
+    job = _search_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["firm_id"] != str(user.get("firm_id") or FIRM_ID):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     return {
-        "overall_summary": review.get("overall_summary", ""),
-        "findings": verified_findings,
-        "dropped_unverified_count": dropped_count,
-        "document": {
-            "filename": filename, "truncated": truncated,
-            "ocr_confidence": ocr_confidence,
-            "low_confidence": ocr_confidence is not None and ocr_confidence < 80,
-        },
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job["result"],
+        "error": job["error"],
     }
 
 def _semantic_search_firm(req, chunks: list) -> list:

@@ -10,12 +10,21 @@ backend/main.py — covers two bugs found while diagnosing a real report of
    match entirely depending on where the difference landed relative to the
    step size — both are exercised directly here since they don't need a
    live Anthropic call.
-2. review_contract's Stage 2 loop assumed `findings` was always a list;
-   if the model ever returns it as a plain string, `for f in "..."`
+2. _run_contract_review_job's Stage 2 loop assumed `findings` was always a
+   list; if the model ever returns it as a plain string, `for f in "..."`
    iterates one character at a time, and each "item" fails the
    isinstance(dict) check — silently inflating dropped_unverified_count to
    the string's length while verified_findings stays empty. That's
-   exercised through the real endpoint with a mocked Anthropic client.
+   exercised through the real background job with a mocked Anthropic client.
+
+As of the 2026-08-26 fire-and-poll conversion (matching /api/generate-document
+and /api/search/document -- see that endpoint's docstring for why), the
+actual review pipeline lives in _run_contract_review_job, run as a
+background asyncio task; POST /api/contract-review (review_contract) itself
+now only creates a job and returns {"job_id", "status": "pending"}
+immediately. Tests below call _run_contract_review_job directly and inspect
+the _search_jobs entry it writes into, mirroring exactly how the real
+status-polling endpoint reads a job's outcome.
 """
 import asyncio
 import json
@@ -29,7 +38,7 @@ from backend.main import _normalize_for_match, _verify_quote_in_text, review_con
 
 @pytest.fixture(autouse=True)
 def _fake_firm_identity(monkeypatch):
-    # review_contract() now resolves the firm name/city live via
+    # _run_contract_review_job() resolves the firm name/city live via
     # get_firm_identity() (backend/main.py) instead of the frozen
     # FIRM_NAME/FIRM_CITY constants -- these tests aren't exercising that
     # lookup, so stub it rather than wiring up a fake `firms` row per test.
@@ -37,6 +46,24 @@ def _fake_firm_identity(monkeypatch):
     async def _fake():
         return {"name": "Sawyer & Mkushi", "city": "Harare"}
     monkeypatch.setattr(m, "get_firm_identity", _fake)
+
+
+async def _run_job(content: bytes, filename: str, focus_areas=None):
+    """
+    Runs _run_contract_review_job to completion (awaited directly, not via
+    asyncio.create_task -- the real endpoint creates the task, but tests
+    want deterministic completion) and returns the _search_jobs entry it
+    wrote, for assertions on result/error/status. Mirrors exactly what
+    GET /api/contract-review/status/{job_id} reads in production.
+    """
+    import backend.main as m
+    job_id = f"test-job-{id(content)}-{filename}"
+    m._search_jobs[job_id] = {
+        "status": m.JobStatus.PENDING, "result": None, "error": None,
+        "firm_id": "test-firm", "created_at": m.datetime.utcnow().isoformat(),
+    }
+    await m._run_contract_review_job(job_id, content, filename, focus_areas)
+    return m._search_jobs.pop(job_id)
 
 
 # ── _verify_quote_in_text ────────────────────────────────────────────────────
@@ -96,7 +123,7 @@ def test_normalize_collapses_tabs_and_newlines_like_whitespace():
     assert _normalize_for_match("Clause\t8.3\n\nNon-Compete") == "clause 8.3 non-compete"
 
 
-# ── review_contract's Stage 2 type guard ─────────────────────────────────────
+# ── _run_contract_review_job's Stage 2 type guard ────────────────────────────
 
 class FakeUploadFile:
     def __init__(self, filename, content: bytes):
@@ -116,20 +143,19 @@ def test_findings_as_raw_string_raises_instead_of_inflating_dropped_count(monkey
     # Reproduces the reported bug directly: `findings` comes back as a
     # string instead of a list. Before the fix, this silently produced
     # dropped_unverified_count == len(that string) and an empty findings
-    # list ("No issues flagged"). After the fix it must fail loudly.
+    # list ("No issues flagged"). After the fix it must fail loudly --
+    # now surfaced as a FAILED job with an error message, not an
+    # HTTPException, since this runs as a background job.
     import backend.main as m
     monkeypatch.setattr(
         m.client.messages, "create",
         lambda **kwargs: _fake_tool_use_message("this looks like a findings-shaped string but is not a list")
     )
-    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
-    from fastapi import HTTPException
-    try:
-        asyncio.run(review_contract(None, upload, None))
-        assert False, "expected review_contract to raise"
-    except HTTPException as e:
-        assert e.status_code == 502
+    job = asyncio.run(_run_job(b"Some contract body text.", "contract.txt"))
+
+    assert job["status"] == m.JobStatus.FAILED
+    assert "expected format" in job["error"].lower()
 
 
 def test_findings_as_json_encoded_string_recovers_instead_of_502ing(monkeypatch):
@@ -161,17 +187,18 @@ def test_findings_as_json_encoded_string_recovers_instead_of_502ing(monkeypatch)
         },
     ])
     monkeypatch.setattr(m.client.messages, "create", lambda **kwargs: _fake_tool_use_message(findings_json_string))
-    upload = FakeUploadFile("contract.txt", doc_text)
 
-    result = asyncio.run(review_contract(None, upload, None))
+    job = asyncio.run(_run_job(doc_text, "contract.txt"))
+    result = job["result"]
 
+    assert job["status"] == m.JobStatus.COMPLETE
     assert result["dropped_unverified_count"] == 0
     assert len(result["findings"]) == 1
     assert result["findings"][0]["title"] == "Net salary arrangement may violate PAYE requirements"
     assert result["findings"][0]["verification"] == "verified"
 
 
-def test_findings_as_non_json_string_still_502s(monkeypatch):
+def test_findings_as_non_json_string_still_fails_the_job(monkeypatch):
     # The recovery attempt must not weaken the guard -- a string that
     # isn't valid JSON (or doesn't decode to a list) is a genuine
     # generation failure and must still fail loudly, not silently.
@@ -180,14 +207,11 @@ def test_findings_as_non_json_string_still_502s(monkeypatch):
         m.client.messages, "create",
         lambda **kwargs: _fake_tool_use_message('{"not": "a list, a dict"}')
     )
-    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
-    from fastapi import HTTPException
-    try:
-        asyncio.run(review_contract(None, upload, None))
-        assert False, "expected review_contract to raise"
-    except HTTPException as e:
-        assert e.status_code == 502
+    job = asyncio.run(_run_job(b"Some contract body text.", "contract.txt"))
+
+    assert job["status"] == m.JobStatus.FAILED
+    assert "expected format" in job["error"].lower()
 
 
 def test_single_malformed_entry_in_otherwise_valid_list_is_dropped_not_fatal(monkeypatch):
@@ -203,10 +227,11 @@ def test_single_malformed_entry_in_otherwise_valid_list_is_dropped_not_fatal(mon
          "description": "desc", "quote": "The Employee shall not compete for 24 months following termination."},
     ]
     monkeypatch.setattr(m.client.messages, "create", lambda **kwargs: _fake_tool_use_message(findings))
-    upload = FakeUploadFile("contract.txt", doc_text)
 
-    result = asyncio.run(review_contract(None, upload, None))
+    job = asyncio.run(_run_job(doc_text, "contract.txt"))
+    result = job["result"]
 
+    assert job["status"] == m.JobStatus.COMPLETE
     assert result["dropped_unverified_count"] == 1
     assert len(result["findings"]) == 1
     assert result["findings"][0]["verification"] == "verified"
@@ -219,15 +244,16 @@ def test_missing_findings_key_defaults_to_empty_not_an_error(monkeypatch):
         stop_reason="tool_use", usage=SimpleNamespace(output_tokens=50),
     )
     monkeypatch.setattr(m.client.messages, "create", lambda **kwargs: fake_message)
-    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
-    result = asyncio.run(review_contract(None, upload, None))
+    job = asyncio.run(_run_job(b"Some contract body text.", "contract.txt"))
+    result = job["result"]
 
+    assert job["status"] == m.JobStatus.COMPLETE
     assert result["findings"] == []
     assert result["dropped_unverified_count"] == 0
 
 
-def test_findings_truncated_mid_string_by_max_tokens_still_502s_with_a_useful_hint(monkeypatch):
+def test_findings_truncated_mid_string_by_max_tokens_still_fails_with_a_useful_hint(monkeypatch):
     # The genuinely-different failure mode found on a later production
     # retry: `findings` comes back as a string again, but this time it's
     # incomplete (cut off mid-object, no closing bracket) because the
@@ -246,15 +272,11 @@ def test_findings_truncated_mid_string_by_max_tokens_still_502s_with_a_useful_hi
         m.client.messages, "create",
         lambda **kwargs: _fake_tool_use_message(truncated_json_string, stop_reason="max_tokens")
     )
-    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
-    from fastapi import HTTPException
-    try:
-        asyncio.run(review_contract(None, upload, None))
-        assert False, "expected review_contract to raise"
-    except HTTPException as e:
-        assert e.status_code == 502
-        assert "cut off" in e.detail.lower()
+    job = asyncio.run(_run_job(b"Some contract body text.", "contract.txt"))
+
+    assert job["status"] == m.JobStatus.FAILED
+    assert "cut off" in job["error"].lower()
 
 
 def test_anthropic_call_does_not_block_the_event_loop(monkeypatch):
@@ -267,7 +289,11 @@ def test_anthropic_call_does_not_block_the_event_loop(monkeypatch):
     # immediately beforehand in the Railway logs), and the request died
     # with a bare 502 when the old container was torn down mid-block.
     # Proves the fix: a concurrent coroutine must be able to make progress
-    # while review_contract's Anthropic call is "in flight".
+    # while _run_contract_review_job's Anthropic call is "in flight" --
+    # still relevant after the fire-and-poll conversion, since the job
+    # itself must not block the same event loop other requests (and other
+    # jobs) run on, independent of the separate fact that the job no
+    # longer holds one single client HTTP request open for its duration.
     import backend.main as m
 
     def slow_create(**kwargs):
@@ -275,7 +301,6 @@ def test_anthropic_call_does_not_block_the_event_loop(monkeypatch):
         return _fake_tool_use_message([])
 
     monkeypatch.setattr(m.client.messages, "create", slow_create)
-    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
 
     async def scenario():
         progressed = False
@@ -285,10 +310,31 @@ def test_anthropic_call_does_not_block_the_event_loop(monkeypatch):
             await asyncio.sleep(0.05)  # would never fire if the loop were blocked for 0.3s
             progressed = True
 
-        results = await asyncio.gather(review_contract(None, upload, None), other_coroutine())
+        results = await asyncio.gather(
+            _run_job(b"Some contract body text.", "contract.txt"),
+            other_coroutine(),
+        )
         return results[0], progressed
 
-    result, progressed = asyncio.run(scenario())
+    job, progressed = asyncio.run(scenario())
 
     assert progressed is True
-    assert result["findings"] == []
+    assert job["status"] == m.JobStatus.COMPLETE
+    assert job["result"]["findings"] == []
+
+
+def test_review_contract_endpoint_returns_job_immediately(monkeypatch):
+    # Locks in the new contract from the 2026-08-26 fire-and-poll
+    # conversion: the endpoint itself must return promptly with a job_id,
+    # not the full review result -- the actual work now happens in
+    # _run_contract_review_job, spawned as a background task, matching
+    # /api/generate-document and /api/search/document exactly.
+    import backend.main as m
+    monkeypatch.setattr(m.client.messages, "create", lambda **kwargs: _fake_tool_use_message([]))
+    upload = FakeUploadFile("contract.txt", b"Some contract body text.")
+
+    response = asyncio.run(review_contract(None, upload, None))
+
+    assert "job_id" in response
+    assert response["status"] == "pending"
+    m._search_jobs.pop(response["job_id"], None)  # avoid leaking state between tests
