@@ -35,10 +35,12 @@ class FakeUploadFile:
 def _build_onboarding_xlsx(lawyer, blocks):
     """
     lawyer: {"name", "phone", "email", "role"}
-    blocks: list of {"name", "phone", "email", "contact_person", "matters": [text, ...]}
+    blocks: list of {"name", "phone", "email", "contact_person", "matters": [text, ...],
+                      "client_type" (optional), "beneficial_owner" (optional)}
 
     Column layout: A=Client Name, B=Phone, C=Email, D=Contact Person
-    (companies/entities only), E=Matter description.
+    (companies/entities only), E=Matter description, F=Client Type
+    (optional), G=Is the client itself the beneficial owner? (optional).
     """
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -55,6 +57,8 @@ def _build_onboarding_xlsx(lawyer, blocks):
     ws["C11"] = "Email Address (optional)"
     ws["D11"] = "Contact Person (companies only)"
     ws["E11"] = "Matter (Reference No. — description)"
+    ws["F11"] = "Client Type (optional)"
+    ws["G11"] = "Client is Beneficial Owner? (optional)"
 
     row = 12
     for block in blocks:
@@ -66,6 +70,8 @@ def _build_onboarding_xlsx(lawyer, blocks):
                 ws[f"B{row}"] = block.get("phone")
                 ws[f"C{row}"] = block.get("email")
                 ws[f"D{row}"] = block.get("contact_person")
+                ws[f"F{row}"] = block.get("client_type")
+                ws[f"G{row}"] = block.get("beneficial_owner")
                 first = False
             if matter_text:
                 ws[f"E{row}"] = matter_text
@@ -85,13 +91,35 @@ class _FakeTransaction:
 
 
 class FakeConnection:
-    def __init__(self, users=None, clients=None, matters=None):
+    def __init__(self, users=None, clients=None, matters=None, numbering_counters=None, client_compliance=None):
         self.users = users if users is not None else []
         self.clients = clients if clients is not None else []
         self.matters = matters if matters is not None else []
+        # Phase 1a consolidation: bulk_onboard_from_excel's commit branch
+        # now goes through _create_client_row()/_create_matter_row() ->
+        # _next_client_number()/_next_matter_number() -> _allocate_next_seq(),
+        # the same atomic numbering_counters machinery
+        # tests/test_client_intake.py's fake already needed (client_intake
+        # was already on the atomic path before this consolidation; this
+        # fake previously had none of this because the old
+        # bulk_onboard_from_excel never touched numbering_counters at all
+        # -- that was exactly the non-atomic-numbering bug being fixed).
+        self.numbering_counters = numbering_counters if numbering_counters is not None else []
+        # Compliance-gap fix (2026-08-26): _create_client_row() now also
+        # inserts a client_compliance row for every client it creates.
+        self.client_compliance = client_compliance if client_compliance is not None else []
 
     def transaction(self):
         return _FakeTransaction()
+
+    async def fetchval(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("SELECT 1 FROM numbering_counters WHERE firm_id=$1 AND prefix=$2"):
+            for c in self.numbering_counters:
+                if c["firm_id"] == args[0] and c["prefix"] == args[1]:
+                    return 1
+            return None
+        raise NotImplementedError(f"FakeConnection.fetchval: unhandled query: {q}")
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -106,6 +134,29 @@ class FakeConnection:
                 if u["id"] == args[0]:
                     return {"initials": u.get("initials")}
             return None
+        if q.startswith("UPDATE numbering_counters SET next_seq = next_seq + 1"):
+            firm_id, prefix = args
+            for c in self.numbering_counters:
+                if c["firm_id"] == firm_id and c["prefix"] == prefix:
+                    allocated = c["next_seq"]
+                    c["next_seq"] += 1
+                    return {"allocated": allocated}
+            return None
+        if q.startswith("INSERT INTO clients"):
+            # _create_client_row() uses fetchrow(...RETURNING *), not
+            # execute() -- it needs the inserted row (id, client_number)
+            # back. Same generic column/arg zip trick as execute()'s
+            # handler below.
+            cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
+            row = dict(zip(cols, args))
+            self.clients.append(row)
+            return dict(row)
+        if q.startswith("INSERT INTO matters"):
+            # _create_matter_row() likewise uses fetchrow(...RETURNING *).
+            cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
+            row = dict(zip(cols, args))
+            self.matters.append(row)
+            return dict(row)
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
     async def fetch(self, query, *args):
@@ -133,12 +184,21 @@ class FakeConnection:
         if q.startswith("INSERT INTO users"):
             cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
             self.users.append(dict(zip(cols, args)))
-        elif q.startswith("INSERT INTO clients"):
-            cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
-            self.clients.append(dict(zip(cols, args)))
-        elif q.startswith("INSERT INTO matters"):
-            cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
-            self.matters.append(dict(zip(cols, args)))
+        elif q.startswith("INSERT INTO numbering_counters"):
+            firm_id, prefix, seed = args
+            if not any(c["firm_id"] == firm_id and c["prefix"] == prefix for c in self.numbering_counters):
+                self.numbering_counters.append({"firm_id": firm_id, "prefix": prefix, "next_seq": seed})
+        elif q.startswith("INSERT INTO client_compliance"):
+            client_id, firm_id, client_is_beneficial_owner = args
+            self.client_compliance.append({
+                "client_id": client_id, "firm_id": firm_id,
+                "client_is_beneficial_owner": client_is_beneficial_owner,
+                # Every other column left at its real DB DEFAULT — see
+                # _DEFAULT_CLIENT_COMPLIANCE in backend/main.py.
+                "identity_verification_status": "Unverified", "risk_rating": "NotAssessed",
+                "senior_management_approval_required": False, "enhanced_monitoring_required": False,
+                "conflict_check_reviewed": False,
+            })
         elif q.startswith("UPDATE users SET initials=$1 WHERE id=$2"):
             initials, user_id = args
             for u in self.users:
@@ -161,8 +221,8 @@ class _FakeAcquireCtx:
 
 
 class FakePool:
-    def __init__(self, users=None, clients=None, matters=None):
-        self.conn = FakeConnection(users, clients, matters)
+    def __init__(self, users=None, clients=None, matters=None, numbering_counters=None, client_compliance=None):
+        self.conn = FakeConnection(users, clients, matters, numbering_counters, client_compliance)
 
     def acquire(self):
         return _FakeAcquireCtx(self.conn)
@@ -458,3 +518,96 @@ def test_rejects_non_xlsx_file():
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.docx", b"not really xlsx"), commit=False))
     assert exc_info.value.status_code == 422
+
+
+# ── client_compliance row created at bulk-onboard time (2026-08-26) ────────
+# Confirmed in Phase 0's field-by-field diff: bulk-migrated clients
+# previously got no client_compliance row at all, unlike clients created
+# via the normal single-client UI flow. _create_client_row() now creates
+# one for every client it creates, regardless of caller.
+
+def test_blank_compliance_columns_still_create_a_not_yet_assessed_row(monkeypatch):
+    """Columns F/G (Client Type, Beneficial Owner) are optional — leaving
+    both blank, the normal/expected case, must still produce a real
+    client_compliance row in the default "not yet assessed" state (the
+    same state _DEFAULT_CLIENT_COMPLIANCE encodes), not no row at all."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_onboarding_xlsx(LAWYER, [{
+        "name": "Huang Li Qiang", "phone": "+263771234567", "email": "huang@example.com",
+        "matters": ["HC 1234/26 — Debt collection"],
+        # client_type / beneficial_owner deliberately omitted — blank cells
+    }])
+    result = asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.xlsx", content), commit=True))
+
+    assert result["clients"]["created"][0]["client_number"] == "TM-001"
+    assert len(pool.conn.client_compliance) == 1
+    row = pool.conn.client_compliance[0]
+    assert row["client_id"] == pool.conn.clients[0]["id"]
+    assert row["client_is_beneficial_owner"] is None
+    assert row["identity_verification_status"] == "Unverified"
+    assert row["risk_rating"] == "NotAssessed"
+    # client_type wasn't supplied either — the clients row itself stays
+    # unset, same as every other creation path today.
+    assert pool.conn.clients[0].get("client_type") is None
+
+
+def test_filled_compliance_columns_populate_client_type_and_beneficial_owner(monkeypatch):
+    """When a lawyer/secretary does know these off-hand, both columns
+    parse correctly and land in the right table — client_type on
+    clients, client_is_beneficial_owner on client_compliance."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_onboarding_xlsx(LAWYER, [{
+        "name": "Zenith Holdings (Pvt) Ltd", "phone": "+263771234568", "email": "zenith@example.com",
+        "contact_person": "Farai Muzenda",
+        "matters": ["HC 2000/26 — Commercial dispute"],
+        "client_type": "Company", "beneficial_owner": "No",
+    }])
+    result = asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.xlsx", content), commit=True))
+
+    assert result["clients"]["created"][0]["client_number"] == "TM-001"
+    assert pool.conn.clients[0]["client_type"] == "Company"
+    assert len(pool.conn.client_compliance) == 1
+    assert pool.conn.client_compliance[0]["client_is_beneficial_owner"] == "No"
+
+
+def test_compliance_columns_are_case_insensitive_and_tolerate_a_typo(monkeypatch):
+    """Client Type matches CLIENT_TYPES case-insensitively; an
+    unrecognized value in either column is treated as blank rather than
+    blocking the upload — same "opportunistic, best-effort, never
+    blocks" discipline as practice_area classification just below it."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_onboarding_xlsx(LAWYER, [
+        {
+            "name": "Tariro Chikafu", "phone": "+263771234569",
+            "matters": ["HC 3000/26 — Estate matter"],
+            "client_type": "individual",  # lowercase — must still match "Individual"
+            "beneficial_owner": "YES",    # uppercase — must still match "Yes"
+        },
+        {
+            "name": "Some Trust", "phone": "+263771234570",
+            "matters": ["HC 3001/26 — Trust matter"],
+            "client_type": "Compnay",  # typo — not a real CLIENT_TYPES value
+            "beneficial_owner": "Maybe",  # not Yes/No
+        },
+    ])
+    result = asyncio.run(bulk_onboard_from_excel(None, FakeUploadFile("form.xlsx", content), commit=True))
+
+    assert len(pool.conn.clients) == 2
+    by_name = {c["full_name"]: c for c in pool.conn.clients}
+    assert by_name["Tariro Chikafu"]["client_type"] == "Individual"
+    assert by_name["Some Trust"]["client_type"] is None  # typo -> treated as blank, not an error
+
+    compliance_by_client = {row["client_id"]: row for row in pool.conn.client_compliance}
+    assert compliance_by_client[by_name["Tariro Chikafu"]["id"]]["client_is_beneficial_owner"] == "Yes"
+    assert compliance_by_client[by_name["Some Trust"]["id"]]["client_is_beneficial_owner"] is None
+    # Neither row was rejected — result still reports both matters created.
+    assert len(result["matters"]["created"]) == 2

@@ -48,6 +48,9 @@ class FakeConnection:
         self.idempotency_keys = idempotency_keys if idempotency_keys is not None else []
         self.documents = []
         self.audit_logs = []
+        # Compliance-gap fix (2026-08-26): _create_client_row() now also
+        # inserts a client_compliance row for every client it creates.
+        self.client_compliance = []
 
     def transaction(self):
         return _FakeTransaction()
@@ -104,6 +107,17 @@ class FakeConnection:
             self.clients.append(row)
             return dict(row)
 
+        if q.startswith("INSERT INTO matters"):
+            # Same generic column/arg zip trick as INSERT INTO clients above.
+            # Phase 1a consolidation (_create_matter_row()) switched the
+            # matters insert from execute() to fetchrow(...RETURNING *) --
+            # it needs the inserted row back (id, matter_number) the same
+            # way client_intake already needed it from the clients insert.
+            cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
+            row = dict(zip(cols, args))
+            self.matters.append(row)
+            return dict(row)
+
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
     async def fetch(self, query, *args):
@@ -152,6 +166,15 @@ class FakeConnection:
             cols = [c.strip() for c in q.split("(", 1)[1].split(")", 1)[0].split(",")]
             row = dict(zip(cols, args))
             self.matters.append(row)
+            return "INSERT 0 1"
+
+        if q.startswith("INSERT INTO client_compliance"):
+            client_id, firm_id, client_is_beneficial_owner = args
+            self.client_compliance.append({
+                "client_id": client_id, "firm_id": firm_id,
+                "client_is_beneficial_owner": client_is_beneficial_owner,
+                "identity_verification_status": "Unverified", "risk_rating": "NotAssessed",
+            })
             return "INSERT 0 1"
 
         if q.startswith("INSERT INTO documents"):
@@ -583,3 +606,56 @@ def test_same_key_for_a_different_firm_is_not_treated_as_a_duplicate(monkeypatch
     assert len(pool.conn.idempotency_keys) == 2
     this_firm_rows = [r for r in pool.conn.idempotency_keys if r["firm_id"] == FIRM_ID]
     assert len(this_firm_rows) == 1
+
+
+# ── client_compliance row created at intake time (2026-08-26) ──────────────
+# Confirmed in Phase 0's field-by-field diff: client_intake previously
+# created no client_compliance row at all, same gap as
+# bulk_onboard_from_excel (see tests/test_bulk_onboarding.py's equivalent
+# tests). _create_client_row() now creates one for every new client.
+
+def test_new_client_gets_a_not_yet_assessed_compliance_row(monkeypatch):
+    """client_intake collects no client_type/beneficial-owner fields at
+    all (unlike the bulk-onboard Excel template) -- the row it creates
+    must be the plain default "not yet assessed" state, same as
+    create_client()'s clients today."""
+    import backend.main as m
+    lawyer = _lawyer()
+    pool = FakePool(users=[lawyer])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientIntakeRequest(
+        client_name="Rutendo Gwenzi", phone="+263772100011",
+        matter_type="conveyancing", matter_description="Stand 12 Borrowdale — Transfer",
+        assigned_lawyer_id=str(lawyer["id"]), commit=True,
+    )
+    result = asyncio.run(client_intake(req, _fake_request()))
+
+    assert result["client"]["action"] == "created"
+    assert len(pool.conn.client_compliance) == 1
+    row = pool.conn.client_compliance[0]
+    assert row["client_id"] == pool.conn.clients[0]["id"]
+    assert row["client_is_beneficial_owner"] is None
+    assert row["identity_verification_status"] == "Unverified"
+    assert row["risk_rating"] == "NotAssessed"
+
+
+def test_matched_existing_client_gets_no_new_compliance_row(monkeypatch):
+    """Reusing an existing client (matched or matched_explicit) must not
+    create a second client_compliance row -- only a genuinely new client
+    row gets one."""
+    import backend.main as m
+    lawyer = _lawyer()
+    existing = _client_row("Chiedza Bvumbe", "TC-002")
+    pool = FakePool(users=[lawyer], clients=[existing])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientIntakeRequest(
+        client_name="Chiedza Bvumbe (ignored — existing_client_id wins)", phone="+263772100002",
+        matter_type="litigation_general", matter_description="Second matter for an existing client",
+        assigned_lawyer_id=str(lawyer["id"]), existing_client_id=str(existing["id"]), commit=True,
+    )
+    result = asyncio.run(client_intake(req, _fake_request()))
+
+    assert result["client"]["action"] == "matched_explicit"
+    assert pool.conn.client_compliance == []

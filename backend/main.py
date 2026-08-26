@@ -2314,21 +2314,19 @@ async def auto_create_matter(req: AutoCreateMatterRequest, request: Request):
 
         created_at = datetime.now(timezone.utc)
         sla_deadline = calculate_sla_deadline(created_at, req.coverage_tier)
-        matter_id = _uuid_mod.uuid4()
 
-        row = await conn.fetchrow("""
-            INSERT INTO matters (
-                id, firm_id, name, client_name, client_id, case_parties, status,
-                assigned_lawyer_id, coverage_tier, service_type,
-                sla_deadline, external_ref, created_at
-            )
-            VALUES ($1,$2,$3,$4,$5,$6,'Active',$7,$8,$9,$10,$11,$12)
-            RETURNING *
-        """,
-        matter_id, firm_uuid,
-        f"{client_name} — {req.service_type}", client_name, client_id_uuid, req.case_parties,
-        lawyer_uuid, req.coverage_tier,
-        req.service_type, sla_deadline, req.external_ref, created_at
+        # last_activity intentionally not passed — unchanged from before
+        # this consolidation, stays NULL for this path (see
+        # _create_matter_row()'s docstring; a deliberate non-change, not
+        # an oversight being carried forward silently).
+        row = await _create_matter_row(
+            conn, firm_uuid, f"{client_name} — {req.service_type}",
+            external_ref=req.external_ref,
+            client_name=client_name, client_id=client_id_uuid, case_parties=req.case_parties,
+            status="Active",
+            assigned_lawyer_id=lawyer_uuid, coverage_tier=req.coverage_tier,
+            service_type=req.service_type, sla_deadline=sla_deadline,
+            created_at=created_at,
         )
 
     return {**_row_to_doc(row), "created": True}
@@ -3109,6 +3107,170 @@ async def _next_matter_number(conn, firm_id, client_number: str) -> str:
     seq = await _allocate_next_seq(conn, firm_id, client_number, compute_seed)
     return format_matter_number(client_number, seq)
 
+
+# ── Shared client/matter row creation ──────────────────────────────────────
+# Phase 1a consolidation (2026-08-26): create_client(), create_matter(),
+# auto_create_matter(), bulk_import_matters(), bulk_onboard_from_excel(),
+# and client_intake() each used to hand-write their own INSERT INTO
+# clients/matters, with no shared function -- a real, live drift risk
+# (any change to numbering/defaults had to be made correctly in up to
+# five places by hand). Diffed all five field-by-field before writing
+# this; see git history for the full comparison. Two real behavioral
+# differences were found and are fixed here, not just consolidated:
+#   - bulk_onboard_from_excel's commit-time client/matter numbering used
+#     to be a manual in-Python counter seeded from a SELECT...LIKE scan,
+#     never touching numbering_counters -- not concurrency-safe, unlike
+#     every other path. Now goes through the same atomic
+#     _next_client_number()/_next_matter_number() (real row lock on
+#     numbering_counters) as everyone else. Preview mode (commit=False)
+#     is untouched -- it must never burn a real sequence number for a
+#     plan that might not be applied.
+#   - bulk_onboard_from_excel's client rows never got created_by set at
+#     all. Now set to the onboarded/matched lawyer's id, same as the
+#     matter rows it creates in the same request.
+# Every other field-by-field difference found (client_intake's Case
+# Binder provisioning and audit log, auto_create_matter's SLA fields,
+# bulk_import_matters' progress-notes side effect and lack of a client
+# link, differing permission checks, auto_create_matter's NULL
+# last_activity, etc.) is preserved exactly as each caller had it --
+# these two functions are pure row-write primitives with no validation
+# and no policy of their own; each caller decides what to pass.
+
+
+async def _create_client_row(
+    conn, firm_id, initials: str, full_name: str, *,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    physical_address: Optional[str] = None,
+    id_or_registration_number: Optional[str] = None,
+    contact_person: Optional[str] = None,
+    notes: Optional[str] = None,
+    created_by: Optional[_uuid_mod.UUID] = None,
+    client_type: Optional[str] = None,
+    client_is_beneficial_owner: Optional[str] = None,
+) -> "asyncpg.Record":
+    """
+    Shared INSERT for a new clients row. Atomically allocates the next
+    client_number under `initials` via _next_client_number() -- always a
+    real write; never call this from a preview branch (preview's
+    "would-be number" stays a separate, read-only next_sequence()
+    estimate in each caller, unchanged).
+
+    Takes `initials` (already resolved), not a user to resolve them
+    from: callers differ on whose initials to number under (the
+    submitting user for create_client; the assigned/onboarded lawyer for
+    client_intake and bulk_onboard_from_excel), and bulk_onboard_from_excel
+    specifically needs to resolve initials once per upload and reuse them
+    across every client it creates rather than re-resolving per row.
+    Call _resolve_user_initials() yourself first.
+
+    Also creates the client's client_compliance row, in the same default
+    "not yet assessed" state _DEFAULT_CLIENT_COMPLIANCE encodes (every
+    other column left to its own DB DEFAULT: identity_verification_status
+    'Unverified', risk_rating 'NotAssessed', the boolean flags FALSE) --
+    closes a real gap where bulk-migrated clients (via
+    bulk_onboard_from_excel/client_intake) previously got no
+    client_compliance row at creation at all, unlike clients created via
+    the normal single-client flow -- both got none before this, but
+    "none" is now uniformly replaced with an explicit not-yet-assessed
+    row for every path. `client_type` (a clients-table column) and
+    `client_is_beneficial_owner` (a client_compliance-table column) are
+    optional overrides for the two compliance fields the bulk-onboard
+    Excel template can populate directly when a lawyer/secretary already
+    knows them off-hand; every other compliance field stays at its
+    default until someone opens the compliance modal. create_client()
+    and client_intake() don't collect either field today and pass
+    neither, unchanged from their prior behavior.
+    """
+    cid = _uuid_mod.uuid4()
+    now = datetime.utcnow()
+    client_number = await _next_client_number(conn, firm_id, initials)
+    row = await conn.fetchrow("""
+        INSERT INTO clients (id, firm_id, full_name, email, phone,
+                             physical_address, id_or_registration_number, contact_person, notes,
+                             client_number, client_type, created_by, created_at, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)
+        RETURNING *
+    """,
+    cid, firm_id, full_name, email, phone,
+    physical_address, id_or_registration_number, contact_person, notes,
+    client_number, client_type, created_by, now,
+    )
+    await conn.execute("""
+        INSERT INTO client_compliance (client_id, firm_id, client_is_beneficial_owner)
+        VALUES ($1, $2, $3)
+    """, cid, firm_id, client_is_beneficial_owner)
+    return row
+
+
+async def _create_matter_row(
+    conn, firm_id, name: str, *,
+    number: Optional[str] = None,
+    internal_ref: Optional[str] = None,
+    external_ref: Optional[str] = None,
+    client_name: Optional[str] = None,
+    client_id: Optional[_uuid_mod.UUID] = None,
+    case_parties: Optional[str] = None,
+    matter_type: Optional[str] = None,
+    practice_area: Optional[str] = None,
+    status: str = "Active",
+    custom_status: Optional[str] = None,
+    next_deadline: Optional[date] = None,
+    next_deadline_note: Optional[str] = None,
+    assigned_lawyer_id: Optional[_uuid_mod.UUID] = None,
+    coverage_tier: Optional[str] = None,
+    service_type: Optional[str] = None,
+    sla_deadline: Optional[datetime] = None,
+    numbering_client_number: Optional[str] = None,
+    created_by: Optional[_uuid_mod.UUID] = None,
+    created_at: Optional[datetime] = None,
+    last_activity: Optional[datetime] = None,
+) -> "asyncpg.Record":
+    """
+    Shared INSERT for a new matters row. Atomically allocates
+    matter_number (via _next_matter_number()) iff `numbering_client_number`
+    is passed -- the caller decides whether numbering applies at all, by
+    passing the linked client's client_number or leaving it out. This
+    reproduces every existing caller's numbering rule unchanged:
+    create_matter already only numbers when the linked client has a
+    client_number, which falls out naturally here since it's the
+    caller's job to pass (or not pass) that value; auto_create_matter
+    and bulk_import_matters never request numbering at all, by never
+    passing this.
+
+    `created_at`/`last_activity` both default to None, meaning "leave
+    unset" -- last_activity has no DB default and NULL is a normal,
+    sorted-around state elsewhere (list_matters' `ORDER BY last_activity
+    DESC NULLS LAST`). Pass both explicitly to get "now"; deliberately
+    NOT defaulted to now() here so auto_create_matter's existing
+    NULL-last_activity behavior (unchanged, not a bug being fixed as
+    part of this consolidation) falls out by simply not passing it,
+    rather than needing a special case.
+    """
+    mid = _uuid_mod.uuid4()
+    matter_number = (
+        await _next_matter_number(conn, firm_id, numbering_client_number)
+        if numbering_client_number else None
+    )
+    return await conn.fetchrow("""
+        INSERT INTO matters (
+            id, firm_id, name, number, internal_ref, external_ref,
+            client_name, client_id, case_parties, matter_type, practice_area,
+            status, custom_status, next_deadline, next_deadline_note,
+            assigned_lawyer_id, coverage_tier, service_type, sla_deadline,
+            matter_number, created_by, created_at, last_activity
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        RETURNING *
+    """,
+    mid, firm_id, name, number, internal_ref, external_ref,
+    client_name, client_id, case_parties, matter_type, practice_area,
+    status, custom_status, next_deadline, next_deadline_note,
+    assigned_lawyer_id, coverage_tier, service_type, sla_deadline,
+    matter_number, created_by, created_at, last_activity,
+    )
+
+
 _CONVEYANCING_DATE_EVENT_TITLES = {
     "conveyancing_transfer_date": "Conveyancing: Transfer Date",
     "conveyancing_rates_clearance_expiry": "Conveyancing: Rates Clearance Expiry",
@@ -3847,7 +4009,6 @@ async def create_matter(matter: MatterCreate, request: Request):
     _check_permission(user, "matter:create")
     if matter.practice_area and matter.practice_area not in PRACTICE_AREAS:
         raise HTTPException(status_code=422, detail=f"practice_area must be one of: {', '.join(PRACTICE_AREAS)}")
-    mid = _uuid_mod.uuid4()
     now = datetime.utcnow()
     parsed_deadline = None
     if matter.next_deadline:
@@ -3858,7 +4019,7 @@ async def create_matter(matter: MatterCreate, request: Request):
 
     client_id = None
     client_name = matter.client_name
-    matter_number = None
+    numbering_client_number = None
     async with _db_pool.acquire() as conn:
         if matter.client_id:
             try:
@@ -3876,26 +4037,22 @@ async def create_matter(matter: MatterCreate, request: Request):
             client_name = client_row["full_name"]
             # Only clients that already have a client_number (post-numbering,
             # or backfilled — see scripts/backfill_client_matter_numbers.py)
-            # get their matters numbered; NULL otherwise.
-            if client_row["client_number"]:
-                matter_number = await _next_matter_number(conn, FIRM_ID, client_row["client_number"])
+            # get their matters numbered; NULL otherwise. _create_matter_row()
+            # only allocates a matter_number when numbering_client_number is
+            # passed, so this falls out naturally.
+            numbering_client_number = client_row["client_number"]
 
-        row = await conn.fetchrow("""
-            INSERT INTO matters (id, firm_id, name, number, internal_ref, external_ref,
-                                 client_name, client_id, case_parties, matter_type, status, custom_status,
-                                 last_activity, created_at, created_by,
-                                 next_deadline, next_deadline_note, matter_number, practice_area)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-            RETURNING *
-        """,
-        mid, FIRM_ID,
-        matter.name, matter.number or matter.internal_ref,
-        matter.internal_ref, matter.external_ref,
-        client_name, client_id, matter.case_parties, matter.matter_type,
-        matter.status or "Active", matter.custom_status,
-        now, now,
-        _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
-        parsed_deadline, matter.next_deadline_note, matter_number, matter.practice_area
+        row = await _create_matter_row(
+            conn, FIRM_ID, matter.name,
+            number=matter.number or matter.internal_ref,
+            internal_ref=matter.internal_ref, external_ref=matter.external_ref,
+            client_name=client_name, client_id=client_id, case_parties=matter.case_parties,
+            matter_type=matter.matter_type, practice_area=matter.practice_area,
+            status=matter.status or "Active", custom_status=matter.custom_status,
+            next_deadline=parsed_deadline, next_deadline_note=matter.next_deadline_note,
+            numbering_client_number=numbering_client_number,
+            created_by=_uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+            created_at=now, last_activity=now,
         )
     m = _row_to_matter(row)
     m["progress_notes"] = []
@@ -3905,24 +4062,17 @@ async def create_matter(matter: MatterCreate, request: Request):
 async def create_client(client: ClientCreate, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "client:create")
-    cid = _uuid_mod.uuid4()
-    now = datetime.utcnow()
     async with _db_pool.acquire() as conn:
         initials = await _resolve_user_initials(
             conn, FIRM_ID, user.get("id"), user.get("display_name") or "Client"
         )
-        client_number = await _next_client_number(conn, FIRM_ID, initials)
-        row = await conn.fetchrow("""
-            INSERT INTO clients (id, firm_id, full_name, email, phone,
-                                 physical_address, id_or_registration_number, contact_person, notes,
-                                 client_number, created_by, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-            RETURNING *
-        """,
-        cid, FIRM_ID,
-        client.full_name, client.email, client.phone,
-        client.physical_address, client.id_or_registration_number, client.contact_person, client.notes,
-        client_number, _uuid_mod.UUID(str(user["id"])) if user.get("id") else None, now, now
+        row = await _create_client_row(
+            conn, FIRM_ID, initials, client.full_name,
+            email=client.email, phone=client.phone,
+            physical_address=client.physical_address,
+            id_or_registration_number=client.id_or_registration_number,
+            contact_person=client.contact_person, notes=client.notes,
+            created_by=_uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
         )
     return _row_to_client(row)
 
@@ -4787,23 +4937,20 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
     # Bulk insert into PostgreSQL
     async with _db_pool.acquire() as conn:
         for m in matters_to_insert:
-            row = await conn.fetchrow("""
-                INSERT INTO matters (id, firm_id, name, number, internal_ref, external_ref,
-                                     client_name, case_parties, matter_type, status, custom_status,
-                                     last_activity, created_at)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
-            """,
-            m["id"], FIRM_ID, m["name"], m["number"], m["internal_ref"], m["external_ref"],
-            m["client_name"], m["case_parties"], m["matter_type"], m["status"], m["custom_status"],
-            m["last_activity"], m["created_at"]
+            row = await _create_matter_row(
+                conn, FIRM_ID, m["name"],
+                number=m["number"], internal_ref=m["internal_ref"], external_ref=m["external_ref"],
+                client_name=m["client_name"], case_parties=m["case_parties"],
+                matter_type=m["matter_type"], status=m["status"], custom_status=m["custom_status"],
+                created_at=m["created_at"], last_activity=m["last_activity"],
             )
             for note in m.get("notes", []):
                 await conn.execute("""
                     INSERT INTO progress_notes (matter_id, firm_id, text, author, created_at)
                     VALUES ($1,$2,$3,$4,$5)
-                """, m["id"], FIRM_ID, note["text"], note["author"], m["created_at"])
+                """, row["id"], FIRM_ID, note["text"], note["author"], m["created_at"])
             created.append({
-                "id": str(m["id"]), "name": m["name"],
+                "id": str(row["id"]), "name": m["name"],
                 "internal_ref": m["internal_ref"], "client_name": m["client_name"],
                 "status": m["status"], "matter_type": m["matter_type"]
             })
@@ -4816,16 +4963,61 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
 # header-alias parser. The form's cell positions are the source of truth:
 #   B3/B4/B5/B6  — lawyer Name / Phone / Email / Role ("Partner"/"Associate")
 #   Row 11       — column headers (not parsed — position-based, see below)
-#   Row 12+      — one row per matter. Column A (+B/C/D) filled only on a
-#                  client's first row, blank on subsequent matter rows for
-#                  that same client. Column D is Contact Person — companies/
-#                  entities only, blank for individuals. Column E is one
-#                  matter's free-text "Reference/Case No. — description",
-#                  stored as-is.
+#   Row 12+      — one row per matter. Column A (+B/C/D/F/G) filled only
+#                  on a client's first row, blank on subsequent matter
+#                  rows for that same client. Column D is Contact Person
+#                  — companies/entities only, blank for individuals.
+#                  Column E is one matter's free-text "Reference/Case
+#                  No. — description", stored as-is. Columns F (Client
+#                  Type) and G (Is the client itself the beneficial
+#                  owner?) are OPTIONAL compliance fields added
+#                  2026-08-26 — see _normalize_client_type_cell()/
+#                  _normalize_beneficial_owner_cell() below; a blank
+#                  cell in either is normal, not an error, and leaves
+#                  the client's compliance record in its default
+#                  "not yet assessed" state.
 
 def _cell_str(ws, coord: str) -> str:
     v = ws[coord].value
     return str(v).strip() if v is not None else ""
+
+
+def _normalize_client_type_cell(raw: str) -> Optional[str]:
+    """
+    Optional Client Type column (2026-08-26 compliance-gap fix) — blank is
+    the normal, expected case, not an error. Case-insensitive match
+    against CLIENT_TYPES; anything that doesn't match one of those exact
+    values (a typo, an unrelated note) is treated the same as blank
+    rather than blocking the upload — same "opportunistic, best-effort,
+    never blocks" discipline this endpoint already applies to matter
+    practice_area classification just below.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    for ct in CLIENT_TYPES:
+        if ct.lower() == raw.lower():
+            return ct
+    return None
+
+
+def _normalize_beneficial_owner_cell(raw: str) -> Optional[str]:
+    """
+    Optional "is the client itself the beneficial owner?" column
+    (2026-08-26 compliance-gap fix) — Yes/No/blank, case-insensitive.
+    Deliberately narrower than client_compliance.client_is_beneficial_owner's
+    full Yes/No/Unknown range: a bulk-migration spreadsheet cell is either
+    answered or left blank (-> not yet assessed, same as every other
+    compliance field at creation), never explicitly "Unknown" -- that
+    value only makes sense as something a lawyer sets deliberately via
+    the compliance modal.
+    """
+    raw = (raw or "").strip().lower()
+    if raw == "yes":
+        return "Yes"
+    if raw == "no":
+        return "No"
+    return None
 
 
 @app.post("/api/onboarding/bulk-upload")
@@ -4901,6 +5093,11 @@ async def bulk_onboard_from_excel(
 
     # ── Client/matter rows ────────────────────────────────────────────────
     # One block per client: {"row", "name", "phone", "email", "contact_person", "matters": [text, ...]}
+    # F (Client Type) and G (Is the client itself the beneficial owner?)
+    # are optional compliance columns (2026-08-26) -- a blank cell in
+    # either is normal, expected input, not an error; see
+    # _normalize_client_type_cell()/_normalize_beneficial_owner_cell()
+    # below for exactly how each is parsed.
     blocks = []
     row_errors = []
     current = None
@@ -4910,10 +5107,14 @@ async def bulk_onboard_from_excel(
         email = _cell_str(ws, f"C{row_idx}") or None
         contact_person = _cell_str(ws, f"D{row_idx}") or None
         matter_text = _cell_str(ws, f"E{row_idx}")
+        client_type_cell = _cell_str(ws, f"F{row_idx}")
+        beneficial_owner_cell = _cell_str(ws, f"G{row_idx}")
 
         if name:
             current = {"row": row_idx, "name": name, "phone": phone, "email": email,
-                       "contact_person": contact_person, "matters": []}
+                       "contact_person": contact_person, "matters": [],
+                       "client_type": _normalize_client_type_cell(client_type_cell),
+                       "client_is_beneficial_owner": _normalize_beneficial_owner_cell(beneficial_owner_cell)}
             blocks.append(current)
         if matter_text:
             if current is None:
@@ -4961,16 +5162,33 @@ async def bulk_onboard_from_excel(
                 existing_lawyer["display_name"] if existing_lawyer else lawyer_name,
                 persist=commit,
             )
-            existing_client_numbers = await conn.fetch(
-                "SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2",
-                FIRM_ID, f"{lawyer_initials}-%",
-            )
-            next_client_seq = next_sequence(
-                [r["client_number"] for r in existing_client_numbers], lawyer_initials
-            )
-            matter_seq_cache = {}  # client_number -> next matter sequence, lazily loaded from DB
+            # Numbering, commit vs preview. Commit uses the same atomic
+            # _next_client_number()/_next_matter_number() (via
+            # _create_client_row()/_create_matter_row() below) as every
+            # other creation path -- a real row lock on numbering_counters,
+            # so two concurrent writers (e.g. this upload and someone
+            # hitting POST /api/clients at the same moment) can never be
+            # handed the same number. This used to be a manual in-Python
+            # counter seeded from a SELECT...LIKE scan that never touched
+            # numbering_counters at all -- not concurrency-safe, fixed as
+            # part of the Phase 1a consolidation (see the note above
+            # _create_client_row()). Preview must NOT call the atomic
+            # functions -- that would burn a real sequence number for a
+            # plan that might never be applied -- so it keeps the original
+            # read-only running-estimate logic, unchanged.
+            next_client_seq = None
+            matter_seq_cache = {}  # preview only: client_number -> next matter sequence estimate
+            if not commit:
+                existing_client_numbers = await conn.fetch(
+                    "SELECT client_number FROM clients WHERE firm_id=$1 AND client_number LIKE $2",
+                    FIRM_ID, f"{lawyer_initials}-%",
+                )
+                next_client_seq = next_sequence(
+                    [r["client_number"] for r in existing_client_numbers], lawyer_initials
+                )
 
-            async def _next_matter_seq(client_number):
+            async def _next_matter_seq_estimate(client_number):
+                """Preview-only read-only estimate — never allocated for real."""
                 if client_number not in matter_seq_cache:
                     mrows = await conn.fetch(
                         "SELECT matter_number FROM matters WHERE firm_id=$1 AND matter_number LIKE $2",
@@ -5014,22 +5232,26 @@ async def bulk_onboard_from_excel(
                         "matched_client_number": client_number_for_block,
                     })
                 elif match["status"] == "no_match":
-                    new_id = _uuid_mod.uuid4()
+                    if commit:
+                        client_row = await _create_client_row(
+                            conn, FIRM_ID, lawyer_initials, block["name"],
+                            email=block["email"], phone=block["phone"],
+                            contact_person=block["contact_person"],
+                            created_by=lawyer_id,  # FIX (Phase 1a): previously omitted entirely
+                            client_type=block["client_type"],
+                            client_is_beneficial_owner=block["client_is_beneficial_owner"],
+                        )
+                        new_id = client_row["id"]
+                        client_number_for_block = client_row["client_number"]
+                    else:
+                        new_id = _uuid_mod.uuid4()
+                        client_number_for_block = format_client_number(lawyer_initials, next_client_seq)
+                        next_client_seq += 1
                     client_id = new_id
-                    client_number_for_block = format_client_number(lawyer_initials, next_client_seq)
-                    next_client_seq += 1
                     clients_created.append({
                         "row": block["row"], "name": block["name"], "client_id": str(new_id),
                         "contact_person": block["contact_person"], "client_number": client_number_for_block,
                     })
-                    if commit:
-                        await conn.execute(
-                            """INSERT INTO clients (id, firm_id, full_name, email, phone, contact_person,
-                                                    client_number, created_at, updated_at)
-                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
-                            new_id, FIRM_ID, block["name"], block["email"], block["phone"],
-                            block["contact_person"], client_number_for_block, now, now,
-                        )
                     pool.append({"id": str(new_id), "full_name": block["name"], "client_number": client_number_for_block})
                 else:  # ambiguous — never guess; matters below stay unlinked
                     client_id = None
@@ -5038,11 +5260,6 @@ async def bulk_onboard_from_excel(
                     })
 
                 for matter_text in block["matters"]:
-                    matter_id = _uuid_mod.uuid4()
-                    matter_number = (
-                        format_matter_number(client_number_for_block, await _next_matter_seq(client_number_for_block))
-                        if client_number_for_block else None
-                    )
                     # Opportunistic, best-effort — never blocks the upload.
                     # Only a confident single-category keyword match is
                     # applied; ambiguous/no-match rows are simply left
@@ -5051,18 +5268,27 @@ async def bulk_onboard_from_excel(
                     # not guessed here).
                     classification = classify_practice_area(extract_classification_text(matter_text))
                     practice_area = classification.get("practice_area") if classification["status"] == "matched" else None
+
+                    if commit:
+                        matter_row = await _create_matter_row(
+                            conn, FIRM_ID, matter_text,
+                            client_name=block["name"], client_id=client_id,
+                            status="Active", practice_area=practice_area,
+                            numbering_client_number=client_number_for_block,
+                            created_by=lawyer_id, created_at=now, last_activity=now,
+                        )
+                        matter_id = matter_row["id"]
+                        matter_number = matter_row["matter_number"]
+                    else:
+                        matter_id = _uuid_mod.uuid4()
+                        matter_number = (
+                            format_matter_number(client_number_for_block, await _next_matter_seq_estimate(client_number_for_block))
+                            if client_number_for_block else None
+                        )
                     entry = {"row": block["row"], "client_name": block["name"],
                              "name": matter_text, "matter_id": str(matter_id), "matter_number": matter_number,
                              "practice_area": practice_area}
                     (matters_created if client_id is not None else matters_unlinked).append(entry)
-                    if commit:
-                        await conn.execute(
-                            """INSERT INTO matters (id, firm_id, name, client_name, client_id, status,
-                                                    created_by, created_at, last_activity, matter_number, practice_area)
-                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
-                            matter_id, FIRM_ID, matter_text, block["name"], client_id, "Active", lawyer_id, now, now,
-                            matter_number, practice_area,
-                        )
 
     return {
         "committed": commit,
@@ -5237,13 +5463,27 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
                     ],
                 }
             else:  # no_match
-                initials = await _resolve_user_initials(
-                    conn, FIRM_ID, lawyer_row["id"], lawyer_row["display_name"], persist=req.commit
-                )
+                client_full_name = req.client_name
                 if req.commit:
-                    client_id = _uuid_mod.uuid4()
-                    client_number = await _next_client_number(conn, FIRM_ID, initials)
+                    # Actual id/client_number allocation is deferred to the
+                    # transaction below (via _create_client_row(), called
+                    # alongside the matter/case-binder/audit-log writes) --
+                    # bundling atomic numbering with the insert inside that
+                    # same transaction means a failure anywhere in it rolls
+                    # back the number allocation too, not just the row.
+                    # (Previously numbering was its own committed statement
+                    # before the transaction even opened, so a burned
+                    # sequence number could survive a rolled-back commit --
+                    # fixed as an incidental consequence of the Phase 1a
+                    # consolidation, not a separate deliberate change.)
+                    client_result = {
+                        "action": "created", "client_id": None,
+                        "full_name": client_full_name, "client_number": None,
+                    }
                 else:
+                    initials = await _resolve_user_initials(
+                        conn, FIRM_ID, lawyer_row["id"], lawyer_row["display_name"], persist=False
+                    )
                     # Would-be number only — see module docstring above for
                     # why this can't call _next_client_number() in preview.
                     existing_numbers = await conn.fetch(
@@ -5252,36 +5492,39 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
                     )
                     would_be_seq = next_sequence([r["client_number"] for r in existing_numbers], initials)
                     client_number = format_client_number(initials, would_be_seq)
-                client_full_name = req.client_name
-                client_result = {
-                    "action": "created" if req.commit else "would_create",
-                    "client_id": str(client_id) if req.commit else None,
-                    "full_name": client_full_name, "client_number": client_number,
-                }
+                    client_result = {
+                        "action": "would_create", "client_id": None,
+                        "full_name": client_full_name, "client_number": client_number,
+                    }
 
         # ── Matter + Case Binder ────────────────────────────────────────────
         if req.commit:
             async with conn.transaction():
                 now = datetime.utcnow()
                 if client_result["action"] == "created":
-                    await conn.execute(
-                        """INSERT INTO clients (id, firm_id, full_name, email, phone, contact_person,
-                                                client_number, created_by, created_at, updated_at)
-                           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)""",
-                        client_id, FIRM_ID, client_full_name, req.email, req.phone, req.contact_person,
-                        client_number, lawyer_row["id"], now,
+                    initials = await _resolve_user_initials(
+                        conn, FIRM_ID, lawyer_row["id"], lawyer_row["display_name"], persist=True
                     )
+                    client_row = await _create_client_row(
+                        conn, FIRM_ID, initials, client_full_name,
+                        email=req.email, phone=req.phone, contact_person=req.contact_person,
+                        created_by=lawyer_row["id"],
+                    )
+                    client_id = client_row["id"]
+                    client_number = client_row["client_number"]
+                    client_result["client_id"] = str(client_id)
+                    client_result["client_number"] = client_number
 
-                matter_id = _uuid_mod.uuid4()
-                matter_number = await _next_matter_number(conn, FIRM_ID, client_number) if client_number else None
-                await conn.execute(
-                    """INSERT INTO matters (id, firm_id, name, client_name, client_id, status,
-                                            matter_type, assigned_lawyer_id, matter_number,
-                                            created_by, created_at, last_activity)
-                       VALUES ($1,$2,$3,$4,$5,'Active',$6,$7,$8,$9,$10,$10)""",
-                    matter_id, FIRM_ID, req.matter_description, client_full_name, client_id,
-                    req.matter_type, lawyer_row["id"], matter_number, lawyer_row["id"], now,
+                matter_row = await _create_matter_row(
+                    conn, FIRM_ID, req.matter_description,
+                    client_name=client_full_name, client_id=client_id,
+                    status="Active", matter_type=req.matter_type,
+                    assigned_lawyer_id=lawyer_row["id"],
+                    numbering_client_number=client_number,
+                    created_by=lawyer_row["id"], created_at=now, last_activity=now,
                 )
+                matter_id = matter_row["id"]
+                matter_number = matter_row["matter_number"]
                 matter_result = {
                     "action": "created", "matter_id": str(matter_id), "matter_number": matter_number,
                     "name": req.matter_description, "matter_type": req.matter_type,

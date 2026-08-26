@@ -153,7 +153,7 @@ def test_bulk_import_xlsx_populates_case_parties_from_opposing_party(monkeypatch
     row = pool.conn.matters[0]
     assert row["case_parties"] == "Zenith Pvt Ltd (Chikwanha's employer)"
     assert row["client_name"] == "Tendai Chikwanha"
-    assert "client_id" not in row  # never inserted — see module docstring
+    assert row["client_id"] is None  # never linked — see module docstring
 
 
 def test_bulk_import_xlsx_case_parties_null_when_no_opposing_party_given(monkeypatch):
@@ -210,7 +210,7 @@ def test_bulk_import_docx_still_works_case_parties_null(monkeypatch):
     row = pool.conn.matters[0]
     assert row["client_name"] == "Peter Ndlovu"
     assert row["case_parties"] is None
-    assert "client_id" not in row
+    assert row["client_id"] is None
 
 
 def test_bulk_import_rejects_unsupported_file_type():

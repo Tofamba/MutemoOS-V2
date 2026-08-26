@@ -35,11 +35,14 @@ from fastapi import HTTPException
 
 
 class FakeConnection:
-    def __init__(self, clients, matters, users=None, numbering_counters=None):
+    def __init__(self, clients, matters, users=None, numbering_counters=None, client_compliance=None):
         self.clients = clients
         self.matters = matters
         self.users = users if users is not None else []
         self.numbering_counters = numbering_counters if numbering_counters is not None else []
+        # Compliance-gap fix (2026-08-26): _create_client_row() now also
+        # inserts a client_compliance row for every client it creates.
+        self.client_compliance = client_compliance if client_compliance is not None else []
 
     async def fetchval(self, query, *args):
         q = " ".join(query.split())
@@ -152,6 +155,13 @@ class FakeConnection:
             if not any(c["firm_id"] == firm_id and c["prefix"] == prefix for c in self.numbering_counters):
                 self.numbering_counters.append({"firm_id": firm_id, "prefix": prefix, "next_seq": seed})
             return "INSERT 0 1"
+        if q.startswith("INSERT INTO client_compliance"):
+            client_id, firm_id, client_is_beneficial_owner = args
+            self.client_compliance.append({
+                "client_id": client_id, "firm_id": firm_id,
+                "client_is_beneficial_owner": client_is_beneficial_owner,
+            })
+            return "INSERT 0 1"
         return "OK"
 
 
@@ -167,12 +177,13 @@ class _FakeAcquireCtx:
 
 
 class FakePool:
-    def __init__(self, clients=None, matters=None, users=None, numbering_counters=None):
+    def __init__(self, clients=None, matters=None, users=None, numbering_counters=None, client_compliance=None):
         self.conn = FakeConnection(
             clients if clients is not None else [],
             matters if matters is not None else [],
             users if users is not None else [],
             numbering_counters if numbering_counters is not None else [],
+            client_compliance if client_compliance is not None else [],
         )
 
     def acquire(self):
@@ -208,6 +219,26 @@ def test_create_client_returns_stringified_ids_and_all_fields(monkeypatch):
     assert result["firm_id"] == str(FIRM_ID)
     assert result["created_at"] is not None
     assert len(pool.conn.clients) == 1
+
+
+def test_create_client_also_creates_a_not_yet_assessed_compliance_row(monkeypatch):
+    """Compliance-gap fix (2026-08-26): every client creation path now
+    gets a client_compliance row via _create_client_row() — verified
+    here for the canonical single-client path too, alongside the
+    equivalent tests for client_intake and bulk_onboard_from_excel.
+    create_client() collects no client_type/beneficial-owner fields, so
+    this must be the plain default "not yet assessed" state."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientCreate(full_name="John Moyo", email="john@example.com", phone="+263771234567")
+    result = asyncio.run(create_client(req, None))
+
+    assert len(pool.conn.client_compliance) == 1
+    row = pool.conn.client_compliance[0]
+    assert row["client_id"] == uuid.UUID(result["id"])
+    assert row["client_is_beneficial_owner"] is None
 
 
 def test_create_client_assigns_first_client_number_under_creating_users_initials(monkeypatch):
