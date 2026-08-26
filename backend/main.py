@@ -932,13 +932,32 @@ async def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_report_history_firm ON report_history(firm_id, generated_at DESC);
         """)
 
-        # Seed Nyari's firm if not present
+        # Seed this deployment's firm row from its own env vars -- NOT
+        # another firm's hardcoded details. Previously hardcoded
+        # short_name/city/country to "S&M"/"Harare"/"Zimbabwe" (this
+        # instance's own values) regardless of MUTEMO_FIRM_* env vars, and
+        # silently ignored FIRM_CITY entirely -- confirmed via an actual
+        # walkthrough of provisioning a fresh second firm, 2026-08-25.
+        # MUTEMO_FIRM_NAME has no safe generic default: it flows straight
+        # into every AI-generated document's system prompt via
+        # get_firm_identity(). Refuse to start rather than silently seed
+        # a blank or guessed firm name.
+        if not FIRM_NAME:
+            raise RuntimeError(
+                "MUTEMO_FIRM_NAME is not set. This seeds the firms table "
+                "and feeds every AI-generated document's system prompt via "
+                "get_firm_identity() -- refusing to start with a blank "
+                "firm name rather than silently seeding wrong data. Set "
+                "MUTEMO_FIRM_NAME to this deployment's actual firm name "
+                "and redeploy."
+            )
+        seed_short_name = FIRM_SHORT_NAME or _derive_firm_short_name(FIRM_NAME)
         await conn.execute("""
         INSERT INTO firms (id, name, short_name, city, country)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (id) DO NOTHING
         """,
-        FIRM_ID, FIRM_NAME, "S&M", "Harare", "Zimbabwe")
+        FIRM_ID, FIRM_NAME, seed_short_name, FIRM_CITY, FIRM_COUNTRY)
 
         # Backfill otp_store.firm_id (Part 2, multi-tenancy hardening) --
         # needs a bound FIRM_ID param, so it can't live in the big
@@ -968,9 +987,27 @@ async def run_migrations():
 # not a second row in this one.
 FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "")
 FIRM_CITY = os.environ.get("MUTEMO_FIRM_CITY", "Harare, Zimbabwe")
+# Zimbabwe is a safe default across this product's whole domain (Zimbabwean
+# case law/legislation, court structure) -- not another firm's specific
+# detail leaking across tenants, unlike the short_name default below.
+FIRM_COUNTRY = os.environ.get("MUTEMO_FIRM_COUNTRY", "Zimbabwe")
+# No safe fixed default here (there's no such thing as a generically-right
+# short name) -- left empty and derived from the real MUTEMO_FIRM_NAME at
+# seed time via _derive_firm_short_name() below if not set explicitly.
+FIRM_SHORT_NAME = os.environ.get("MUTEMO_FIRM_SHORT_NAME", "")
 FIRM_ID_STR = os.environ.get("MUTEMO_FIRM_ID", "a1b2c3d4-0000-0000-0000-000000000001")
 import uuid as _uuid_mod
 FIRM_ID = _uuid_mod.UUID(FIRM_ID_STR)
+
+def _derive_firm_short_name(name: str) -> str:
+    """Fallback when MUTEMO_FIRM_SHORT_NAME isn't set: initials drawn from
+    the firm's own real name (e.g. "Sawyer & Mkushi" -> "SM"), never
+    another firm's hardcoded value. Falls back further to a plain
+    truncation only if the name has no letter-starting words to draw
+    initials from at all (e.g. a name that's just punctuation/numbers)."""
+    words = re.findall(r"[A-Za-z][\w'-]*", name)
+    initials = "".join(w[0].upper() for w in words)
+    return initials or name[:8].upper()
 
 async def get_firm_identity() -> dict:
     """
