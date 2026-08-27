@@ -167,6 +167,14 @@ async def run_migrations():
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+        -- Shared-device session hardening (2026-08-27) -- see
+        -- SESSION_IDLE_TIMEOUT_SECONDS's own comment for why this exists
+        -- alongside expires_at rather than replacing it. DEFAULT NOW()
+        -- backfills every already-live session as "just active now" the
+        -- moment this migration runs, rather than immediately idle-killing
+        -- every existing logged-in user on deploy.
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_active TIMESTAMPTZ NOT NULL DEFAULT NOW();
+        CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
 
         CREATE TABLE IF NOT EXISTS otp_store (
             phone       TEXT PRIMARY KEY,
@@ -1332,6 +1340,19 @@ if os.environ.get("RAILWAY_ENVIRONMENT_NAME") and not AUTH_ENABLED and not MUTEM
 OTP_TTL_SECONDS     = 300
 SESSION_TTL_SECONDS = 86400 * 7
 MAX_OTP_ATTEMPTS    = 5
+# Shared-device session hardening (2026-08-27): SESSION_TTL_SECONDS above is
+# an absolute cap from login, not a safety net for someone who forgets to
+# log out on a shared boardroom/library machine -- a session created at
+# login stays fully live regardless of activity until that 7-day mark.
+# This is a genuine sliding idle timeout layered on top, backed by
+# sessions.last_active (touched on real request activity -- see
+# _touch_session_last_active() below): a session is only valid while BOTH
+# the absolute expires_at AND this idle window still hold. Configurable
+# per deployment since "reasonable" depends on the firm/device -- default
+# picked as a middle ground for someone reading a long document without
+# triggering any request for a while, without leaving a shared machine
+# live for hours after everyone's gone.
+SESSION_IDLE_TIMEOUT_SECONDS = int(os.environ.get("MUTEMO_SESSION_IDLE_TIMEOUT_SECONDS", "2700"))  # 45 min
 
 def _send_email_otp(email: str, code: str) -> bool:
     """
@@ -1584,12 +1605,39 @@ async def verify_otp(req: OTPVerifyBody, response: Response):
     )
     return {"verified": True, "phone": phone, "role": user["role"], "display_name": user["display_name"]}
 
+async def _touch_session_last_active(conn, token: str) -> None:
+    """
+    Records real request activity for the idle timeout (see
+    SESSION_IDLE_TIMEOUT_SECONDS). Throttled to at most once a minute per
+    session -- without this, the 2-second job-status polling used by
+    search/contract-review/document-generation while a job is running
+    would turn into a sessions UPDATE on every single poll tick. A
+    session genuinely idle for the full timeout window has had no real
+    request at all in that window regardless of this throttle, so the
+    idle timeout itself isn't weakened by it.
+    """
+    await conn.execute(
+        "UPDATE sessions SET last_active=NOW() WHERE token=$1 AND last_active < NOW() - INTERVAL '60 seconds'",
+        token,
+    )
+
 @app.post("/api/auth/logout")
 async def logout(request: Request, response: Response):
     token = request.cookies.get("mutemo_session")
+    user_email = None
     if token and _db_pool:
         async with _db_pool.acquire() as conn:
+            # Looked up before deleting the row -- _revoke_cloudflare_access_session
+            # below needs the user's email, not our own session token, and
+            # there's nothing left to join against once the row is gone.
+            row = await conn.fetchrow(
+                "SELECT u.email FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.token=$1",
+                token,
+            )
+            user_email = row["email"] if row else None
             await conn.execute("DELETE FROM sessions WHERE token=$1", token)
+    if user_email:
+        await _revoke_cloudflare_access_session(user_email)
     response.delete_cookie("mutemo_session")
     return {"logged_out": True}
 
@@ -1600,13 +1648,22 @@ async def auth_status(request: Request):
     token = request.cookies.get("mutemo_session")
     if token and _db_pool:
         async with _db_pool.acquire() as conn:
-            await conn.execute("DELETE FROM sessions WHERE expires_at < NOW()")
+            await conn.execute(
+                "DELETE FROM sessions WHERE expires_at < NOW() OR last_active < NOW() - make_interval(secs => $1)",
+                SESSION_IDLE_TIMEOUT_SECONDS,
+            )
             row = await conn.fetchrow("""
                 SELECT s.token, u.id, u.phone, u.role, u.display_name, u.initials
                 FROM sessions s JOIN users u ON s.user_id = u.id
                 WHERE s.token=$1 AND s.expires_at > NOW()
-            """, token)
+                  AND s.last_active > NOW() - make_interval(secs => $2)
+            """, token, SESSION_IDLE_TIMEOUT_SECONDS)
             if row:
+                # /api/auth/status is exempt from session_auth_middleware
+                # (see open_paths below) so it never gets the middleware's
+                # own touch -- called on every page load/reload, which is
+                # itself a legitimate activity signal worth recording.
+                await _touch_session_last_active(conn, token)
                 return {
                     "auth_enabled": True, "authenticated": True,
                     "id": str(row["id"]), "phone": row["phone"], "role": row["role"],
@@ -1628,11 +1685,18 @@ async def get_current_user(request: Request) -> Optional[dict]:
     if not token or not _db_pool:
         return None
     async with _db_pool.acquire() as conn:
+        # Idle-window check duplicated here rather than relying solely on
+        # session_auth_middleware's own gate -- this function is also
+        # called directly (by tests, and any future non-HTTP code path)
+        # bypassing the middleware entirely, same reasoning this file
+        # already applies to expires_at being checked independently in
+        # both places rather than just once.
         row = await conn.fetchrow("""
             SELECT u.id, u.firm_id, u.phone, u.email, u.role, u.display_name
             FROM sessions s JOIN users u ON s.user_id = u.id
             WHERE s.token=$1 AND s.expires_at > NOW()
-        """, token)
+              AND s.last_active > NOW() - make_interval(secs => $2)
+        """, token, SESSION_IDLE_TIMEOUT_SECONDS)
         if row:
             return dict(row)
     return None
@@ -1652,9 +1716,15 @@ async def session_auth_middleware(request, call_next):
     if token and _db_pool:
         async with _db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT token FROM sessions WHERE token=$1 AND expires_at > NOW()", token
+                "SELECT token FROM sessions WHERE token=$1 AND expires_at > NOW() "
+                "AND last_active > NOW() - make_interval(secs => $2)",
+                token, SESSION_IDLE_TIMEOUT_SECONDS,
             )
             if row:
+                # The one universal touch point -- every authenticated
+                # /api/ request except the open_paths above passes through
+                # here before reaching its route handler.
+                await _touch_session_last_active(conn, token)
                 return await call_next(request)
 
     # A valid X-Admin-Token is also sufficient for general admin tooling
@@ -1776,6 +1846,65 @@ async def _add_email_to_cloudflare_access(email: str) -> Optional[str]:
     except Exception as e:
         print(f"[invite] Cloudflare Access update failed: {e}")
         return None
+
+async def _revoke_cloudflare_access_session(email: str) -> bool:
+    """
+    Shared-device session hardening (2026-08-27): ends the user's
+    Cloudflare Access session (the CF_Authorization cookie / login to the
+    Access application gating this app), not just our own app-level
+    session. Before this, /api/auth/logout only ever touched our own
+    `sessions` table -- confirmed by grepping this whole codebase for any
+    CF_Authorization reference, there was none. That meant on a shared
+    device, app logout alone did not fully sign the browser out: a second
+    person could sit down and, while Cloudflare's own session was still
+    live, never see a fresh Cloudflare Access login prompt at all.
+
+    Real, documented endpoint (verified against Cloudflare's own API docs
+    directly, not assumed): POST /accounts/{account_id}/access/
+    organizations/revoke_user, keyed by email. Two real caveats, accepted
+    deliberately rather than silently:
+      - This revokes the user's Access session ORG-WIDE, across every
+        Cloudflare Access application in this Cloudflare account, not
+        scoped to just MutemoOS -- Cloudflare's API has no per-app
+        variant of this call. For a law firm's shared-device threat model
+        (don't leave client data exposed to whoever sits down next),
+        erring toward "signed out of everything" is the right direction,
+        not a bug -- but worth knowing if this account ever fronts
+        another internal tool with its own Access app.
+      - Requires the "Access: Organizations, Identity Providers, and
+        Groups Write" API token scope -- broader than what
+        CLOUDFLARE_API_TOKEN was originally scoped for (the existing
+        _add_email_to_cloudflare_access() above only ever needed "Access:
+        Apps and Policies Edit"). If the token lacks this scope,
+        Cloudflare returns 403 and this silently no-ops -- logged, never
+        raised, never blocking the app-level logout that already
+        happened by the time this runs. Whether the current token
+        actually has this scope has NOT been verified end-to-end locally
+        (Railway CLI access to read the real token was unavailable this
+        session) -- the real, authoritative answer is whatever the
+        production logs show after a real logout; see them before
+        assuming this silently does nothing.
+    """
+    CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, _ = _get_cf_vars()
+    if not CLOUDFLARE_API_TOKEN or not CLOUDFLARE_ACCOUNT_ID:
+        print("[logout] Cloudflare vars not set — skipping Access session revoke")
+        return False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(
+                f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/access/organizations/revoke_user",
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"},
+                json={"email": email},
+            )
+        if resp.status_code == 200 and resp.json().get("success"):
+            print(f"[logout] Cloudflare Access session revoked for {email}")
+            return True
+        print(f"[logout] Cloudflare Access revoke failed (non-fatal): {resp.status_code} {resp.text[:300]}")
+        return False
+    except Exception as e:
+        print(f"[logout] Cloudflare Access revoke error (non-fatal): {e}")
+        return False
 
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
