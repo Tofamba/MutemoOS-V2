@@ -57,6 +57,20 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.pathname.startsWith("/api/")) return; // never intercept API calls
 
+  // Real bug, seen live in a user's console: cache.put() throws
+  // "Request scheme 'chrome-extension' is unsupported" -- the Cache API
+  // only accepts http(s) requests. A browser extension's own network
+  // activity can end up dispatching a fetch event through this worker's
+  // scope (a known, documented category of extension-caused SW noise,
+  // not something this app's own code does or can trigger) with a
+  // chrome-extension:// (or moz-extension://, etc.) URL. The cache.put()
+  // call below is fire-and-forget -- its rejection never reached the
+  // actual page response, so this was cosmetic (an unhandled-rejection
+  // console error, not a functional break), but avoidable: skip
+  // interception entirely for anything that isn't a plain http(s)
+  // request, same as the /api/ guard just above.
+  if (url.protocol !== "http:" && url.protocol !== "https:") return;
+
   // Network-first, cache as the offline/flaky-connection fallback only --
   // deliberately not cache-first (see the v2 note above for the outage
   // that caused). A successful network response also refreshes the
