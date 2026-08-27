@@ -10,9 +10,23 @@
 <link rel="apple-touch-icon" href="/icons/icon-192.png"/>
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/tiptap/2.1.12/tiptap.umd.min.js" defer></script>
 <style>
-/* TipTap editor styles */
+/* "TipTap editor" styles -- the name is legacy only. #draft-editor is a
+   plain contenteditable div styled to look like a rich-text editor
+   (2026-08-27 investigation: grepped the whole file, confirmed zero
+   references to the actual TipTap JS API anywhere -- no `new Editor()`,
+   no `tiptap.` usage). The <script src=".../tiptap.umd.min.js"> tag that
+   used to sit above this block was 404ing on every single page load
+   (confirmed live, both here and via a direct curl to cdnjs) -- cdnjs's
+   own API reports "Library not found" for `tiptap` at ANY version, not
+   just a stale path. TipTap 2.x was never distributed as one monolithic
+   UMD bundle under a plain "tiptap" cdnjs listing (its real packages are
+   scoped, e.g. @tiptap/core) -- this URL most likely never pointed at a
+   real file. Removed rather than fixed to a "correct" URL, since nothing
+   in this codebase calls into it regardless of whether it loads.
+   (Separately confirmed NOT the cause of "logout does nothing" -- see
+   logout()'s own comment below; this was two unrelated things on the
+   same page, verified independently.) */
 .tiptap-editor {
   min-height: 500px;
   max-height: 70vh;
@@ -2299,6 +2313,25 @@ async function logout() {
   // nothing. The backend call is best-effort: what actually matters for
   // "log out" to work in a broken state is always reaching the forced
   // navigation below, not this specific request succeeding.
+  //
+  // 2026-08-27 -- re-investigated a fresh "logout looks unresponsive"
+  // report (staging). This function itself is fine, confirmed by calling
+  // it directly and watching location.href actually change to
+  // /?_reauth=<ts> as designed. A concurrent, unrelated tiptap.umd.min.js
+  // 404 on the same page (dead script tag, since removed -- see the
+  // <head> comment) was suspected but ruled out: the navigation above
+  // completes regardless, on a page that already has that console error.
+  // The real explanation for staging specifically: GET /api/auth/status
+  // there reports auth_enabled:false, meaning the backend has no
+  // logged-in/out concept to begin with -- every request resolves to the
+  // same synthetic authenticated user regardless of this call's outcome
+  // or the reload. Reloading after "logout" correctly lands right back
+  // on the same authenticated dashboard, which reads as "did nothing"
+  // but is staging's real, current auth configuration working as built,
+  // not a bug in this function. Production has auth_enabled:true (a real
+  // session cookie backs /api/auth/status there), so this button has a
+  // real, visible effect there -- confirmed by the status endpoint
+  // itself, not tested by actually logging out of a real account.
   try {
     await fetch(`${API}/api/auth/logout`, {method: 'POST'});
   } catch (err) {
