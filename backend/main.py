@@ -1906,6 +1906,64 @@ async def _revoke_cloudflare_access_session(email: str) -> bool:
         print(f"[logout] Cloudflare Access revoke error (non-fatal): {e}")
         return False
 
+@app.get("/api/admin/cf-token-check")
+async def cf_token_check(request: Request):
+    """TEMPORARY diagnostic endpoint (2026-08-28) -- not a standing feature.
+
+    _revoke_cloudflare_access_session() above has been silently degrading
+    (non-fatal, logged only) on every real logout -- confirmed earlier
+    tonight that CLOUDFLARE_API_TOKEN gets a 9106 "Authentication failed"
+    from a downstream Access API call, but that only proves the token
+    doesn't authenticate for THAT call; it doesn't say whether the token
+    is outright invalid/expired/revoked vs. merely missing a scope. This
+    asks Cloudflare's own dedicated token-verification endpoint
+    (GET /client/v4/user/tokens/verify) directly, which gives a real,
+    categorical answer instead of inferring one from a side effect.
+
+    Read-only, X-Admin-Token gated (same pattern as bootstrap_firm() and
+    the now-removed cf-access-app-info endpoint from earlier tonight).
+    Safe to delete once this investigation is resolved.
+    """
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or admin_token_header != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID = _get_cf_vars()
+    if not CLOUDFLARE_API_TOKEN:
+        return {"error": "CLOUDFLARE_API_TOKEN not configured on this deployment"}
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as http:
+            verify_resp = await http.get(
+                "https://api.cloudflare.com/client/v4/user/tokens/verify",
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+            )
+            # Also check what permission groups this token actually has, if
+            # verify succeeds and it's a real account-scoped token -- tells
+            # us directly whether it's a scope problem or something else,
+            # rather than guessing from Access-endpoint side effects.
+            perms_resp = None
+            if verify_resp.status_code == 200 and verify_resp.json().get("success") and CLOUDFLARE_ACCOUNT_ID:
+                try:
+                    perms_resp = await http.get(
+                        f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/tokens/permission_groups",
+                        headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+                    )
+                except Exception:
+                    perms_resp = None
+    except Exception as e:
+        return {"error": f"Request to Cloudflare API failed: {e}"}
+
+    return {
+        "verify_status_code": verify_resp.status_code,
+        "verify_body": verify_resp.json() if verify_resp.headers.get("content-type", "").startswith("application/json") else verify_resp.text[:500],
+        "permission_groups_status_code": perms_resp.status_code if perms_resp is not None else None,
+        "permission_groups_body": (perms_resp.json() if perms_resp is not None and perms_resp.headers.get("content-type", "").startswith("application/json") else None),
+        "account_id_configured": CLOUDFLARE_ACCOUNT_ID,
+        "access_app_id_configured": CLOUDFLARE_ACCESS_APP_ID,
+    }
+
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
     try:
