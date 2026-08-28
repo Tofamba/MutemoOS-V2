@@ -1932,34 +1932,50 @@ async def cf_token_check(request: Request):
     if not CLOUDFLARE_API_TOKEN:
         return {"error": "CLOUDFLARE_API_TOKEN not configured on this deployment"}
 
+    async def _try(http, method, url):
+        try:
+            resp = await http.request(method, url, headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"})
+            body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:500]
+            return {"status_code": resp.status_code, "body": body}
+        except Exception as e:
+            return {"error": str(e)}
+
     try:
         import httpx
         async with httpx.AsyncClient(timeout=15) as http:
-            verify_resp = await http.get(
-                "https://api.cloudflare.com/client/v4/user/tokens/verify",
-                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+            # (a) legacy USER-token verify endpoint -- kept for comparison,
+            # but a 6003/6111 "Invalid format for Authorization header"
+            # here doesn't mean the token is dead: this endpoint may simply
+            # reject account-scoped tokens' format outright, since it was
+            # built for the older per-user token type.
+            verify = await _try(http, "GET", "https://api.cloudflare.com/client/v4/user/tokens/verify")
+            # (b) does the token authenticate at all for a basic,
+            # minimal-permission ACCOUNT-scoped read? This is the real
+            # "is the token itself alive" test for an account-owned token.
+            account_read = (
+                await _try(http, "GET", f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}")
+                if CLOUDFLARE_ACCOUNT_ID else None
             )
-            # Also check what permission groups this token actually has, if
-            # verify succeeds and it's a real account-scoped token -- tells
-            # us directly whether it's a scope problem or something else,
-            # rather than guessing from Access-endpoint side effects.
-            perms_resp = None
-            if verify_resp.status_code == 200 and verify_resp.json().get("success") and CLOUDFLARE_ACCOUNT_ID:
-                try:
-                    perms_resp = await http.get(
-                        f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/tokens/permission_groups",
-                        headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
-                    )
-                except Exception:
-                    perms_resp = None
+            # (c) what permission groups does it actually have, if any --
+            # the direct answer to "is this a scope problem specifically".
+            perms = (
+                await _try(http, "GET", f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/tokens/permission_groups")
+                if CLOUDFLARE_ACCOUNT_ID else None
+            )
+            # (d) the exact real-world call _revoke_cloudflare_access_session()
+            # would make (dry, no email -- just to see the auth-layer result).
+            access_apps_list = (
+                await _try(http, "GET", f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/access/apps")
+                if CLOUDFLARE_ACCOUNT_ID else None
+            )
     except Exception as e:
         return {"error": f"Request to Cloudflare API failed: {e}"}
 
     return {
-        "verify_status_code": verify_resp.status_code,
-        "verify_body": verify_resp.json() if verify_resp.headers.get("content-type", "").startswith("application/json") else verify_resp.text[:500],
-        "permission_groups_status_code": perms_resp.status_code if perms_resp is not None else None,
-        "permission_groups_body": (perms_resp.json() if perms_resp is not None and perms_resp.headers.get("content-type", "").startswith("application/json") else None),
+        "legacy_user_token_verify": verify,
+        "account_scoped_read (accounts/{id})": account_read,
+        "permission_groups": perms,
+        "access_apps_list (accounts/{id}/access/apps)": access_apps_list,
         "account_id_configured": CLOUDFLARE_ACCOUNT_ID,
         "access_app_id_configured": CLOUDFLARE_ACCESS_APP_ID,
     }
