@@ -2479,6 +2479,19 @@ async function submitNewMatter() {
     msg.className = 'status show success';
     msg.textContent = `✓ Matter "${m.name}" created.`;
     await loadMatters();
+    // Real bug, confirmed live (2026-08-28): loadMatters() above only
+    // refreshes the global matters array used by the main Matters tab.
+    // If this matter was created from an open client detail panel (the
+    // "+ New Matter for this Client" button, openNewMatterModal(client.id)),
+    // that panel is rendering from its own already-fetched `client` object
+    // (renderClientDetailContent's client.matters), which this never
+    // touched -- the new matter silently didn't appear until a manual hard
+    // refresh re-ran openClientDetail() from scratch. Same re-fetch idiom
+    // already used for this exact class of problem after a compliance save
+    // (see the openClientDetail() call after saveCompliance() below).
+    if (_currentClientDetailId && _currentClientDetailId === clientId) {
+      await openClientDetail(clientId);
+    }
     setTimeout(() => closeNewMatterModal(), 800);
   } catch(e) {
     msg.className = 'status show error';
