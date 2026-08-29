@@ -2249,8 +2249,6 @@ async function requestLoginOtp() {
     // phone" regardless of channel, which was actively wrong whenever
     // WhatsApp wasn't configured and it silently went to email (or now SMS)
     // instead.
-    const CHANNEL_LABELS = { whatsapp: 'WhatsApp', sms: 'SMS', email: 'email' };
-    const channelLabel = CHANNEL_LABELS[data.channel] || data.channel;
     const destinationText = data.channel === 'whatsapp' ? `WhatsApp (${phone})`
                            : data.channel === 'sms' ? `SMS (${phone})`
                            : data.channel === 'email' ? 'your email'
@@ -2259,7 +2257,16 @@ async function requestLoginOtp() {
     document.getElementById('login-step-phone').style.display = 'none';
     document.getElementById('login-step-code').style.display = 'block';
     document.getElementById('login-code').focus();
-    showLoginStatus(`Code sent via ${channelLabel}.`, 'success');
+    // Real bug, confirmed live (2026-08-30): this used to rebuild its own
+    // "Code sent via X." text from data.channel, which the backend
+    // deliberately omits for phone numbers it doesn't recognize (so the
+    // response itself can't be used to probe which numbers are registered
+    // -- see request_otp()'s early-return in backend/main.py). That made
+    // this render "Code sent via undefined." for any unrecognized number.
+    // The backend already computes the exact right message for both cases
+    // (data.message) -- using it directly instead of duplicating that
+    // logic here, so there's nothing left to drift out of sync.
+    showLoginStatus(data.message, 'success');
   } catch(e) {
     showLoginStatus(e.message, 'error');
   } finally {
