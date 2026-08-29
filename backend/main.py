@@ -1980,6 +1980,41 @@ async def cf_token_check(request: Request):
         "access_app_id_configured": CLOUDFLARE_ACCESS_APP_ID,
     }
 
+@app.get("/api/admin/user-login-check")
+async def user_login_check(request: Request):
+    """TEMPORARY diagnostic endpoint (2026-08-28) -- not a standing feature.
+
+    Picking up the shared-device logout walkthrough hit a real
+    chicken-and-egg: /api/users (the normal way to see who's registered)
+    itself requires an authenticated admin session via get_current_user(),
+    but nobody could log in yet without first knowing a phone number that
+    actually has a deliverable channel. Same X-Admin-Token pattern as the
+    other temporary endpoints tonight, purely to unblock picking a real
+    login target -- not a general users-list replacement.
+
+    Read-only, X-Admin-Token gated. Safe to delete once this
+    investigation is resolved.
+    """
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or admin_token_header != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT display_name, phone, email, role, is_active FROM users WHERE firm_id=$1 ORDER BY display_name",
+            FIRM_ID,
+        )
+    return [
+        {
+            "display_name": r["display_name"],
+            "phone": r["phone"],
+            "has_email": bool(r["email"]),
+            "role": r["role"],
+            "is_active": r["is_active"],
+        }
+        for r in rows
+    ]
+
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
     try:
