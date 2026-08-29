@@ -12,27 +12,34 @@ on exactly the shared-device scenario, not a full user manual.
 2. Also asks Cloudflare to end its own separate login for your account,
    everywhere it's used (not just MutemoOS) — this is a second, independent
    login layer in front of the app itself.
-3. If step 2 can't complete for any reason (a real possibility — see
-   below), step 1 still fully completes. Logging out of MutemoOS itself
-   never depends on step 2 succeeding.
+3. If step 2 can't complete for some reason (rare, but see below), step 1
+   still fully completes regardless. Logging out of MutemoOS itself never
+   depends on step 2 succeeding.
 
-## The one thing Logout does *not* guarantee on a shared browser
+## The one thing Logout doesn't *guarantee* on a shared browser
 
-Cloudflare's own login (the screen you saw before MutemoOS ever loaded,
-asking for your email and a one-time code) has **its own separate timer**,
-set independently of anything in MutemoOS. Logging out of MutemoOS asks
-Cloudflare to end that too, but if that specific request fails (e.g. a
-momentary connectivity issue, or a permissions change on our side that
-hasn't been re-verified since this was written), Cloudflare's own login can
-keep the browser "remembered" until its own timer runs out.
+**Confirmed live (2026-08-29):** logging out of MutemoOS does actively end
+your Cloudflare session too, not just this app's own login. Tested with a
+real account, end to end — clicking Logout revoked the Cloudflare session
+server-side, and reloading the app in the same browser immediately dropped
+back to Cloudflare's own email-code screen, exactly as it should. This
+isn't inferred from the code; it was watched happen.
 
-**What this means in practice on a shared machine:** after you log out of
-MutemoOS, the next person may not be asked to sign in to Cloudflare again
-right away — they'll land on MutemoOS's own login screen, which still asks
-for a fresh code sent to *their* phone or email, so they can't use *your*
-MutemoOS account. But if you and the next person share the same
-Cloudflare login (unlikely for two different lawyers, but worth knowing),
-skipping Cloudflare's prompt is possible within that window.
+That said, this depends on a live call to Cloudflare's API succeeding at
+the moment you log out, so it's not an absolute guarantee the way step 1
+(ending your own MutemoOS session) is. If that specific request ever fails
+— a momentary connectivity issue, or a Cloudflare-side credential problem
+like the one this fix resolved — step 1 still fully completes regardless,
+but Cloudflare's own login can keep the browser "remembered" until its own
+timer runs out (Cloudflare's session duration for this firm is currently
+**30 minutes**, independent of anything in MutemoOS).
+
+**What this means in practice on a shared machine:** even in that failure
+case, the next person still lands on MutemoOS's own login screen, which
+asks for a fresh code sent to *their* phone or email — they can't use
+*your* MutemoOS account either way. The only residual risk is if you and
+the next person happen to share the same Cloudflare login (unlikely for
+two different lawyers, but worth knowing).
 
 **For a genuinely clean handoff on a shared device**, the reliable options
 are:
@@ -52,10 +59,11 @@ of genuine inactivity.
 
 ## For firm admins: shortening Cloudflare's own session further
 
-If a shared device is used often enough that even the above isn't tight
-enough, Cloudflare's own login timer can be shortened directly:
-**Cloudflare Zero Trust dashboard → Access → Applications → (this firm's
-MutemoOS application) → Edit → Session Duration.**
+Cloudflare's own login timer for this firm is currently set to **30
+minutes** already (checked directly in the dashboard, 2026-08-29). If a
+shared device needs it tighter still, it can be shortened the same way:
+**Cloudflare dashboard → Zero Trust → Access → Applications → "Mutemo
+Desk" → Edit → Session Duration.**
 
 This wasn't automated as part of this change — the API endpoint for it
 (`PUT /accounts/{account_id}/access/apps/{app_id}`) could not be verified
