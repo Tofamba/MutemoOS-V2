@@ -2074,6 +2074,67 @@ async def client_ownership_check(request: Request):
         ],
     }
 
+@app.post("/api/admin/backfill-client-ownership")
+async def backfill_client_ownership(request: Request, owner_user_id: str):
+    """TEMPORARY, one-time endpoint (2026-08-30) -- not a standing feature.
+
+    Real, deliberate backfill following client-ownership-check's
+    confirmed findings: 71 clients created ~2 months ago via
+    scripts/migrate_clients.py (a raw INSERT that never set created_by)
+    all sit at created_by IS NULL, none of them conflicting with any
+    other user's real ownership. Assigns them all to owner_user_id --
+    only ever touches rows that are still NULL, so a second accidental
+    run is a safe no-op, not a re-assignment.
+
+    Confirms owner_user_id resolves to a real, active user in this firm
+    before writing anything, rather than trusting the caller's UUID
+    blindly. Read the actual before/after counts in the response --
+    don't assume the write did what was intended.
+
+    X-Admin-Token gated, same pattern as tonight's other temporary
+    endpoints. Safe to delete once this is done.
+    """
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or admin_token_header != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    try:
+        owner_uuid = _uuid_mod.UUID(owner_user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="owner_user_id must be a valid UUID")
+
+    async with _db_pool.acquire() as conn:
+        owner = await conn.fetchrow(
+            "SELECT id, display_name, is_active FROM users WHERE id=$1 AND firm_id=$2",
+            owner_uuid, FIRM_ID,
+        )
+        if not owner:
+            raise HTTPException(status_code=404, detail="owner_user_id does not match a user in this firm")
+        if not owner["is_active"]:
+            raise HTTPException(status_code=400, detail=f"{owner['display_name']} is not an active user")
+
+        before_null = await conn.fetchval(
+            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by IS NULL", FIRM_ID
+        )
+        result = await conn.execute(
+            "UPDATE clients SET created_by=$1 WHERE firm_id=$2 AND created_by IS NULL",
+            owner_uuid, FIRM_ID,
+        )
+        after_null = await conn.fetchval(
+            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by IS NULL", FIRM_ID
+        )
+        now_owned = await conn.fetchval(
+            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, owner_uuid
+        )
+
+    return {
+        "owner": {"id": str(owner["id"]), "display_name": owner["display_name"]},
+        "before_null_count": before_null,
+        "after_null_count": after_null,
+        "rows_updated": result,
+        "now_owned_by_this_user_total": now_owned,
+    }
+
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
     try:
