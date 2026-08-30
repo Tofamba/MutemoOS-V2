@@ -4003,6 +4003,43 @@ async function renderMatterPanel(id) {
         </div>
       </div>
 
+      <!-- Matter review safety net — a soft "please look at this" nudge
+           date, distinct from next_deadline (a hard court/filing
+           deadline). Every create/update/note-add sets next_review_date
+           automatically to today + 30 days and stamps last_reviewed_date
+           to today, unless a real next_review_date is entered here —
+           entering one explicitly overrides the default and restarts
+           that clock. last_reviewed_date is a real, honest record of
+           when someone last touched this matter — not derived by
+           subtracting 30 days from next_review_date, since that breaks
+           the moment next_review_date is overridden further out (e.g. a
+           matter awaiting a court date, reviewed today but not due
+           again for months) — so it's shown here read-only, stamped by
+           the server, not editable. -->
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">🗂 Review</div>
+        <p style="font-size:0.72rem;color:var(--ink3);margin:-4px 0 8px">A soft reminder to check in on this matter — not a court deadline. Defaults to 30 days after any update or note; set a date here to override.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:80px">NEXT REVIEW</label>
+            <input type="date" value="${matter.next_review_date || ''}"
+              style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value) updateMatterField('${id}','next_review_date',this.value)"/>
+            ${(() => {
+              if (!matter.next_review_date) return '';
+              const days = Math.round((new Date(matter.next_review_date + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
+              if (days < 0) return `<span class="chip chip-gold">Overdue by ${Math.abs(days)}d</span>`;
+              if (days === 0) return `<span class="chip chip-gold">Due today</span>`;
+              return `<span class="chip chip-gray">Due in ${days}d</span>`;
+            })()}
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:90px">LAST REVIEWED</label>
+            <span style="font-size:0.78rem;color:var(--ink2)">${matter.last_reviewed_date || '—'}</span>
+          </div>
+        </div>
+      </div>
+
       ${matter.practice_area === 'Conveyancing/Property' ? `
       <!-- Conveyancing — only shown for practice_area = 'Conveyancing/Property' -->
       <div class="matter-section" style="background:var(--white)">
@@ -4287,12 +4324,27 @@ async function addNote(matterId, noteText, author) {
   const btn = document.getElementById(`note-add-btn-${matterId}`);
   if (btn) { btn.disabled = true; btn.innerHTML = '…'; }
 
+  // Matter review safety net: adding a note is the natural moment to ask
+  // "when should someone look at this again?" — a lot of a lawyer's
+  // office work is reviewing client files and matters, so this is worth
+  // surfacing actively rather than only defaulting silently in the
+  // background. Leaving it blank (or dismissing/cancelling the prompt)
+  // is fine — the backend defaults to 30 days from today either way.
+  const reviewDateInput = prompt(
+    'Next review date for this matter? (YYYY-MM-DD)\n\nLeave blank for the default — 30 days from today.'
+  );
+  const nextReviewDate = (reviewDateInput && reviewDateInput.trim()) ? reviewDateInput.trim() : null;
+
   try {
     const res = await fetch(`${API}/api/matters/${matterId}/notes`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ text, author: noteAuthor })
+      body: JSON.stringify({ text, author: noteAuthor, next_review_date: nextReviewDate })
     });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.detail || 'Failed to add note');
+    }
     const data = await res.json();
     // Clear inline input if it exists
     const inlineInput = document.getElementById(`note-input-${matterId}`);
@@ -4304,6 +4356,12 @@ async function addNote(matterId, noteText, author) {
       if (!m.progress_notes) m.progress_notes = [];
       m.progress_notes.unshift({ id: data.id, text: data.text, author: data.author, created_at: data.created_at });
       m.last_activity = data.created_at;
+      // renderMatterPanel() reads from this local cache, not a fresh
+      // fetch — merge the review dates the server actually applied
+      // (respecting the prompt's input, or its own default) so the
+      // panel shows the real current state, not stale values.
+      if (data.next_review_date) m.next_review_date = data.next_review_date;
+      if (data.last_reviewed_date) m.last_reviewed_date = data.last_reviewed_date;
     }
 
     // Check for detected dates
@@ -4318,7 +4376,10 @@ async function addNote(matterId, noteText, author) {
     }
 
   } catch(e) {
-    alert('Failed to add note. Please try again.');
+    // e.message carries the real reason when it's a bad next_review_date
+    // format from the prompt above (e.g. "next_review_date must be in
+    // YYYY-MM-DD format") rather than a generic failure.
+    alert(e.message && e.message !== 'Failed to add note' ? e.message : 'Failed to add note. Please try again.');
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = 'Add'; }
   }

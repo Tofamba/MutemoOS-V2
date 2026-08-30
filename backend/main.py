@@ -213,6 +213,27 @@ async def run_migrations():
         );
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_deadline DATE;
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_deadline_note TEXT;
+
+        -- Matter review safety net (2026-08-30): every matter gets a soft
+        -- "please look at this" nudge date, distinct from next_deadline
+        -- above (a hard court/filing deadline). Modeled on a real prior
+        -- paper workflow -- writing a review date on a physical file
+        -- folder -- so nothing goes untouched indefinitely without at
+        -- least surfacing somewhere. See DEFAULT_REVIEW_INTERVAL_DAYS
+        -- and _create_matter_row()/update_matter() for the actual
+        -- defaulting behavior; this column alone has no default because
+        -- it's set explicitly by application code on every create/update,
+        -- not implicitly by the database.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_review_date DATE;
+        -- Companion to next_review_date: when the matter was actually
+        -- last looked at, stamped to NOW() by _resolve_review_dates()
+        -- on every touch. Kept as a real, separate column rather than
+        -- derived by subtracting DEFAULT_REVIEW_INTERVAL_DAYS from
+        -- next_review_date, since that math breaks the moment a lawyer
+        -- overrides next_review_date to something further out (e.g. a
+        -- matter awaiting a court date, reviewed today but not due
+        -- again for 6 months).
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS last_reviewed_date DATE;
         CREATE INDEX IF NOT EXISTS idx_matters_firm ON matters(firm_id);
         CREATE INDEX IF NOT EXISTS idx_matters_status ON matters(firm_id, status);
 
@@ -3055,6 +3076,11 @@ class MatterUpdate(BaseModel):
     custom_status: Optional[str] = None
     next_deadline: Optional[str] = None       # ISO date string, e.g. "2026-08-15"
     next_deadline_note: Optional[str] = None
+    # Matter review safety net — a soft "please look at this" nudge date,
+    # distinct from next_deadline above. If omitted from a PATCH entirely,
+    # update_matter() re-defaults it to today + DEFAULT_REVIEW_INTERVAL_DAYS
+    # rather than leaving it untouched — see that function for why.
+    next_review_date: Optional[str] = None    # ISO date string, e.g. "2026-08-15"
     # Fee tracking — the firm's own professional fees only, manually
     # entered. Not trust accounting; see the schema comment in
     # run_migrations() for why this must not become a second source of
@@ -3196,6 +3222,12 @@ class ClientComplianceUpdate(BaseModel):
 class ProgressNote(BaseModel):
     text: str
     author: Optional[str] = None
+    # Matter review safety net — adding a note is the canonical "I just
+    # worked on/reviewed this matter" action, so it stamps the review
+    # clock the same way a PATCH does (see add_progress_note() and
+    # _resolve_review_dates()). Optional: leave unset for the default
+    # today + DEFAULT_REVIEW_INTERVAL_DAYS.
+    next_review_date: Optional[str] = None    # ISO date string, e.g. "2026-08-15"
 
 class AffidavitRequest(BaseModel):
     matter_type: Optional[str] = None
@@ -3471,6 +3503,49 @@ async def _create_client_row(
     return row
 
 
+# Matter review safety net (2026-08-30): confirmed by the firm at 30 days.
+# Named constant, not a magic number, so this stays easy to change later
+# without hunting through _create_matter_row()/update_matter(). See the
+# next_review_date column comment in run_migrations() for the concept.
+DEFAULT_REVIEW_INTERVAL_DAYS = 30
+# How far ahead (in days) a matter's upcoming next_review_date has to be
+# before it's worth surfacing in the daily digest as "approaching" —
+# overdue ones (past their date already) always show regardless of this.
+REVIEW_DIGEST_LOOKAHEAD_DAYS = 7
+
+
+def _resolve_review_dates(explicit_next_review_date: Optional[str]) -> tuple:
+    """
+    Returns (next_review_date, last_reviewed_date) for a matter being
+    touched right now -- shared by every place a matter can be "reviewed"
+    (update_matter()'s PATCH, add_progress_note()'s note-adding flow, and
+    any future one), so the defaulting logic lives in exactly one place.
+
+    last_reviewed_date is always today -- any touch that reaches this
+    function IS the review happening right now, whether or not a real
+    next_review_date was also given. This is deliberately a real, honest
+    timestamp of when the matter was actually looked at, not derived by
+    subtracting DEFAULT_REVIEW_INTERVAL_DAYS from next_review_date --
+    that would misrepresent history the moment a lawyer ever overrides
+    next_review_date to something further out (e.g. 6 months for a
+    matter awaiting a court date), which is a real, expected case, not
+    an edge case to ignore.
+
+    next_review_date: the explicit value if given (parsed and respected
+    verbatim, restarting the clock from today); otherwise
+    today + DEFAULT_REVIEW_INTERVAL_DAYS.
+    """
+    today = date.today()
+    if explicit_next_review_date:
+        try:
+            next_review = date.fromisoformat(explicit_next_review_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="next_review_date must be in YYYY-MM-DD format")
+    else:
+        next_review = today + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
+    return next_review, today
+
+
 async def _create_matter_row(
     conn, firm_id, name: str, *,
     number: Optional[str] = None,
@@ -3493,6 +3568,8 @@ async def _create_matter_row(
     created_by: Optional[_uuid_mod.UUID] = None,
     created_at: Optional[datetime] = None,
     last_activity: Optional[datetime] = None,
+    next_review_date: Optional[date] = None,
+    last_reviewed_date: Optional[date] = None,
 ) -> "asyncpg.Record":
     """
     Shared INSERT for a new matters row. Atomically allocates
@@ -3514,21 +3591,31 @@ async def _create_matter_row(
     NULL-last_activity behavior (unchanged, not a bug being fixed as
     part of this consolidation) falls out by simply not passing it,
     rather than needing a special case.
+
+    `next_review_date` defaults here (unconditionally, unless a caller
+    ever passes one explicitly -- none currently do, since MatterCreate
+    has no such field) rather than at each of the 5 call sites, so every
+    matter-creation path gets the review safety net uniformly for free.
     """
     mid = _uuid_mod.uuid4()
     matter_number = (
         await _next_matter_number(conn, firm_id, numbering_client_number)
         if numbering_client_number else None
     )
+    if next_review_date is None:
+        next_review_date = date.today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
+    if last_reviewed_date is None:
+        last_reviewed_date = date.today()
     return await conn.fetchrow("""
         INSERT INTO matters (
             id, firm_id, name, number, internal_ref, external_ref,
             client_name, client_id, case_parties, matter_type, practice_area,
             status, custom_status, next_deadline, next_deadline_note,
             assigned_lawyer_id, coverage_tier, service_type, sla_deadline,
-            matter_number, created_by, created_at, last_activity
+            matter_number, created_by, created_at, last_activity,
+            next_review_date, last_reviewed_date
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
         RETURNING *
     """,
     mid, firm_id, name, number, internal_ref, external_ref,
@@ -3536,6 +3623,7 @@ async def _create_matter_row(
     status, custom_status, next_deadline, next_deadline_note,
     assigned_lawyer_id, coverage_tier, service_type, sla_deadline,
     matter_number, created_by, created_at, last_activity,
+    next_review_date, last_reviewed_date,
     )
 
 
@@ -3640,6 +3728,10 @@ def _row_to_matter(row) -> dict:
             d[k] = d[k].isoformat()
     if d.get("next_deadline"):
         d["next_deadline"] = d["next_deadline"].isoformat()
+    if d.get("next_review_date"):
+        d["next_review_date"] = d["next_review_date"].isoformat()
+    if d.get("last_reviewed_date"):
+        d["last_reviewed_date"] = d["last_reviewed_date"].isoformat()
     for k in ("conveyancing_transfer_date", "conveyancing_rates_clearance_expiry",
               "conveyancing_bond_registration_deadline"):
         if d.get(k):
@@ -4861,6 +4953,17 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"{k} must be in YYYY-MM-DD format")
     fields["last_activity"] = datetime.utcnow()
+    # Matter review safety net: every update stamps last_reviewed_date to
+    # today (this touch IS a review happening now) and either respects an
+    # explicit next_review_date given in this same PATCH, or re-defaults
+    # it to today + DEFAULT_REVIEW_INTERVAL_DAYS. Runs unconditionally on
+    # EVERY update, matching last_activity's own unconditional set just
+    # above — the whole point is that a matter genuinely being worked on
+    # (touched by any update, not just a dedicated "review" action) keeps
+    # pushing its own review date forward and never surfaces in the
+    # digest, while one that goes untouched keeps its stale date and
+    # eventually does.
+    fields["next_review_date"], fields["last_reviewed_date"] = _resolve_review_dates(fields.get("next_review_date"))
 
     async with _db_pool.acquire() as conn:
         if "client_id" in fields:
@@ -4929,9 +5032,12 @@ async def add_progress_note(matter_id: str, note: ProgressNote, request: Request
         nid, _uuid_mod.UUID(matter_id), FIRM_ID, note.text, author,
         _uuid_mod.UUID(str(user["id"])) if user.get("id") else None, now
         )
+        # Matter review safety net: adding a note is a real "reviewed
+        # this matter" action, same as a PATCH — see _resolve_review_dates().
+        next_review, last_reviewed = _resolve_review_dates(note.next_review_date)
         await conn.execute(
-            "UPDATE matters SET last_activity=$1 WHERE id=$2",
-            now, _uuid_mod.UUID(matter_id)
+            "UPDATE matters SET last_activity=$1, next_review_date=$2, last_reviewed_date=$3 WHERE id=$4",
+            now, next_review, last_reviewed, _uuid_mod.UUID(matter_id)
         )
 
     entry = _row_to_note(note_row)
@@ -4984,7 +5090,16 @@ JSON:"""}]
         print(f"[notes] date scan failed: {e}")
         detected_dates = []
 
-    return {**entry, "detected_dates": detected_dates}
+    # next_review_date/last_reviewed_date included so the frontend can
+    # merge them into its local matter cache without a full re-fetch —
+    # renderMatterPanel() reads from that cache, not a fresh GET, same
+    # reasoning as updateMatterField()'s "merge full server response"
+    # discipline elsewhere in the frontend.
+    return {
+        **entry, "detected_dates": detected_dates,
+        "next_review_date": next_review.isoformat(),
+        "last_reviewed_date": last_reviewed.isoformat(),
+    }
 
 @app.delete("/api/matters/{matter_id}/notes/{note_id}")
 async def delete_progress_note(matter_id: str, note_id: str, request: Request):
@@ -10592,9 +10707,19 @@ def _matter_identity_prefix(e: dict) -> str:
         parts.append(e["resolved_client_name"])
     return " — ".join(parts)
 
-def build_reminder_email_body(events: list) -> tuple:
-    """Returns (plain_text_body, html_body). Events must have a 'days_until' field."""
-    if not events:
+def build_reminder_email_body(events: list, review_matters: Optional[list] = None) -> tuple:
+    """
+    Returns (plain_text_body, html_body). Events must have a 'days_until'
+    field; review_matters (matter review safety net, 2026-08-30) must too.
+
+    review_matters is rendered as its own clearly-labeled section, kept
+    deliberately separate from the events sections above \u2014 these are a
+    soft "please look at this" nudge (a matter that's gone quiet), not a
+    hard court/filing deadline, and mixing the two would blur a
+    distinction lawyers actually rely on.
+    """
+    review_matters = review_matters or []
+    if not events and not review_matters:
         text = "Good morning. You have no court dates, deadlines, or filings scheduled in the next 30 days.\n\n\u2014 Mutemo Desk"
         html = "<p>Good morning. You have no court dates, deadlines, or filings scheduled in the next 30 days.</p><p style='color:#6b6b64'>\u2014 Mutemo Desk</p>"
         return text, html
@@ -10616,6 +10741,13 @@ def build_reminder_email_body(events: list) -> tuple:
             return f"{body} ({e['matter_name']})"
         return body
 
+    def fmt_review_text(m):
+        prefix = _matter_identity_prefix(m) or m.get("name", "")
+        du = m.get("days_until", 0)
+        status = f"overdue by {abs(du)}d" if du < 0 else ("due today" if du == 0 else f"due in {du}d")
+        last_reviewed = f", last reviewed {m['last_reviewed_date']}" if m.get("last_reviewed_date") else ""
+        return f"{prefix} \u2014 next review {m.get('next_review_date')} ({status}{last_reviewed})"
+
     text_lines = ["Good morning. Here is your Mutemo Desk reminder summary:\n"]
     if today_items:
         text_lines.append("TODAY:")
@@ -10632,6 +10764,10 @@ def build_reminder_email_body(events: list) -> tuple:
     if later_items:
         text_lines.append("COMING UP:")
         for e in later_items: text_lines.append(f"  {e['date']}  \u2014  {fmt_text(e)}")
+        text_lines.append("")
+    if review_matters:
+        text_lines.append("MATTERS FOR REVIEW (no update in a while \u2014 not a hard deadline):")
+        for m in review_matters: text_lines.append(f"  \u2022 {fmt_review_text(m)}")
         text_lines.append("")
     text_lines.append("A calendar file (.ics) is attached \u2014 open it to add these to your phone or computer calendar.")
     text_lines.append("\n\u2014 Mutemo Desk")
@@ -10680,6 +10816,27 @@ def build_reminder_email_body(events: list) -> tuple:
                 f'<span style="font-size:12px;color:#6b6b64">{e["date"]}</span><br/>{fmt_html(e)}</div>'
                 for e in later_items
             )
+        )
+    if review_matters:
+        # Deliberately styled distinctly from the deadline sections above
+        # (muted blue-grey, not the red/gold urgency palette) — a soft
+        # nudge, not a hard deadline. Kept as its own clearly-labeled
+        # section rather than merged into the list above.
+        def fmt_review_html(m):
+            prefix = _matter_identity_prefix(m) or _escape_html(m.get("name", ""))
+            du = m.get("days_until", 0)
+            status = f"overdue by {abs(du)}d" if du < 0 else ("due today" if du == 0 else f"due in {du}d")
+            last_reviewed = f", last reviewed {m['last_reviewed_date']}" if m.get("last_reviewed_date") else ""
+            return (
+                f'<div style="padding:8px 0;border-bottom:1px solid #e8e4da">'
+                f'<strong>{_escape_html(prefix)}</strong><br/>'
+                f'<span style="font-size:13px;color:#6b6b64">Next review: {m.get("next_review_date")} ({status}{last_reviewed})</span>'
+                f'</div>'
+            )
+        html_sections.append(
+            '<h3 style="color:#4a5a6b;margin:16px 0 8px">\U0001F5C2 Matters for Review</h3>'
+            '<p style="font-size:12px;color:#6b6b64;margin:0 0 8px">No update in a while — a nudge, not a hard deadline.</p>' +
+            "".join(fmt_review_html(m) for m in review_matters)
         )
 
     html = f"""<div style="font-family:Georgia,serif;color:#1a1a18;max-width:560px">
@@ -10982,9 +11139,10 @@ def _send_via_resend_sync(to: str, subject: str, html_body: str, text_body: str,
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text}")
 
-async def send_reminder_email(recipient: str, events: list, test: bool = False) -> bool:
+async def send_reminder_email(recipient: str, events: list, test: bool = False, review_matters: Optional[list] = None) -> bool:
     """Send rich HTML daily calendar reminder via Resend with ICS attachment."""
-    text_body, html_body = build_reminder_email_body(events)
+    review_matters = review_matters or []
+    text_body, html_body = build_reminder_email_body(events, review_matters)
     if test:
         text_body = "[TEST EMAIL]\n\n" + text_body
         html_body = '<p style="background:#fdf6e8;padding:8px;border-radius:4px;font-size:13px"><strong>This is a test email.</strong></p>' + html_body
@@ -10993,6 +11151,10 @@ async def send_reminder_email(recipient: str, events: list, test: bool = False) 
         subject = f"{subject_prefix}\u2696 Mutemo Desk \u2014 Court date TODAY + upcoming"
     elif events:
         subject = f"{subject_prefix}\u2696 Mutemo Desk \u2014 Daily reminder ({len(events)} upcoming)"
+    elif review_matters:
+        # No hard deadlines, but there's still something worth a look \u2014
+        # don't say "nothing upcoming" when there genuinely is something.
+        subject = f"{subject_prefix}\u2696 Mutemo Desk \u2014 Daily reminder ({len(review_matters)} for review)"
     else:
         subject = f"{subject_prefix}\u2696 Mutemo Desk \u2014 Daily reminder (nothing upcoming)"
     ics_content = build_ics(events) if events else None
@@ -11131,10 +11293,18 @@ async def test_reminder(request: Request):
             "date": today.isoformat(), "time": None, "event_type": "other",
             "court": None, "matter_name": FIRM_NAME, "notes": None, "days_until": 0,
         }]
-    sent = await send_reminder_email(row["recipient_email"], test_events, test=True)
+    # Real matters for review (not dummy data) — same query the actual
+    # scheduler uses, so this test send genuinely verifies the section
+    # renders correctly for whatever real data exists right now, rather
+    # than a synthetic stand-in.
+    review_matters = await _get_review_matters_for_digest(today)
+    sent = await send_reminder_email(row["recipient_email"], test_events, test=True, review_matters=review_matters)
     if not sent:
         raise HTTPException(status_code=500, detail="Failed to send test email.")
-    return {"sent": True, "recipient": row["recipient_email"], "event_count": len(test_events)}
+    return {
+        "sent": True, "recipient": row["recipient_email"],
+        "event_count": len(test_events), "review_matter_count": len(review_matters),
+    }
 
 # ── Reminder Scheduler ────────────────────────────────────────────────────────
 
@@ -11272,6 +11442,48 @@ async def reminder_scheduler_loop():
             print(f"[digest] scheduler error: {e}")
         await asyncio.sleep(3600)
 
+async def _get_review_matters_for_digest(today: date) -> list:
+    """
+    Matter review safety net (2026-08-30): matters whose next_review_date
+    has arrived or passed, shaped for build_reminder_email_body's own
+    "Matters for Review" section (see there — deliberately kept separate
+    from the deadline events list, not merged into it). Shared between
+    the real scheduler (_maybe_send_reminder) and the manual test-send
+    endpoint (/api/reminders/test) so a real end-to-end check on staging
+    doesn't need to wait for the hourly scheduler tick.
+
+    No lower bound on the date range — overdue matters must always show,
+    however overdue — only an upper bound of REVIEW_DIGEST_LOOKAHEAD_DAYS
+    out. Same status/is_sentinel exclusions as the deadline query in
+    _maybe_send_reminder — no reason to nudge about a closed or
+    sentinel/demo matter.
+    """
+    if not _db_pool:
+        return []
+    async with _db_pool.acquire() as conn:
+        review_rows = await conn.fetch("""
+            SELECT m.id, m.name, m.next_review_date, m.last_reviewed_date, m.matter_number,
+                   m.client_name AS matter_client_name, c.full_name AS client_full_name
+            FROM matters m
+            LEFT JOIN clients c ON c.id = m.client_id
+            WHERE m.firm_id=$1 AND m.next_review_date IS NOT NULL
+              AND m.next_review_date <= $2
+              AND m.status != 'Closed' AND NOT m.is_sentinel
+            ORDER BY m.next_review_date ASC
+        """, FIRM_ID, today + timedelta(days=REVIEW_DIGEST_LOOKAHEAD_DAYS))
+    review_matters = []
+    for r in review_rows:
+        review_matters.append({
+            "name": r["name"],
+            "matter_number": r["matter_number"],
+            "case_number": extract_case_reference(r["name"]),
+            "resolved_client_name": r["client_full_name"] or r["matter_client_name"],
+            "next_review_date": str(r["next_review_date"]),
+            "last_reviewed_date": str(r["last_reviewed_date"]) if r["last_reviewed_date"] else None,
+            "days_until": (r["next_review_date"] - today).days,
+        })
+    return review_matters
+
 async def _maybe_send_reminder():
     if not _db_pool:
         return
@@ -11345,7 +11557,9 @@ async def _maybe_send_reminder():
         })
     events.sort(key=lambda e: (e.get("date") or "", e.get("time") or ""))
 
-    if not events:
+    review_matters = await _get_review_matters_for_digest(today)
+
+    if not events and not review_matters:
         async with _db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE reminder_settings SET last_run_date=$1 WHERE firm_id=$2",
@@ -11361,14 +11575,14 @@ async def _maybe_send_reminder():
         except Exception:
             e["days_until"] = 0  # treat as today if date parse fails
 
-    sent = await send_reminder_email(settings["recipient_email"], events)
+    sent = await send_reminder_email(settings["recipient_email"], events, review_matters=review_matters)
     if sent:
         async with _db_pool.acquire() as conn:
             await conn.execute(
                 "UPDATE reminder_settings SET last_run_date=$1 WHERE firm_id=$2",
                 today, FIRM_ID
             )
-        print(f"[reminder] digest sent to {settings['recipient_email']}: {len(events)} events")
+        print(f"[reminder] digest sent to {settings['recipient_email']}: {len(events)} events, {len(review_matters)} for review")
 
 # ── Inactivity Alerts ─────────────────────────────────────────────────────────
 
