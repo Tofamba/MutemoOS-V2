@@ -1330,10 +1330,29 @@ TWILIO_ACCOUNT_SID  = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN   = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER  = os.environ.get("TWILIO_FROM_NUMBER")
 _TWILIO_SMS_CONFIGURED = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER)
+# Africa's Talking (2026-08-30): the PRIMARY SMS channel, ahead of Twilio
+# below — Twilio has never actually been configured for this firm, so
+# there's no real second working provider to build fallback logic
+# between. Twilio's code stays in place (harmless, already-tested,
+# zero-cost when unconfigured) in case it's ever wired up later, but
+# _send_otp_code() checks Africa's Talking first. AFRICAS_TALKING_FROM
+# is optional -- a registered alphanumeric sender ID; Africa's Talking
+# falls back to its shared "AFRICASTKNG" sender ID if unset, which can
+# face carrier filtering for OTP-type messages on some networks -- see
+# _send_sms_via_africastalking()'s docstring.
+AFRICAS_TALKING_USERNAME = os.environ.get("AFRICAS_TALKING_USERNAME")
+AFRICAS_TALKING_API_KEY  = os.environ.get("AFRICAS_TALKING_API_KEY")
+AFRICAS_TALKING_FROM     = os.environ.get("AFRICAS_TALKING_FROM")  # optional registered sender ID
+_AFRICAS_TALKING_CONFIGURED = bool(AFRICAS_TALKING_USERNAME and AFRICAS_TALKING_API_KEY)
 # Inlined rather than calling is_email_configured() (defined later in this
 # file) — this line runs at import time, before that function exists yet.
 _EMAIL_OTP_CONFIGURED = bool(os.environ.get("RESEND_API_KEY") or os.environ.get("SMTP_HOST"))
-AUTH_ENABLED = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID) or _TWILIO_SMS_CONFIGURED or _EMAIL_OTP_CONFIGURED
+AUTH_ENABLED = (
+    bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
+    or _AFRICAS_TALKING_CONFIGURED
+    or _TWILIO_SMS_CONFIGURED
+    or _EMAIL_OTP_CONFIGURED
+)
 
 # Any request landing while AUTH_ENABLED is False resolves to a synthetic
 # dev user with no real identity (see get_current_user) — session auth is
@@ -1400,26 +1419,35 @@ def _send_otp_code(phone: str, email: Optional[str], code: str) -> Optional[str]
     """
     Sends the OTP via whichever channel is actually configured. Prefers
     WhatsApp (the eventual target, once Meta Business Verification
-    completes for the WhatsApp Business Account), falls back to Twilio SMS
-    for firms without WhatsApp set up yet, and finally to email via Resend
-    as a last-resort stopgap. Each channel activates automatically as soon
-    as its own env vars are set on Railway — no further code change needed
-    to "switch over" between them.
+    completes for the WhatsApp Business Account), then Africa's Talking
+    SMS (the PRIMARY SMS channel — see the constants above for why it's
+    checked ahead of Twilio), then Twilio SMS as a secondary/legacy SMS
+    fallback that's never actually been configured for this firm, and
+    finally email via Resend as a last-resort stopgap. Each channel
+    activates automatically as soon as its own env vars are set on
+    Railway — no further code change needed to "switch over" between
+    them.
 
     Returns the channel actually used ("whatsapp" / "sms" / "email"), or
     None if nothing could be sent — this was previously just True/False,
     which is why the login screen kept saying "code sent to your phone"
     even when it had actually gone to email: the frontend had no way to
-    know which channel was really used.
+    know which channel was really used. Africa's Talking and Twilio both
+    report as "sms" here — the frontend/digest only need to know it went
+    to SMS, not which provider handled it.
     """
     if WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID:
         if _send_whatsapp_otp(phone, code):
             return "whatsapp"
         print(f"[otp] WhatsApp send failed for {phone}, falling back")
+    if _AFRICAS_TALKING_CONFIGURED:
+        if _send_sms_via_africastalking(phone, code):
+            return "sms"
+        print(f"[otp] Africa's Talking SMS send failed for {phone}, falling back")
     if _TWILIO_SMS_CONFIGURED:
         if _send_sms_otp(phone, code):
             return "sms"
-        print(f"[otp] SMS send failed for {phone}, falling back")
+        print(f"[otp] Twilio SMS send failed for {phone}, falling back")
     if email and _EMAIL_OTP_CONFIGURED:
         if _send_email_otp(email, code):
             return "email"
@@ -1491,6 +1519,62 @@ def _send_sms_otp(phone: str, code: str) -> bool:
         return True
     except Exception as e:
         print(f"[otp] SMS send failed: {e}")
+        return False
+
+def _send_sms_via_africastalking(phone: str, code: str) -> bool:
+    """
+    Sends the OTP as a plain SMS via Africa's Talking's REST API — the
+    PRIMARY SMS channel (see the constants above). Same direct-httpx,
+    non-fatal-on-failure discipline as _send_sms_otp() (Twilio) above,
+    but the actual response handling is genuinely different, not a
+    copy-paste: Africa's Talking's /messaging endpoint returns HTTP
+    200/201 even when an individual recipient failed (insufficient
+    account credit, invalid/unreachable number, etc.) — the real
+    success/failure lives per-recipient inside the JSON body
+    (SMSMessageData.Recipients[].status / .statusCode), not the HTTP
+    status code the way Twilio's API works. Checking status_code alone
+    here would silently report "sent" for messages that were actually
+    rejected.
+
+    Always targets the LIVE endpoint (api.africastalking.com, not
+    api.sandbox.africastalking.com) -- AFRICAS_TALKING_USERNAME is
+    expected to be a real named production application (Africa's
+    Talking's built-in sandbox app is always literally named "sandbox",
+    never a custom name), confirmed against the real account before
+    this was wired in, not assumed.
+    """
+    try:
+        import httpx
+        resp = httpx.post(
+            "https://api.africastalking.com/version1/messaging",
+            headers={
+                "apiKey": AFRICAS_TALKING_API_KEY,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            data={
+                "username": AFRICAS_TALKING_USERNAME,
+                "to": phone,
+                "message": f"Your Mutemo Desk login code is {code}. It expires in 5 minutes.",
+                **({"from": AFRICAS_TALKING_FROM} if AFRICAS_TALKING_FROM else {}),
+            },
+            timeout=15,
+        )
+        if resp.status_code not in (200, 201):
+            print(f"[otp] Africa's Talking SMS send failed {resp.status_code}: {resp.text[:300]}")
+            return False
+        recipients = resp.json().get("SMSMessageData", {}).get("Recipients", [])
+        if not recipients:
+            print(f"[otp] Africa's Talking SMS send: no recipients in response: {resp.text[:300]}")
+            return False
+        recipient = recipients[0]
+        if recipient.get("status") != "Success":
+            print(f"[otp] Africa's Talking SMS send failed for {phone}: "
+                  f"status={recipient.get('status')} statusCode={recipient.get('statusCode')}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[otp] Africa's Talking SMS send failed: {e}")
         return False
 
 class OTPRequestBody(BaseModel):
