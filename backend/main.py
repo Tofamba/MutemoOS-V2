@@ -2015,6 +2015,65 @@ async def cf_set_session_duration(request: Request, duration: str = "6h"):
         ] if after else None,
     }
 
+@app.get("/api/admin/client-ownership-check")
+async def client_ownership_check(request: Request):
+    """TEMPORARY diagnostic endpoint (2026-08-30) -- not a standing feature.
+
+    Investigating "My Clients (0)" vs "All Clients (71)" for the firm's
+    only real active lawyer -- "My Clients" filters on clients.created_by
+    (frontend/index.html's renderClientsList, `c.created_by ===
+    window._userId`), not any "assigned_lawyer" field (no such column
+    exists on clients; that's a matters-table concept, a different
+    thing). Source-level lead: scripts/migrate_clients.py's two raw
+    INSERT INTO clients statements both omit created_by entirely --
+    unlike every real app-level creation path (create_client,
+    bulk_import_matters, client_intake), which all pass it correctly via
+    _create_client_row(). This checks that lead against real data rather
+    than stopping at source inference.
+
+    Read-only, X-Admin-Token gated, same pattern as tonight's other
+    temporary endpoints. Safe to delete once this investigation is done.
+    """
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or admin_token_header != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    async with _db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM clients WHERE firm_id=$1", FIRM_ID)
+        null_created_by = await conn.fetchval(
+            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by IS NULL", FIRM_ID
+        )
+        by_owner = await conn.fetch("""
+            SELECT c.created_by, u.display_name, u.role, u.is_active, COUNT(*) AS client_count
+            FROM clients c
+            LEFT JOIN users u ON u.id = c.created_by
+            WHERE c.firm_id=$1
+            GROUP BY c.created_by, u.display_name, u.role, u.is_active
+            ORDER BY client_count DESC
+        """, FIRM_ID)
+        all_users = await conn.fetch(
+            "SELECT id, display_name, role, is_active FROM users WHERE firm_id=$1 ORDER BY display_name", FIRM_ID
+        )
+
+    return {
+        "total_clients": total,
+        "clients_with_null_created_by": null_created_by,
+        "breakdown_by_owner": [
+            {
+                "user_id": str(r["created_by"]) if r["created_by"] else None,
+                "display_name": r["display_name"],
+                "role": r["role"],
+                "is_active": r["is_active"],
+                "client_count": r["client_count"],
+            }
+            for r in by_owner
+        ],
+        "all_users_in_firm": [
+            {"id": str(r["id"]), "display_name": r["display_name"], "role": r["role"], "is_active": r["is_active"]}
+            for r in all_users
+        ],
+    }
+
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
     try:
