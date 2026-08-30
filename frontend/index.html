@@ -4019,20 +4019,20 @@ async function renderMatterPanel(id) {
       <div class="matter-section" style="background:var(--white)">
         <div class="matter-section-title">🗂 Review</div>
         <p style="font-size:0.72rem;color:var(--ink3);margin:-4px 0 8px">A soft reminder to check in on this matter — not a court deadline. Defaults to 30 days after any update or note; set a date here to override.</p>
-        <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center">
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:80px">NEXT REVIEW</label>
             <input type="date" value="${matter.next_review_date || ''}"
               style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
               onchange="if(this.value) updateMatterField('${id}','next_review_date',this.value)"/>
-            ${(() => {
-              if (!matter.next_review_date) return '';
-              const days = Math.round((new Date(matter.next_review_date + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
-              if (days < 0) return `<span class="chip chip-gold">Overdue by ${Math.abs(days)}d</span>`;
-              if (days === 0) return `<span class="chip chip-gold">Due today</span>`;
-              return `<span class="chip chip-gray">Due in ${days}d</span>`;
-            })()}
           </div>
+          ${(() => {
+            if (!matter.next_review_date) return '';
+            const days = Math.round((new Date(matter.next_review_date + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
+            if (days < 0) return `<span class="chip chip-gold">Overdue by ${Math.abs(days)}d</span>`;
+            if (days === 0) return `<span class="chip chip-gold">Due today</span>`;
+            return `<span class="chip chip-gray">Due in ${days}d</span>`;
+          })()}
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:90px">LAST REVIEWED</label>
             <span style="font-size:0.78rem;color:var(--ink2)">${matter.last_reviewed_date || '—'}</span>
