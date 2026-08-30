@@ -4306,11 +4306,11 @@ async def admin_verify_matter_review_status(request: Request, sample: int = 20):
             )
             raw_note = await conn.fetchrow(
                 "SELECT text, created_at FROM progress_notes WHERE matter_id=$1 "
-                "ORDER BY created_at DESC LIMIT 1", mid
+                "ORDER BY created_at DESC, id DESC LIMIT 1", mid
             )
             raw_doc = await conn.fetchrow(
                 "SELECT filename, uploaded_at FROM documents WHERE matter_id=$1 AND status='complete' "
-                "ORDER BY uploaded_at DESC LIMIT 1", mid
+                "ORDER BY uploaded_at DESC, id DESC LIMIT 1", mid
             )
 
             expected_next_review = raw_matter["next_review_date"].isoformat() if raw_matter["next_review_date"] else None
@@ -4337,6 +4337,17 @@ async def admin_verify_matter_review_status(request: Request, sample: int = 20):
                 row_mismatches.append(f"last_activity_kind: report={r['last_activity_kind']} raw={expected_kind}")
             if r["last_activity_date"] != expected_date:
                 row_mismatches.append(f"last_activity_date: report={r['last_activity_date']} raw={expected_date}")
+            # Content check, not just kind/date -- kind+date alone missed a
+            # real case (two documents sharing one uploaded_at on a test
+            # matter) where the date matched but the actual filename picked
+            # didn't, because the two independent queries broke the tie
+            # differently. Fixed by an id DESC tiebreaker on both queries
+            # (see _fetch_matter_review_status_rows); this check stays as a
+            # permanent guard against that class of mismatch recurring.
+            if expected_kind == "note" and raw_note and r["last_activity_text"] != _truncate_preview(raw_note["text"]):
+                row_mismatches.append(f"last_activity_text (note): report={r['last_activity_text']!r} raw_truncated={_truncate_preview(raw_note['text'])!r}")
+            if expected_kind == "document" and raw_doc and r["last_activity_text"] != f"Document uploaded: {raw_doc['filename']}":
+                row_mismatches.append(f"last_activity_text (document): report={r['last_activity_text']!r} raw_filename={raw_doc['filename']!r}")
 
             entry = {
                 "matter_id": r["matter_id"], "matter_name": r["matter_name"],
@@ -6426,9 +6437,18 @@ async def _fetch_matter_review_status_rows(
     matter_ids = [r["id"] for r in rows]
     notes_by_matter, docs_by_matter = {}, {}
     if matter_ids:
+        # `id DESC` tiebreaker on both queries below: a real, observed case
+        # (found via /api/admin/verify-matter-review-status against staging)
+        # -- two documents sharing the exact same uploaded_at (a bulk/test
+        # seed inserted in one transaction) made ORDER BY ..., uploaded_at
+        # DESC alone non-deterministic between calls, picking a different
+        # "most recent" document depending on Postgres's arbitrary tie
+        # order. Which of two identically-timestamped rows is "correct" is
+        # inherently undefined; what matters is picking the SAME one
+        # consistently every time this query runs.
         note_rows = await conn.fetch(
             "SELECT matter_id, text, created_at FROM progress_notes "
-            "WHERE matter_id = ANY($1) ORDER BY matter_id, created_at DESC",
+            "WHERE matter_id = ANY($1) ORDER BY matter_id, created_at DESC, id DESC",
             matter_ids
         )
         for n in note_rows:
@@ -6436,7 +6456,7 @@ async def _fetch_matter_review_status_rows(
 
         doc_rows = await conn.fetch(
             "SELECT matter_id, filename, uploaded_at FROM documents "
-            "WHERE matter_id = ANY($1) AND status='complete' ORDER BY matter_id, uploaded_at DESC",
+            "WHERE matter_id = ANY($1) AND status='complete' ORDER BY matter_id, uploaded_at DESC, id DESC",
             matter_ids
         )
         for d in doc_rows:
