@@ -2066,6 +2066,92 @@ async def session_check(request: Request, user_id: str):
         "configured_idle_timeout_minutes": SESSION_IDLE_TIMEOUT_SECONDS / 60,
     }
 
+@app.post("/api/admin/verify-review-safety-net")
+async def verify_review_safety_net(request: Request):
+    """TEMPORARY diagnostic endpoint (2026-08-30) -- not a standing feature.
+
+    Real end-to-end verification of the matter review safety net,
+    against this deployment's actual database rather than a local pytest
+    fake -- per the explicit "staging-first, with a real end-to-end
+    verification... before production" instruction. Creates one real
+    matter, checks the default, simulates the review window arriving
+    (a direct backdate, not going through update_matter() -- that would
+    just re-default it back to +30 days, defeating the point), confirms
+    the digest query and renderer both pick it up correctly, then
+    deletes the test matter it created. Nothing is left behind either
+    way, pass or fail.
+
+    Read/write but fully self-contained and self-cleaning; X-Admin-Token
+    gated, same pattern as tonight's other temporary endpoints. Safe to
+    delete once this verification is done.
+    """
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or admin_token_header != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    steps = {}
+    matter_id = None
+    try:
+        async with _db_pool.acquire() as conn:
+            row = await _create_matter_row(
+                conn, FIRM_ID,
+                "TEMP verification matter — review safety net (safe to delete)",
+            )
+        matter_id = row["id"]
+        today = date.today()
+        expected_default = today + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
+        steps["1_creation_default"] = {
+            "expected": expected_default.isoformat(),
+            "actual": row["next_review_date"].isoformat() if row["next_review_date"] else None,
+            "passed": row["next_review_date"] == expected_default,
+        }
+        steps["1b_last_reviewed_stamped"] = {
+            "expected": today.isoformat(),
+            "actual": row["last_reviewed_date"].isoformat() if row["last_reviewed_date"] else None,
+            "passed": row["last_reviewed_date"] == today,
+        }
+
+        # Simulate the review window arriving: a direct backdate, not a
+        # PATCH through update_matter() (which would just re-default it
+        # back to +30 days from today -- the opposite of what "simulate
+        # time passing" means here).
+        overdue_date = today - timedelta(days=2)
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE matters SET next_review_date=$1 WHERE id=$2",
+                overdue_date, matter_id,
+            )
+
+        review_matters = await _get_review_matters_for_digest(today)
+        found = next((m for m in review_matters if m["name"].startswith("TEMP verification matter")), None)
+        steps["2_digest_query_finds_overdue_matter"] = {
+            "found": found is not None,
+            "days_until": found["days_until"] if found else None,
+            "passed": found is not None and found["days_until"] == -2,
+        }
+
+        if found:
+            text, html = build_reminder_email_body([], review_matters=[found])
+            steps["3_digest_render_labels_correctly"] = {
+                "has_review_section_text": "MATTERS FOR REVIEW" in text,
+                "has_review_section_html": "Matters for Review" in html,
+                "matter_name_in_text": "TEMP verification matter" in text,
+                "overdue_label_in_text": "overdue by 2d" in text,
+                "passed": (
+                    "MATTERS FOR REVIEW" in text and "Matters for Review" in html
+                    and "TEMP verification matter" in text and "overdue by 2d" in text
+                ),
+            }
+        else:
+            steps["3_digest_render_labels_correctly"] = {"passed": False, "error": "matter not found in step 2, skipped"}
+
+        all_passed = all(s.get("passed") for s in steps.values())
+        return {"all_passed": all_passed, "steps": steps, "matter_id": str(matter_id)}
+    finally:
+        if matter_id:
+            async with _db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM matters WHERE id=$1", matter_id)
+
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
     try:
