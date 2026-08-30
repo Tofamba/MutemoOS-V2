@@ -2030,6 +2030,27 @@ select{cursor:pointer}
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Firm-wide matter count per practice area.</p>
       <div id="practice-area-breakdown-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
     </div>
+
+    <div class="card" style="margin-top:1rem">
+      <div class="card-title">🗂 Matter Review Status</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Every matter's review state and last real activity, soonest-due / most-overdue first — an on-demand audit of the whole caseload, not just what's currently flagged in the reminder digest.
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:0.75rem;align-items:center">
+        <select id="mrs-filter-lawyer" style="font-size:0.8rem;padding:4px 8px" onchange="loadMatterReviewStatus()">
+          <option value="">All lawyers (by created by)</option>
+        </select>
+        <select id="mrs-filter-client" style="font-size:0.8rem;padding:4px 8px" onchange="loadMatterReviewStatus()">
+          <option value="">All clients</option>
+        </select>
+        <select id="mrs-filter-status" style="font-size:0.8rem;padding:4px 8px" onchange="loadMatterReviewStatus()">
+          <option value="">All statuses</option>
+        </select>
+        <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterReviewStatusCsv()">⬇ Download CSV</button>
+      </div>
+      <div id="mrs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+      <div id="matter-review-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+    </div>
   </div>
 
 </main>
@@ -3486,7 +3507,7 @@ function showTab(tab) {
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
-  if (tab === 'reports') { loadReportHistory(); loadPracticeAreaBreakdown(); }
+  if (tab === 'reports') { loadReportHistory(); loadPracticeAreaBreakdown(); loadMatterReviewStatusFilters().then(loadMatterReviewStatus); }
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -7443,6 +7464,122 @@ async function loadPracticeAreaBreakdown() {
       </table>
     `;
   } catch(e) { el.innerHTML = '<em>Error loading practice area breakdown.</em>'; }
+}
+
+// ── Reports (Matter Review Status) ──────────────────────────────────────────
+// Filter dropdowns are populated once per Reports-tab visit (loadMatterReviewStatusFilters),
+// then loadMatterReviewStatus() re-fetches on every filter change. 'Lawyer' filters on
+// created_by (who created the matter) — matters.assigned_lawyer_id is a separate,
+// mostly-unused field scoped to the external panel-lawyer coverage feature, not a
+// general per-matter ownership concept, so it isn't offered here as a filter.
+
+async function loadMatterReviewStatusFilters() {
+  const lawyerSel = document.getElementById('mrs-filter-lawyer');
+  const clientSel = document.getElementById('mrs-filter-client');
+  const statusSel = document.getElementById('mrs-filter-status');
+
+  try {
+    const res = await fetch(`${API}/api/users`);
+    if (res.ok) {
+      const users = await res.json();
+      lawyerSel.innerHTML = '<option value="">All lawyers (by created by)</option>' +
+        users.map(u => `<option value="${u.id}">${escHtml(u.display_name)}</option>`).join('');
+    }
+  } catch(e) { /* filter dropdown staying at its default option is non-fatal */ }
+
+  clientSel.innerHTML = '<option value="">All clients</option>' +
+    [...clients].sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''))
+      .map(c => `<option value="${c.id}">${escHtml(c.full_name)}</option>`).join('');
+
+  statusSel.innerHTML = '<option value="">All statuses</option>' +
+    ['Active', 'Awaiting Client', 'Awaiting Court', 'On Hold', 'Closed']
+      .map(s => `<option value="${s}">${s}</option>`).join('');
+}
+
+function _mrsFilterParams() {
+  const params = new URLSearchParams();
+  const lawyerId = document.getElementById('mrs-filter-lawyer').value;
+  const clientId = document.getElementById('mrs-filter-client').value;
+  const status = document.getElementById('mrs-filter-status').value;
+  if (lawyerId) params.set('lawyer_id', lawyerId);
+  if (clientId) params.set('client_id', clientId);
+  if (status) params.set('status', status);
+  return params;
+}
+
+async function loadMatterReviewStatus() {
+  const el = document.getElementById('matter-review-status-list');
+  const statusEl = document.getElementById('mrs-status');
+  try {
+    const res = await fetch(`${API}/api/reports/matter-review-status?${_mrsFilterParams()}`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load matter review status.</em>'; return; }
+    const rows = await res.json();
+    if (!rows.length) { el.innerHTML = '<em>No matters match these filters.</em>'; statusEl.textContent = ''; return; }
+    el.innerHTML = `
+      <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
+            <th style="padding:6px 8px 6px 0;white-space:nowrap">Matter</th>
+            <th style="padding:6px 8px;white-space:nowrap">Client</th>
+            <th style="padding:6px 8px;white-space:nowrap">Status</th>
+            <th style="padding:6px 8px;white-space:nowrap">Next Review</th>
+            <th style="padding:6px 8px;white-space:nowrap">Last Reviewed</th>
+            <th style="padding:6px 8px;min-width:220px">Last Activity</th>
+            <th style="padding:6px 8px;white-space:nowrap">Created By</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px 6px 0;white-space:nowrap">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.client_name || '')}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.status || '')}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${r.last_reviewed_date || '<span style="color:var(--ink3)">Never reviewed</span>'}</td>
+              <td style="padding:6px 8px">${escHtml(r.last_activity_text)}${r.last_activity_date ? ` <span style="color:var(--ink3);font-size:0.75rem">(${r.last_activity_date.slice(0,10)})</span>` : ''}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.created_by_name || '')}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      </div>
+    `;
+    statusEl.textContent = `${rows.length} matter${rows.length === 1 ? '' : 's'}`;
+    statusEl.style.color = 'var(--ink3)';
+  } catch(e) { el.innerHTML = '<em>Error loading matter review status.</em>'; }
+}
+
+async function downloadMatterReviewStatusCsv() {
+  const statusEl = document.getElementById('mrs-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/matter-review-status-export?${_mrsFilterParams()}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'matter_review_status.csv';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ CSV downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
 }
 
 function showInviteStatus(msg, type) {

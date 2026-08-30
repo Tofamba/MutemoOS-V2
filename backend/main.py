@@ -1103,6 +1103,7 @@ PERMISSIONS = {
     # every other permission in this table.
     "reports:rbz_compliance": {"admin", "partner"},
     "reports:practice_area_breakdown": {"admin", "partner"},
+    "reports:matter_review_status": {"admin", "partner"},
 }
 
 def _check_permission(user: dict, permission: str):
@@ -6274,6 +6275,213 @@ async def practice_area_breakdown(request: Request):
         {"practice_area": r["practice_area"] or "Uncategorized", "matter_count": r["matter_count"]}
         for r in rows
     ]
+
+# ── Reports (Matter Review Status) ──────────────────────────────────────────
+# Partner-tier, same as the two reports above (reports:matter_review_status,
+# its own scoped key, matching practice_area_breakdown's convention rather
+# than reusing rbz_compliance's). A lookback audit view, not a nudge digest:
+# shows EVERY matter (any status, unlike _get_review_matters_for_digest which
+# only surfaces due/overdue ones) so a partner can see the whole caseload's
+# review state at once, not just what's currently actionable.
+#
+# No report_history logging here -- that's specific to the RBZ export's
+# regulatory audit-trail need (proving a habit of regular compliance
+# reporting); this is an internal operational view, same category as
+# practice_area_breakdown above, which also doesn't log.
+
+_REVIEW_STATUS_NOTE_PREVIEW_LEN = 160
+
+def _truncate_preview(text: str, length: int = _REVIEW_STATUS_NOTE_PREVIEW_LEN) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= length else text[:length].rstrip() + "…"
+
+async def _fetch_matter_review_status_rows(
+    conn, *, lawyer_id: Optional[_uuid_mod.UUID], client_id: Optional[_uuid_mod.UUID], status: Optional[str]
+) -> list:
+    """
+    One row per matter, firm-wide (sentinel excluded, same as every other
+    matter listing). NULLS FIRST on next_review_date is deliberate, not an
+    accident of Postgres's default: a NULL here means a matter created
+    before the review safety net existed (2026-08-30) and never touched
+    since -- it has never entered the review cycle at all, which is a more
+    urgent gap than a dated-but-merely-overdue matter, so it sorts ahead
+    of those, not after.
+
+    'lawyer' filters on created_by, not assigned_lawyer_id -- the latter
+    is scoped entirely to the separate panel-lawyer coverage feature and
+    is NULL on ordinary matters created through this firm's own normal
+    flow (see reports/matter-review-status endpoint docstring for why).
+    """
+    where = ["m.firm_id=$1", "NOT m.is_sentinel"]
+    args: list = [FIRM_ID]
+    if lawyer_id is not None:
+        args.append(lawyer_id)
+        where.append(f"m.created_by=${len(args)}")
+    if client_id is not None:
+        args.append(client_id)
+        where.append(f"m.client_id=${len(args)}")
+    if status is not None:
+        args.append(status)
+        where.append(f"m.status=${len(args)}")
+
+    rows = await conn.fetch(f"""
+        SELECT m.id, m.name, m.number, m.matter_number, m.client_id, m.client_name,
+               m.status, m.next_review_date, m.last_reviewed_date, m.last_activity,
+               m.created_at, m.created_by,
+               c.full_name AS client_full_name,
+               u.display_name AS created_by_name
+        FROM matters m
+        LEFT JOIN clients c ON c.id = m.client_id
+        LEFT JOIN users u ON u.id = m.created_by
+        WHERE {" AND ".join(where)}
+        ORDER BY m.next_review_date ASC NULLS FIRST, m.name ASC
+    """, *args)
+
+    matter_ids = [r["id"] for r in rows]
+    notes_by_matter, docs_by_matter = {}, {}
+    if matter_ids:
+        note_rows = await conn.fetch(
+            "SELECT matter_id, text, created_at FROM progress_notes "
+            "WHERE matter_id = ANY($1) ORDER BY matter_id, created_at DESC",
+            matter_ids
+        )
+        for n in note_rows:
+            notes_by_matter.setdefault(n["matter_id"], n)  # first per matter_id wins == most recent, DESC order
+
+        doc_rows = await conn.fetch(
+            "SELECT matter_id, filename, uploaded_at FROM documents "
+            "WHERE matter_id = ANY($1) AND status='complete' ORDER BY matter_id, uploaded_at DESC",
+            matter_ids
+        )
+        for d in doc_rows:
+            docs_by_matter.setdefault(d["matter_id"], d)
+
+    result = []
+    for r in rows:
+        note = notes_by_matter.get(r["id"])
+        doc = docs_by_matter.get(r["id"])
+        if note is not None:
+            last_activity_kind = "note"
+            last_activity_text = _truncate_preview(note["text"])
+            last_activity_date = note["created_at"]
+        elif doc is not None:
+            last_activity_kind = "document"
+            last_activity_text = f"Document uploaded: {doc['filename']}"
+            last_activity_date = doc["uploaded_at"]
+        elif r["last_activity"] is not None:
+            last_activity_kind = "touched"
+            last_activity_text = "Touched (no note or document recorded)"
+            last_activity_date = r["last_activity"]
+        else:
+            last_activity_kind = "created"
+            last_activity_text = "Matter created, no activity since"
+            last_activity_date = r["created_at"]
+
+        result.append({
+            "matter_id": str(r["id"]),
+            "matter_name": r["name"],
+            "matter_number": r["matter_number"] or r["number"],
+            "client_id": str(r["client_id"]) if r["client_id"] else None,
+            "client_name": r["client_full_name"] or r["client_name"] or "",
+            "status": r["status"],
+            "next_review_date": r["next_review_date"].isoformat() if r["next_review_date"] else None,
+            "last_reviewed_date": r["last_reviewed_date"].isoformat() if r["last_reviewed_date"] else None,
+            "created_by_name": r["created_by_name"],
+            "last_activity_kind": last_activity_kind,
+            "last_activity_text": last_activity_text,
+            "last_activity_date": last_activity_date.isoformat() if last_activity_date else None,
+        })
+    return result
+
+@app.get("/api/reports/matter-review-status")
+async def matter_review_status_report(
+    request: Request,
+    lawyer_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """
+    On-demand audit view: every matter's review state and last real
+    activity, sorted soonest-due/most-overdue first. Complements
+    _get_review_matters_for_digest (the nudge digest, due/overdue-only) --
+    this is the full lookback, any status, for a partner to scan the whole
+    caseload at once rather than wait for something to become actionable.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:matter_review_status")
+
+    lawyer_uuid = None
+    if lawyer_id:
+        try:
+            lawyer_uuid = _uuid_mod.UUID(lawyer_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="lawyer_id must be a valid UUID")
+    client_uuid = None
+    if client_id:
+        try:
+            client_uuid = _uuid_mod.UUID(client_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
+    if status is not None and status not in MATTER_STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of: {', '.join(MATTER_STATUSES)}")
+
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_matter_review_status_rows(
+            conn, lawyer_id=lawyer_uuid, client_id=client_uuid, status=status
+        )
+    return rows
+
+@app.get("/api/reports/matter-review-status-export")
+async def matter_review_status_report_export(
+    request: Request,
+    lawyer_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Same data/filters/permission as the JSON report above -- a second
+    output format (CSV download), same convention as the RBZ export."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:matter_review_status")
+
+    lawyer_uuid = None
+    if lawyer_id:
+        try:
+            lawyer_uuid = _uuid_mod.UUID(lawyer_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="lawyer_id must be a valid UUID")
+    client_uuid = None
+    if client_id:
+        try:
+            client_uuid = _uuid_mod.UUID(client_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
+    if status is not None and status not in MATTER_STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of: {', '.join(MATTER_STATUSES)}")
+
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_matter_review_status_rows(
+            conn, lawyer_id=lawyer_uuid, client_id=client_uuid, status=status
+        )
+
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Matter Name", "Matter Number", "Client Name", "Status", "Created By",
+                      "Next Review Date", "Last Reviewed Date", "Last Activity", "Last Activity Date"])
+    for r in rows:
+        writer.writerow([
+            r["matter_name"] or "", r["matter_number"] or "", r["client_name"] or "",
+            r["status"] or "", r["created_by_name"] or "",
+            r["next_review_date"] or "None set", r["last_reviewed_date"] or "Never reviewed",
+            r["last_activity_text"] or "", r["last_activity_date"] or "",
+        ])
+
+    filename = f"matter_review_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 
