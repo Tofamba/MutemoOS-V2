@@ -2096,6 +2096,14 @@ async def verify_review_safety_net(request: Request):
             row = await _create_matter_row(
                 conn, FIRM_ID,
                 "TEMP verification matter — review safety net (safe to delete)",
+                # created_at is NOT NULL DEFAULT NOW() in the schema --
+                # _create_matter_row()'s None default sends an explicit
+                # SQL NULL, which overrides that DEFAULT rather than
+                # falling back to it (confirmed live: this crashed with
+                # NotNullViolationError before this fix). Every real
+                # creation path already passes this explicitly; matching
+                # that here.
+                created_at=datetime.utcnow(),
             )
         matter_id = row["id"]
         today = date.today()
