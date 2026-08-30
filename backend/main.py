@@ -1906,6 +1906,94 @@ async def _revoke_cloudflare_access_session(email: str) -> bool:
         print(f"[logout] Cloudflare Access revoke error (non-fatal): {e}")
         return False
 
+@app.post("/api/admin/cf-set-session-duration")
+async def cf_set_session_duration(request: Request, duration: str = "6h"):
+    """TEMPORARY, one-time endpoint (2026-08-30) -- not a standing feature.
+
+    Changes the Cloudflare Access application's session_duration, per an
+    explicit, informed decision: automating this was originally judged too
+    risky (see docs/shared-device-logout.md) because it was never
+    confirmed whether PUT /accounts/{id}/access/apps/{id} is a partial
+    update or a full-document replace, and a blind partial body risked
+    wiping the live application's domain/allowed_idps/policies -- real
+    production impact for a real firm (Sawyer & Mkushi) currently using
+    this exact application to log in.
+
+    Mitigation used here: GET the complete, current object immediately
+    before the PUT (not a stale/earlier copy), strip only the fields that
+    are unambiguously read-only response metadata (id, uid, created_at,
+    updated_at, aud -- none of these are configuration a client could
+    sensibly set), and echo every other field back exactly as-is with
+    only session_duration changed. If the PUT endpoint does turn out to
+    be a full replace, this is the closest thing to a safe one, since
+    nothing is actually omitted except read-only metadata. Returns both
+    the pre-change and post-change object so the result is verifiable,
+    not assumed -- and so the pre-change state is recoverable by hand via
+    the dashboard if anything looks wrong.
+
+    Read-only from the caller's perspective except for the one intended
+    write; X-Admin-Token gated, same pattern as tonight's other temporary
+    endpoints. Safe to delete once this change is verified.
+    """
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or admin_token_header != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID = _get_cf_vars()
+    if not all([CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID]):
+        return {"error": "Cloudflare vars not fully configured on this deployment"}
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/access/apps/{CLOUDFLARE_ACCESS_APP_ID}"
+    headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"}
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as http:
+            get_resp = await http.get(url, headers=headers)
+            if get_resp.status_code != 200 or not get_resp.json().get("success"):
+                return {"error": "Fresh GET failed, refusing to PUT blind", "status_code": get_resp.status_code, "body": get_resp.text[:500]}
+
+            current = get_resp.json()["result"]
+            before_session_duration = current.get("session_duration")
+
+            READ_ONLY_FIELDS = {"id", "uid", "created_at", "updated_at", "aud"}
+            put_body = {k: v for k, v in current.items() if k not in READ_ONLY_FIELDS}
+            put_body["session_duration"] = duration
+
+            put_resp = await http.put(url, headers=headers, json=put_body)
+            put_json = put_resp.json() if put_resp.headers.get("content-type", "").startswith("application/json") else {"raw_text": put_resp.text[:1000]}
+
+            verify_resp = await http.get(url, headers=headers)
+            verify_json = verify_resp.json() if verify_resp.status_code == 200 else None
+            after = verify_json["result"] if verify_json and verify_json.get("success") else None
+    except Exception as e:
+        return {"error": f"Request to Cloudflare API failed: {e}"}
+
+    return {
+        "put_status_code": put_resp.status_code,
+        "put_response": put_json,
+        "before_session_duration": before_session_duration,
+        "after_session_duration": after.get("session_duration") if after else None,
+        "before_domain": current.get("domain"),
+        "after_domain": after.get("domain") if after else None,
+        "before_allowed_idps": current.get("allowed_idps"),
+        "after_allowed_idps": after.get("allowed_idps") if after else None,
+        "before_policy_count": len(current.get("policies") or []),
+        "after_policy_count": len(after.get("policies") or []) if after else None,
+        "before_policy_emails": [
+            e.get("email", {}).get("email")
+            for p in (current.get("policies") or [])
+            for e in (p.get("include") or [])
+            if "email" in e
+        ],
+        "after_policy_emails": [
+            e.get("email", {}).get("email")
+            for p in ((after or {}).get("policies") or [])
+            for e in (p.get("include") or [])
+            if "email" in e
+        ] if after else None,
+    }
+
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
     try:
