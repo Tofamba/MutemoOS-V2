@@ -1994,6 +1994,57 @@ async def cf_set_session_duration(request: Request, duration: str = "6h"):
         ] if after else None,
     }
 
+@app.get("/api/admin/session-check")
+async def session_check(request: Request, user_id: str):
+    """TEMPORARY diagnostic endpoint (2026-08-30) -- not a standing feature.
+
+    Purely a read: a plain SELECT against the sessions table, with no
+    touch of last_active and no interaction with get_current_user() or
+    the session middleware at all. Built specifically so the real 90-
+    minute idle-timeout verification could check a session's state at
+    multiple points in time without each check itself resetting the
+    idle clock -- /api/auth/status (the normal way to check) *does*
+    touch last_active by design (that's how real traffic keeps a session
+    alive), which would have silently invalidated the test.
+
+    Read-only, X-Admin-Token gated, same pattern as tonight's other
+    temporary endpoints. Safe to delete once this verification is done.
+    """
+    admin_token_header = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_TOKEN or admin_token_header != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT token, created_at, last_active, expires_at,
+                   EXTRACT(EPOCH FROM (NOW() - last_active)) AS idle_seconds,
+                   EXTRACT(EPOCH FROM (NOW() - created_at)) AS session_age_seconds,
+                   (expires_at > NOW()) AS within_absolute_cap,
+                   (last_active > NOW() - make_interval(secs => $2)) AS within_idle_window
+            FROM sessions
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            _uuid_mod.UUID(user_id), SESSION_IDLE_TIMEOUT_SECONDS,
+        )
+    if not row:
+        return {"error": "No session found for this user_id"}
+    return {
+        "last_active": row["last_active"].isoformat(),
+        "created_at": row["created_at"].isoformat(),
+        "expires_at": row["expires_at"].isoformat(),
+        "idle_seconds": row["idle_seconds"],
+        "idle_minutes": round(row["idle_seconds"] / 60, 1),
+        "session_age_minutes": round(row["session_age_seconds"] / 60, 1),
+        "within_absolute_cap": row["within_absolute_cap"],
+        "within_idle_window": row["within_idle_window"],
+        "would_currently_be_authenticated": row["within_absolute_cap"] and row["within_idle_window"],
+        "configured_idle_timeout_seconds": SESSION_IDLE_TIMEOUT_SECONDS,
+        "configured_idle_timeout_minutes": SESSION_IDLE_TIMEOUT_SECONDS / 60,
+    }
+
 async def _send_invite_email(email: str, display_name: str, invited_by_name: str) -> bool:
     """Send welcome invite email via Resend."""
     try:
