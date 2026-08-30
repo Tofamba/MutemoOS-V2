@@ -32,18 +32,33 @@ automatically. Run it manually, review its output, and only then apply it:
                       collapse into a single client (not duplicated).
                       Requires --yes, same preview-first convention.
 
+Every command that actually CREATES a client (apply-auto, apply-group,
+apply-split) requires --owner-user-id — the real users.id this batch of
+clients belongs to. There's no sensible default: whoever runs this
+script is very often not the lawyer the clients actually belong to (an
+admin/developer running a one-time import on someone else's behalf is
+the normal case, not the exception), so silently attributing them to
+"whoever ran the script" would be actively wrong, not just imprecise.
+Found the hard way (2026-08-30): 71 real clients backfilled this way
+~2 months ago all landed at created_by=NULL because the original version
+of this script never set it at all -- invisible in the data until a
+frontend feature ("My Clients") started filtering on it.
+
 Usage:
     DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py report
     DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py report --out review.json
 
-    DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-auto
-    DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-auto --yes
+    DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-auto \\
+        --owner-user-id <real-users.id-uuid>
+    DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-auto \\
+        --owner-user-id <real-users.id-uuid> --yes
 
     DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-group \\
-        --report-file review.json --group-index 0 --yes [--name "Override Name"]
+        --report-file review.json --group-index 0 --owner-user-id <real-users.id-uuid> \\
+        --yes [--name "Override Name"]
 
     DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py apply-split \\
-        --report-file review.json --group-index 0 --yes
+        --report-file review.json --group-index 0 --owner-user-id <real-users.id-uuid> --yes
 
 The actual grouping/fuzzy-matching logic lives in backend/client_migration.py
 (pure functions, no DB) so it can be unit-tested independently — see
@@ -143,15 +158,16 @@ async def cmd_apply_auto(args):
 
         created = 0
         now = datetime.now(timezone.utc)
+        owner_uuid = uuid.UUID(args.owner_user_id)
         for entry in auto:
             async with conn.transaction():
                 client_row = await conn.fetchrow(
                     """
-                    INSERT INTO clients (id, firm_id, full_name, created_at, updated_at)
-                    VALUES ($1,$2,$3,$4,$4)
+                    INSERT INTO clients (id, firm_id, full_name, created_by, created_at, updated_at)
+                    VALUES ($1,$2,$3,$4,$5,$5)
                     RETURNING id
                     """,
-                    uuid.uuid4(), uuid.UUID(FIRM_ID), entry["client_name"], now,
+                    uuid.uuid4(), uuid.UUID(FIRM_ID), entry["client_name"], owner_uuid, now,
                 )
                 await conn.execute(
                     "UPDATE matters SET client_id=$1 WHERE id=$2 AND firm_id=$3 AND client_id IS NULL",
@@ -200,15 +216,15 @@ async def _filter_stale_members(conn, members: list) -> tuple:
     return to_link, skipped
 
 
-async def _create_client_and_link(conn, full_name: str, matter_ids: list, now) -> None:
+async def _create_client_and_link(conn, full_name: str, matter_ids: list, now, owner_uuid: uuid.UUID) -> None:
     async with conn.transaction():
         client_row = await conn.fetchrow(
             """
-            INSERT INTO clients (id, firm_id, full_name, created_at, updated_at)
-            VALUES ($1,$2,$3,$4,$4)
+            INSERT INTO clients (id, firm_id, full_name, created_by, created_at, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$5)
             RETURNING id
             """,
-            uuid.uuid4(), uuid.UUID(FIRM_ID), full_name, now,
+            uuid.uuid4(), uuid.UUID(FIRM_ID), full_name, owner_uuid, now,
         )
         for matter_id in matter_ids:
             await conn.execute(
@@ -238,7 +254,7 @@ async def cmd_apply_group(args):
             print("  Nothing left to apply — all members were already linked or changed since the report was generated.")
             return
 
-        await _create_client_and_link(conn, client_name, to_link, datetime.now(timezone.utc))
+        await _create_client_and_link(conn, client_name, to_link, datetime.now(timezone.utc), uuid.UUID(args.owner_user_id))
 
         print(f"\n  Created client \"{client_name}\" and linked {len(to_link)} matter(s).")
         if skipped:
@@ -264,6 +280,7 @@ async def cmd_apply_split(args):
     conn = await asyncpg.connect(args.database_url)
     try:
         now = datetime.now(timezone.utc)
+        owner_uuid = uuid.UUID(args.owner_user_id)
         created = 0
         linked = 0
         all_skipped = []
@@ -272,7 +289,7 @@ async def cmd_apply_split(args):
             all_skipped.extend(skipped)
             if not to_link:
                 continue
-            await _create_client_and_link(conn, s["full_name"], to_link, now)
+            await _create_client_and_link(conn, s["full_name"], to_link, now, owner_uuid)
             created += 1
             linked += len(to_link)
 
@@ -293,6 +310,8 @@ def main():
     p_report.set_defaults(func=cmd_report)
 
     p_auto = sub.add_parser("apply-auto", help="Create clients for unambiguous (single-occurrence) names")
+    p_auto.add_argument("--owner-user-id", required=True,
+                         help="Real users.id these clients belong to -- no default, see the module docstring for why")
     p_auto.add_argument("--yes", action="store_true", help="Actually apply (default: preview only)")
     p_auto.set_defaults(func=cmd_apply_auto)
 
@@ -300,12 +319,16 @@ def main():
     p_group.add_argument("--report-file", default=DEFAULT_REPORT_PATH)
     p_group.add_argument("--group-index", type=int, required=True)
     p_group.add_argument("--name", default=None, help="Override the suggested client full_name")
+    p_group.add_argument("--owner-user-id", required=True,
+                          help="Real users.id these clients belong to -- no default, see the module docstring for why")
     p_group.add_argument("--yes", action="store_true", help="Actually apply (default: preview only)")
     p_group.set_defaults(func=cmd_apply_group)
 
     p_split = sub.add_parser("apply-split", help="Split one human-rejected review group into separate per-name clients")
     p_split.add_argument("--report-file", default=DEFAULT_REPORT_PATH)
     p_split.add_argument("--group-index", type=int, required=True)
+    p_split.add_argument("--owner-user-id", required=True,
+                          help="Real users.id these clients belong to -- no default, see the module docstring for why")
     p_split.add_argument("--yes", action="store_true", help="Actually apply (default: preview only)")
     p_split.set_defaults(func=cmd_apply_split)
 
@@ -315,6 +338,18 @@ def main():
         print("ERROR: DATABASE_URL environment variable not set.")
         print("Usage: DATABASE_URL=postgresql://... python3 scripts/migrate_clients.py <report|apply-auto|apply-group|apply-split> ...")
         sys.exit(1)
+
+    # Fail fast on a malformed --owner-user-id with a clear message,
+    # rather than a raw traceback partway through a transaction. Whether
+    # it's a REAL user in this firm is enforced by the DB itself (a real
+    # foreign key, clients.created_by -> users.id) at write time.
+    owner_user_id = getattr(args, "owner_user_id", None)
+    if owner_user_id is not None:
+        try:
+            uuid.UUID(owner_user_id)
+        except ValueError:
+            print(f"ERROR: --owner-user-id is not a valid UUID: {owner_user_id!r}")
+            sys.exit(1)
 
     asyncio.run(args.func(args))
 
