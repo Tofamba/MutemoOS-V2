@@ -1572,6 +1572,14 @@ def _send_sms_via_africastalking(phone: str, code: str) -> bool:
             print(f"[otp] Africa's Talking SMS send failed for {phone}: "
                   f"status={recipient.get('status')} statusCode={recipient.get('statusCode')}")
             return False
+        # Logged on every accepted send (no OTP code in this line) so a
+        # "Success" from the API can be checked against real delivery --
+        # cost="0.0000"/no messageId would indicate a sandbox-simulated
+        # send; a nonzero cost + real ATXid messageId confirms AT actually
+        # billed the account and dispatched to the carrier.
+        print(f"[otp] Africa's Talking SMS accepted for {phone}: "
+              f"messageId={recipient.get('messageId')} cost={recipient.get('cost')} "
+              f"statusCode={recipient.get('statusCode')}")
         return True
     except Exception as e:
         print(f"[otp] Africa's Talking SMS send failed: {e}")
