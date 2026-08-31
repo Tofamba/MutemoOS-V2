@@ -558,13 +558,41 @@ def test_pdf_export_generates_without_error_and_contains_correct_data(monkeypatc
     assert "attachment" in response.headers["Content-Disposition"]
     text = _pdf_text(response)
     assert user["display_name"] in text
-    assert "Volume & Status" in text
-    assert "Total Clients: 1" in text
-    assert "Total Matters: 1" in text
-    assert "Trusts & Estates" in text
-    assert "Cleared: 1" in text
+    # KPI cards: value + label are drawn as separate cells (a real value
+    # box, not a "Label: N" text line) -- pdfplumber's reading order still
+    # groups the four values on one line and the four labels on the next,
+    # so this confirms both without depending on exact card pixel geometry.
+    assert "Total Clients" in text
+    assert "Total Matters" in text
+    assert "Cleared" in text
+    assert "Action Required" in text
+    card_value_line = [line for line in text.splitlines() if line.strip() == "1 1 1 0"]
+    assert card_value_line, f"expected a '1 1 1 0' KPI value line, got:\n{text}"
+    assert "Trusts & Estates" in text  # practice-area bar chart label
     assert "not client funds held in trust" in text
     assert "600.00" in text  # outstanding balance
+
+
+def test_pdf_export_kpi_cards_show_correct_values(monkeypatch):
+    """Confirms the redesign didn't just move text around cosmetically --
+    the four card values are the real client_count/matter_count/
+    cleared_count/action_required_count numbers, in that order."""
+    import backend.main as m
+    me = uuid.uuid4()
+    clients = [_client(f"Client {i}", created_by=me) for i in range(5)]
+    matters = [_matter(f"Matter {i}", created_by=me) for i in range(8)]
+    compliance = [_cleared_compliance(clients[0]["id"]), _cleared_compliance(clients[1]["id"])]
+    user = {"id": me, "firm_id": FIRM_ID, "role": "partner", "display_name": "Me"}
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=clients, matters=matters, compliance=compliance))
+    _as_current_user(monkeypatch, m, user)
+    _empty_review_mock(monkeypatch, m, [])
+
+    response = asyncio.run(my_portfolio_export_pdf(_fake_request()))
+    text = _pdf_text(response)
+
+    # 5 clients, 8 matters, 2 cleared, 3 action required (the other 3 of 5 clients)
+    card_value_line = [line for line in text.splitlines() if line.strip() == "5 8 2 3"]
+    assert card_value_line, f"expected a '5 8 2 3' KPI value line, got:\n{text}"
 
 
 def test_pdf_export_handles_empty_portfolio_without_crashing(monkeypatch):
@@ -581,7 +609,8 @@ def test_pdf_export_handles_empty_portfolio_without_crashing(monkeypatch):
     text = _pdf_text(response)
 
     assert "No matters yet." in text
-    assert "Total Clients: 0" in text
+    card_value_line = [line for line in text.splitlines() if line.strip() == "0 0 0 0"]
+    assert card_value_line, f"expected a '0 0 0 0' KPI value line, got:\n{text}"
 
 
 def test_pdf_export_handles_multiple_review_status_matters_without_crashing(monkeypatch):

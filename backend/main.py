@@ -6875,89 +6875,202 @@ def _build_my_portfolio_csv(portfolio: dict) -> str:
 
     return buf.getvalue()
 
+_MP_PDF_COLORS = {
+    # A small, deliberately restrained palette -- not an attempt to
+    # pixel-match the web app's own CSS (those variables live in
+    # frontend/index.html, not something Python/fpdf2 reads), just a
+    # professional, legible set of tints for a printed report.
+    "navy": (30, 41, 59), "navy_bg": (235, 238, 242),
+    "green": (22, 101, 52), "green_bg": (220, 245, 225),
+    "red": (153, 27, 27), "red_bg": (253, 232, 232),
+    "gold": (180, 140, 40), "gray": (110, 110, 110),
+}
+
+def _mp_truncate_to_width(pdf, text: str, max_width: float) -> str:
+    """fpdf2 doesn't auto-truncate cell() text that overflows a fixed
+    width -- it just overflows visually. Used for every fixed-width
+    table cell below so long matter/client names degrade to an ellipsis
+    rather than overlapping the next column."""
+    text = _pdf_safe(text or "")
+    if pdf.get_string_width(text) <= max_width:
+        return text
+    while text and pdf.get_string_width(text + "...") > max_width:
+        text = text[:-1]
+    return text + "..." if text else ""
+
+def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: float = 6.0):
+    """Small shared table renderer -- header row with a filled background,
+    bordered data rows below, each cell truncated to its column's width.
+    Used for both the Review Status and Billing per-client listings,
+    which are genuinely list-shaped data the redesign's own instructions
+    say should stay tabular rather than become a chart."""
+    left = pdf.l_margin
+    pdf.set_x(left)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(*_MP_PDF_COLORS["navy_bg"])
+    pdf.set_text_color(*_MP_PDF_COLORS["navy"])
+    for header, w in zip(headers, col_widths):
+        pdf.cell(w, row_height, _pdf_safe(header), border=1, fill=True, align="L")
+    pdf.ln(row_height)
+
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(0, 0, 0)
+    for row in rows:
+        pdf.set_x(left)
+        for cell_text, w in zip(row, col_widths):
+            pdf.cell(w, row_height, _mp_truncate_to_width(pdf, str(cell_text), w - 2), border=1, align="L")
+        pdf.ln(row_height)
+
 def _build_my_portfolio_pdf(portfolio: dict) -> bytes:
     """
-    Same plain-readable-report style as _build_rbz_compliance_pdf -- a
-    partner-facing summary, not a designed document. Uses _pdf_safe()
-    throughout for the same latin-1-only-core-font reason documented
-    there.
+    Visually styled report -- KPI cards and a practice-area bar chart,
+    not the sequential-text-headers layout this replaced (2026-08-31,
+    see git history for the plain version). Built entirely with fpdf2's
+    own drawing primitives (rect() with round_corners, set_fill_color)
+    -- this app's only PDF library already, no new dependency added;
+    fpdf2 2.8.8 (already pinned) supports rounded filled rectangles
+    natively, which is genuinely sufficient for cards + a bar chart
+    without needing a real charting library. Data/aggregation is
+    untouched -- this only changes how _compute_my_portfolio's existing
+    output gets drawn.
     """
     from fpdf import FPDF
 
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
 
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 10)
+    # ── Header ───────────────────────────────────────────────────────────
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 9, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 11)
     pdf.cell(0, 6, _pdf_safe(f"My Portfolio — {portfolio.get('lawyer_name') or ''}"), new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(*_MP_PDF_COLORS["gray"])
+    pdf.cell(0, 5, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
 
     def section_title(text):
-        pdf.ln(4)
         pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(0, 0, 0)
         pdf.cell(0, 7, _pdf_safe(text), new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 9)
 
-    def line(text):
+    def caption(text):
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(*_MP_PDF_COLORS["gray"])
         pdf.cell(0, 5, _pdf_safe(text), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "", 9)
 
-    section_title("Volume & Status")
-    line(f"Total Clients: {portfolio['volume']['client_count']}")
-    line(f"Total Matters: {portfolio['volume']['matter_count']}")
-    for status, count in portfolio["volume"]["matters_by_status"].items():
-        line(f"  {status}: {count}")
+    def kpi_card(x, y, w, h, value, label, bg, fg):
+        pdf.set_fill_color(*bg)
+        pdf.rect(x, y, w, h, style="F", round_corners=True, corner_radius=2.5)
+        pdf.set_text_color(*fg)
+        pdf.set_font("Helvetica", "B", 18)
+        pdf.set_xy(x, y + 3)
+        pdf.cell(w, 10, str(value), align="C")
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_xy(x, y + 13)
+        pdf.cell(w, 5, _pdf_safe(label), align="C")
+        pdf.set_text_color(0, 0, 0)
 
+    # ── KPI cards: the single biggest visual upgrade over the old plain-
+    # text version -- Clients / Matters / Cleared / Action Required at a
+    # glance, matching the card-row style of commercial practice-
+    # management dashboards this was asked to get closer to. ──────────
+    card_gap = 4.0
+    card_w = (usable_width - 3 * card_gap) / 4
+    card_h = 20.0
+    card_y = pdf.get_y()
+    cards = [
+        (portfolio["volume"]["client_count"], "Total Clients", _MP_PDF_COLORS["navy_bg"], _MP_PDF_COLORS["navy"]),
+        (portfolio["volume"]["matter_count"], "Total Matters", _MP_PDF_COLORS["navy_bg"], _MP_PDF_COLORS["navy"]),
+        (portfolio["compliance"]["cleared_count"], "Cleared", _MP_PDF_COLORS["green_bg"], _MP_PDF_COLORS["green"]),
+        (portfolio["compliance"]["action_required_count"], "Action Required", _MP_PDF_COLORS["red_bg"], _MP_PDF_COLORS["red"]),
+    ]
+    for i, (value, label, bg, fg) in enumerate(cards):
+        kpi_card(pdf.l_margin + i * (card_w + card_gap), card_y, card_w, card_h, value, label, bg, fg)
+    pdf.set_xy(pdf.l_margin, card_y + card_h + 4)
+
+    # Matter-status breakdown -- a compact chip row, not its own card
+    # grid (status has up to 5 values vs. the 4 headline KPIs above).
+    status_bits = [f"{status}: {count}" for status, count in portfolio["volume"]["matters_by_status"].items() if count > 0]
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(*_MP_PDF_COLORS["gray"])
+    pdf.cell(0, 5, _pdf_safe("By status — " + ", ".join(status_bits)) if status_bits else "No matters yet.",
+              new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
+
+    # ── Practice Area Split: horizontal bar chart ──────────────────────
     section_title("Practice Area Split")
     if portfolio["practice_areas"]:
+        label_w = 55.0
+        max_bar_w = usable_width - label_w - 15  # 15mm reserved for the trailing count
+        max_count = max(pa["matter_count"] for pa in portfolio["practice_areas"]) or 1
         for pa in portfolio["practice_areas"]:
-            line(f"  {pa['practice_area']}: {pa['matter_count']}")
+            row_y = pdf.get_y()
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_xy(pdf.l_margin, row_y)
+            pdf.cell(label_w, 6, _mp_truncate_to_width(pdf, pa["practice_area"], label_w - 2))
+            bar_w = max(2.0, (pa["matter_count"] / max_count) * max_bar_w)
+            pdf.set_fill_color(*_MP_PDF_COLORS["gold"])
+            pdf.rect(pdf.l_margin + label_w, row_y + 0.5, bar_w, 5, style="F")
+            pdf.set_xy(pdf.l_margin + label_w + max_bar_w + 2, row_y)
+            pdf.cell(13, 6, str(pa["matter_count"]))
+            pdf.set_xy(pdf.l_margin, row_y + 6.5)
     else:
-        pdf.set_font("Helvetica", "I", 9)
-        line("No matters yet.")
-        pdf.set_font("Helvetica", "", 9)
+        caption("No matters yet.")
+    pdf.ln(3)
 
+    # ── Compliance & Risk (risk-rating breakdown; Cleared/Action
+    # Required already shown as KPI cards above, not repeated here) ───
     section_title("Compliance & Risk Snapshot")
-    line(f"Cleared: {portfolio['compliance']['cleared_count']}")
-    line(f"Action Required: {portfolio['compliance']['action_required_count']}")
-    line(f"PEP Flags: {portfolio['compliance']['pep_count']}")
-    for rating, count in portfolio["compliance"]["risk_ratings"].items():
-        line(f"  {rating} risk: {count}")
+    risk_bits = [f"{rating}: {count}" for rating, count in portfolio["compliance"]["risk_ratings"].items() if count > 0]
+    pdf.cell(0, 5, _pdf_safe("Risk ratings — " + ", ".join(risk_bits)) if risk_bits else "No clients yet.",
+              new_x="LMARGIN", new_y="NEXT")
+    if portfolio["compliance"]["pep_count"] > 0:
+        pdf.cell(0, 5, f"PEP flagged: {portfolio['compliance']['pep_count']}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
 
+    # ── Review Status: stays list/table-shaped, per instruction -- this
+    # data doesn't benefit from a chart the way a category breakdown does.
     section_title("Review Status")
-    line(f"Overdue: {portfolio['review_status']['overdue_count']}")
-    line(f"Due Soon: {portfolio['review_status']['due_soon_count']}")
-    line(f"Never Reviewed: {portfolio['review_status']['never_reviewed_count']}")
-    if portfolio["review_status"]["matters"]:
-        pdf.ln(2)
-        pdf.set_font("Helvetica", "", 8)
-        for m in portfolio["review_status"]["matters"]:
-            label = (
-                f"{m['matter_name']} ({m['client_name'] or 'no client'}) — "
-                f"next review: {m['next_review_date'] or 'none set'} — "
-                f"{m['last_activity_text'] or ''}"
-            )
-            # multi_cell()'s default cursor behavior differs from cell()'s
-            # used everywhere else in this function -- it leaves x at the
-            # right edge of the last wrapped line rather than resetting to
-            # the left margin, so a second call back-to-back gets zero
-            # horizontal space left and raises FPDFException. Explicit
-            # new_x/new_y matches cell()'s own convention here throughout.
-            pdf.multi_cell(0, 4.5, _pdf_safe(label), new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 9)
+    rs = portfolio["review_status"]
+    pdf.cell(0, 5, f"Overdue: {rs['overdue_count']}   Due Soon: {rs['due_soon_count']}   "
+                    f"Never Reviewed: {rs['never_reviewed_count']}", new_x="LMARGIN", new_y="NEXT")
+    if rs["matters"]:
+        pdf.ln(1)
+        col_widths = [55.0, 40.0, 25.0, usable_width - 55 - 40 - 25]
+        rows = [
+            [m["matter_name"] or "", m["client_name"] or "No client",
+             m["next_review_date"] or "None set", m["last_activity_text"] or ""]
+            for m in rs["matters"]
+        ]
+        _mp_pdf_table(pdf, ["Matter", "Client", "Next Review", "Last Activity"], col_widths, rows)
+    pdf.ln(3)
 
-    section_title("Billing Snapshot (firm's own professional fees — not client funds held in trust)")
-    line(f"Total Billed: {portfolio['billing']['total_billed']:.2f}")
-    line(f"Total Received: {portfolio['billing']['total_received']:.2f}")
-    line(f"Total Outstanding: {portfolio['billing']['total_outstanding']:.2f}")
-    if portfolio["billing"]["by_client"]:
-        pdf.ln(2)
-        for b in portfolio["billing"]["by_client"]:
-            line(
-                f"  {b['client_name'] or 'Unlinked'}: billed {b['billed']:.2f}, "
-                f"received {b['received']:.2f}, outstanding {b['outstanding']:.2f}"
-            )
+    # ── Billing Snapshot: a small clean summary block + per-client table ──
+    section_title("Billing Snapshot")
+    caption("The firm's own professional fees — not client funds held in trust.")
+    billing = portfolio["billing"]
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.cell(0, 6, f"Billed: {billing['total_billed']:.2f}    "
+                    f"Received: {billing['total_received']:.2f}    "
+                    f"Outstanding: {billing['total_outstanding']:.2f}", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    if billing["by_client"]:
+        pdf.ln(1)
+        col_widths = [usable_width - 3 * 40, 40.0, 40.0, 40.0]
+        rows = [
+            [b["client_name"] or "Unlinked", f"{b['billed']:.2f}", f"{b['received']:.2f}", f"{b['outstanding']:.2f}"]
+            for b in billing["by_client"]
+        ]
+        _mp_pdf_table(pdf, ["Client", "Billed", "Received", "Outstanding"], col_widths, rows)
 
     return bytes(pdf.output())
 
