@@ -6635,14 +6635,7 @@ def _empty_my_portfolio(user: dict) -> dict:
 
 @app.get("/api/my-portfolio")
 async def my_portfolio(request: Request):
-    user = await get_current_user(request)
-    _check_permission(user, "matter:read")
-    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
-    if user_id is None:
-        return _empty_my_portfolio(user)
-
-    async with _db_pool.acquire() as conn:
-        return await _compute_my_portfolio(conn, user_id, user.get("display_name"))
+    return await _resolve_my_portfolio(request)
 
 async def _compute_my_portfolio(conn, user_id: "_uuid_mod.UUID", lawyer_name: Optional[str]) -> dict:
     """
@@ -6780,6 +6773,198 @@ async def _compute_my_portfolio(conn, user_id: "_uuid_mod.UUID", lawyer_name: Op
         "billing": {"total_billed": round(total_billed, 2), "total_received": round(total_received, 2),
                     "total_outstanding": round(total_billed - total_received, 2), "by_client": billing_by_client},
     }
+
+# ── My Portfolio exports (CSV + PDF) ────────────────────────────────────────
+# Same output convention as the RBZ compliance export -- csv.writer +
+# StringIO for CSV, fpdf2 (this codebase's only PDF library, already a
+# dependency; nothing new introduced) for PDF, both returned as a
+# Response with the same Content-Disposition: attachment pattern the
+# frontend's existing blob-download helpers already know how to trigger.
+# Deliberately NOT under reports:* (no reports:* permission is checked
+# here, matching my_portfolio() itself) and NOT given a lawyer_id query
+# param -- same self-scoping-only security boundary as the live view:
+# scoping is always derived server-side from the authenticated session's
+# own user id, so there is no request to manipulate into exporting
+# someone else's portfolio.
+
+async def _resolve_my_portfolio(request: Request) -> dict:
+    """Shared auth+scope+fetch for the live view AND both export
+    endpoints below -- one place doing get_current_user + matter:read +
+    user_id resolution + _compute_my_portfolio, rather than three copies
+    of the same four lines drifting independently."""
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    if user_id is None:
+        return _empty_my_portfolio(user)
+    async with _db_pool.acquire() as conn:
+        return await _compute_my_portfolio(conn, user_id, user.get("display_name"))
+
+def _build_my_portfolio_csv(portfolio: dict) -> str:
+    """One file, five clearly-labeled sections -- no existing report in
+    this app produces a multi-section CSV to match, so this follows the
+    simplest readable convention: a '== Section ==' marker row, then that
+    section's own header row and data rows, blank row as a separator."""
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+
+    writer.writerow(["My Portfolio", portfolio.get("lawyer_name") or ""])
+    writer.writerow(["Generated", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")])
+    writer.writerow([])
+
+    writer.writerow(["== Volume & Status =="])
+    writer.writerow(["Total Clients", portfolio["volume"]["client_count"]])
+    writer.writerow(["Total Matters", portfolio["volume"]["matter_count"]])
+    writer.writerow([])
+    writer.writerow(["Status", "Matter Count"])
+    for status, count in portfolio["volume"]["matters_by_status"].items():
+        writer.writerow([status, count])
+    writer.writerow([])
+
+    writer.writerow(["== Practice Area Split =="])
+    writer.writerow(["Practice Area", "Matter Count"])
+    for pa in portfolio["practice_areas"]:
+        writer.writerow([pa["practice_area"], pa["matter_count"]])
+    writer.writerow([])
+
+    writer.writerow(["== Compliance & Risk Snapshot =="])
+    writer.writerow(["Cleared", portfolio["compliance"]["cleared_count"]])
+    writer.writerow(["Action Required", portfolio["compliance"]["action_required_count"]])
+    writer.writerow(["PEP Flags", portfolio["compliance"]["pep_count"]])
+    writer.writerow([])
+    writer.writerow(["Risk Rating", "Client Count"])
+    for rating, count in portfolio["compliance"]["risk_ratings"].items():
+        writer.writerow([rating, count])
+    writer.writerow([])
+
+    writer.writerow(["== Review Status =="])
+    writer.writerow(["Overdue", portfolio["review_status"]["overdue_count"]])
+    writer.writerow(["Due Soon", portfolio["review_status"]["due_soon_count"]])
+    writer.writerow(["Never Reviewed", portfolio["review_status"]["never_reviewed_count"]])
+    writer.writerow([])
+    writer.writerow(["Matter", "Matter Number", "Client", "Status", "Next Review Date",
+                      "Last Reviewed Date", "Last Activity"])
+    for m in portfolio["review_status"]["matters"]:
+        writer.writerow([
+            m["matter_name"] or "", m["matter_number"] or "", m["client_name"] or "", m["status"] or "",
+            m["next_review_date"] or "None set", m["last_reviewed_date"] or "Never reviewed",
+            m["last_activity_text"] or "",
+        ])
+    writer.writerow([])
+
+    writer.writerow(["== Billing Snapshot (firm's own professional fees -- not client funds held in trust) =="])
+    writer.writerow(["Total Billed", portfolio["billing"]["total_billed"]])
+    writer.writerow(["Total Received", portfolio["billing"]["total_received"]])
+    writer.writerow(["Total Outstanding", portfolio["billing"]["total_outstanding"]])
+    writer.writerow([])
+    writer.writerow(["Client", "Billed", "Received", "Outstanding"])
+    for b in portfolio["billing"]["by_client"]:
+        writer.writerow([b["client_name"] or "", b["billed"], b["received"], b["outstanding"]])
+
+    return buf.getvalue()
+
+def _build_my_portfolio_pdf(portfolio: dict) -> bytes:
+    """
+    Same plain-readable-report style as _build_rbz_compliance_pdf -- a
+    partner-facing summary, not a designed document. Uses _pdf_safe()
+    throughout for the same latin-1-only-core-font reason documented
+    there.
+    """
+    from fpdf import FPDF
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, _pdf_safe(f"My Portfolio — {portfolio.get('lawyer_name') or ''}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+
+    def section_title(text):
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.cell(0, 7, _pdf_safe(text), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 9)
+
+    def line(text):
+        pdf.cell(0, 5, _pdf_safe(text), new_x="LMARGIN", new_y="NEXT")
+
+    section_title("Volume & Status")
+    line(f"Total Clients: {portfolio['volume']['client_count']}")
+    line(f"Total Matters: {portfolio['volume']['matter_count']}")
+    for status, count in portfolio["volume"]["matters_by_status"].items():
+        line(f"  {status}: {count}")
+
+    section_title("Practice Area Split")
+    if portfolio["practice_areas"]:
+        for pa in portfolio["practice_areas"]:
+            line(f"  {pa['practice_area']}: {pa['matter_count']}")
+    else:
+        pdf.set_font("Helvetica", "I", 9)
+        line("No matters yet.")
+        pdf.set_font("Helvetica", "", 9)
+
+    section_title("Compliance & Risk Snapshot")
+    line(f"Cleared: {portfolio['compliance']['cleared_count']}")
+    line(f"Action Required: {portfolio['compliance']['action_required_count']}")
+    line(f"PEP Flags: {portfolio['compliance']['pep_count']}")
+    for rating, count in portfolio["compliance"]["risk_ratings"].items():
+        line(f"  {rating} risk: {count}")
+
+    section_title("Review Status")
+    line(f"Overdue: {portfolio['review_status']['overdue_count']}")
+    line(f"Due Soon: {portfolio['review_status']['due_soon_count']}")
+    line(f"Never Reviewed: {portfolio['review_status']['never_reviewed_count']}")
+    if portfolio["review_status"]["matters"]:
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "", 8)
+        for m in portfolio["review_status"]["matters"]:
+            label = (
+                f"{m['matter_name']} ({m['client_name'] or 'no client'}) — "
+                f"next review: {m['next_review_date'] or 'none set'} — "
+                f"{m['last_activity_text'] or ''}"
+            )
+            pdf.multi_cell(0, 4.5, _pdf_safe(label))
+        pdf.set_font("Helvetica", "", 9)
+
+    section_title("Billing Snapshot (firm's own professional fees — not client funds held in trust)")
+    line(f"Total Billed: {portfolio['billing']['total_billed']:.2f}")
+    line(f"Total Received: {portfolio['billing']['total_received']:.2f}")
+    line(f"Total Outstanding: {portfolio['billing']['total_outstanding']:.2f}")
+    if portfolio["billing"]["by_client"]:
+        pdf.ln(2)
+        for b in portfolio["billing"]["by_client"]:
+            line(
+                f"  {b['client_name'] or 'Unlinked'}: billed {b['billed']:.2f}, "
+                f"received {b['received']:.2f}, outstanding {b['outstanding']:.2f}"
+            )
+
+    return bytes(pdf.output())
+
+@app.get("/api/my-portfolio-export")
+async def my_portfolio_export(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    csv_content = _build_my_portfolio_csv(portfolio)
+    filename = f"my_portfolio_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+@app.get("/api/my-portfolio-export-pdf")
+async def my_portfolio_export_pdf(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    pdf_bytes = _build_my_portfolio_pdf(portfolio)
+    filename = f"my_portfolio_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 # ── Reports (SMS Usage by Firm) ─────────────────────────────────────────────
 # Partner-tier, own scoped key (reports:sms_usage), same convention as the

@@ -834,6 +834,12 @@ select{cursor:pointer}
     <p>Your own caseload — clients and matters you created, at a glance.</p>
   </div>
 
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:0.75rem">
+    <button class="btn btn-primary" onclick="downloadMyPortfolioExport('csv')">⬇ Download CSV</button>
+    <button class="btn btn-outline" onclick="downloadMyPortfolioExport('pdf')">⬇ Download PDF</button>
+    <span id="mp-export-status" style="font-size:0.85rem"></span>
+  </div>
+
   <div id="mp-empty-notice"></div>
 
   <div class="dash-grid" id="mp-volume-stats"></div>
@@ -7707,6 +7713,43 @@ async function loadSmsUsageByFirm() {
 // already uses (_dashFees), for visual consistency between the two.
 
 const _mpFmtCurrency = n => `$${n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+// Same blob-download pattern as generateComplianceExport() (Reports tab)
+// and downloadMatterReviewStatusCsv() — no lawyer_id or other param on
+// either export endpoint, same self-scoping-only security boundary as
+// the live view above.
+async function downloadMyPortfolioExport(format) {
+  const statusEl = document.getElementById('mp-export-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const endpoint = format === 'pdf' ? 'my-portfolio-export-pdf' : 'my-portfolio-export';
+    const res = await fetch(`${API}/api/${endpoint}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `my_portfolio.${format === 'pdf' ? 'pdf' : 'csv'}`;
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ Export downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
 
 async function loadMyPortfolio() {
   const emptyNoticeEl = document.getElementById('mp-empty-notice');

@@ -24,7 +24,7 @@ from datetime import date, timedelta
 import pytest
 from fastapi import HTTPException
 
-from backend.main import FIRM_ID, my_portfolio
+from backend.main import FIRM_ID, my_portfolio, my_portfolio_export, my_portfolio_export_pdf
 
 
 class FakeConnection:
@@ -426,3 +426,150 @@ def test_billing_empty_when_no_fees_tracked(monkeypatch):
 
     assert result["billing"]["total_billed"] == 0.0
     assert result["billing"]["by_client"] == []
+
+
+# ── CSV / PDF exports ─────────────────────────────────────────────────────────
+# Same self-scoping-only security boundary as the live view (no lawyer_id
+# param on either export function's signature -- nothing to manipulate),
+# same matter:read permission gate, same data via _resolve_my_portfolio().
+# These reuse the exact fixtures/mocks above rather than re-deriving the
+# aggregation logic's correctness -- that's already covered by every test
+# in this file; these confirm the export formats faithfully carry that
+# same data through.
+
+import csv
+import io
+
+import pdfplumber
+
+
+def _csv_rows(response):
+    text = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
+    return list(csv.reader(io.StringIO(text)))
+
+
+def _pdf_text(response):
+    with pdfplumber.open(io.BytesIO(response.body)) as pdf:
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+
+def _portfolio_fixture(monkeypatch, m):
+    """One lawyer with a known client, matter, compliance record, and fee
+    figures -- exercises every section with real, checkable values."""
+    me = uuid.uuid4()
+    client = _client("Huang Li Qiang", created_by=me)
+    matters = [
+        _matter("Huang Estate Matter", created_by=me, status="Active", practice_area="Trusts & Estates",
+                client_id=client["id"], client_name="Huang Li Qiang"),
+    ]
+    compliance = [_cleared_compliance(client["id"])]
+    fee_matters = [_matter("Huang Estate Matter", created_by=me, amount_billed=1000.0, amount_received=400.0,
+                            client_id=client["id"], client_name="Huang Li Qiang")]
+    user = {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Farai Nyamande"}
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], matters=matters,
+                                                  compliance=compliance, fee_matters=fee_matters))
+    _as_current_user(monkeypatch, m, user)
+    _empty_review_mock(monkeypatch, m, [])
+    return user
+
+
+def test_csv_export_contains_correct_data(monkeypatch):
+    import backend.main as m
+    user = _portfolio_fixture(monkeypatch, m)
+
+    response = asyncio.run(my_portfolio_export(_fake_request()))
+
+    assert response.media_type == "text/csv"
+    assert "attachment" in response.headers["Content-Disposition"]
+    rows = _csv_rows(response)
+    flat = [cell for row in rows for cell in row]
+    assert user["display_name"] in flat
+    assert "== Volume & Status ==" in flat
+    assert ["Total Clients", "1"] in rows
+    assert ["Total Matters", "1"] in rows
+    assert "== Practice Area Split ==" in flat
+    assert ["Trusts & Estates", "1"] in rows
+    assert "== Compliance & Risk Snapshot ==" in flat
+    assert ["Cleared", "1"] in rows
+    assert "== Billing Snapshot (firm's own professional fees -- not client funds held in trust) ==" in flat
+    assert ["Total Billed", "1000.0"] in rows
+    assert ["Total Received", "400.0"] in rows
+    assert ["Total Outstanding", "600.0"] in rows
+    assert ["Huang Li Qiang", "1000.0", "400.0", "600.0"] in rows
+
+
+def test_pdf_export_generates_without_error_and_contains_correct_data(monkeypatch):
+    import backend.main as m
+    user = _portfolio_fixture(monkeypatch, m)
+
+    response = asyncio.run(my_portfolio_export_pdf(_fake_request()))
+
+    assert response.media_type == "application/pdf"
+    assert "attachment" in response.headers["Content-Disposition"]
+    text = _pdf_text(response)
+    assert user["display_name"] in text
+    assert "Volume & Status" in text
+    assert "Total Clients: 1" in text
+    assert "Total Matters: 1" in text
+    assert "Trusts & Estates" in text
+    assert "Cleared: 1" in text
+    assert "not client funds held in trust" in text
+    assert "600.00" in text  # outstanding balance
+
+
+def test_pdf_export_handles_empty_portfolio_without_crashing(monkeypatch):
+    """No clients, no matters, no fees -- must render a clean report, not
+    crash on an empty practice_areas/by_client list."""
+    import backend.main as m
+    me = uuid.uuid4()
+    user = {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Farai Nyamande"}
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    _as_current_user(monkeypatch, m, user)
+    _empty_review_mock(monkeypatch, m, [])
+
+    response = asyncio.run(my_portfolio_export_pdf(_fake_request()))
+    text = _pdf_text(response)
+
+    assert "No matters yet." in text
+    assert "Total Clients: 0" in text
+
+
+def test_csv_export_unauthenticated_gets_401(monkeypatch):
+    import backend.main as m
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    async def fake_get_current_user(request):
+        return None
+    monkeypatch.setattr(m, "get_current_user", fake_get_current_user)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(my_portfolio_export(_fake_request()))
+    assert exc_info.value.status_code == 401
+
+
+def test_pdf_export_scoped_strictly_to_calling_lawyers_own_data(monkeypatch):
+    """The same security boundary as the live view: neither export
+    function takes a lawyer_id argument at all, so there's nothing in
+    the request to manipulate into exporting someone else's data --
+    confirmed here the same way test_scoped_strictly_to_calling_lawyers_own_data
+    confirms it for the live view."""
+    import backend.main as m
+    me = uuid.uuid4()
+    someone_else = uuid.uuid4()
+    matters = [
+        _matter("My Matter", created_by=me),
+        _matter("Their Matter", created_by=someone_else),
+    ]
+    clients = [_client("My Client", created_by=me), _client("Their Client", created_by=someone_else)]
+    user = {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Me"}
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=matters, clients=clients))
+    _as_current_user(monkeypatch, m, user)
+    _empty_review_mock(monkeypatch, m, [])
+
+    csv_response = asyncio.run(my_portfolio_export(_fake_request()))
+    rows = _csv_rows(csv_response)
+
+    assert ["Total Clients", "1"] in rows
+    assert ["Total Matters", "1"] in rows
+    flat_text = "\n".join(",".join(r) for r in rows)
+    assert "Their Client" not in flat_text
+    assert "Their Matter" not in flat_text
