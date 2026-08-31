@@ -13,9 +13,9 @@ approach used throughout this repo's other backend tests (see
 tests/test_clients_api.py, tests/test_matter_client_linking.py).
 """
 
-import httpx
-
 import json
+
+import httpx
 
 from backend.main import _send_otp_code, _send_sms_otp, _send_sms_via_africastalking
 
@@ -35,7 +35,7 @@ def test_whatsapp_configured_is_preferred_over_sms_and_email(monkeypatch):
 
     calls = []
     monkeypatch.setattr(m, "_send_whatsapp_otp", lambda phone, code: (calls.append("whatsapp"), True)[1])
-    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code: (calls.append("africastalking"), True)[1])
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: (calls.append("africastalking"), True)[1])
     monkeypatch.setattr(m, "_send_sms_otp", lambda phone, code: (calls.append("sms"), True)[1])
     monkeypatch.setattr(m, "_send_email_otp", lambda email, code: (calls.append("email"), True)[1])
 
@@ -53,7 +53,7 @@ def test_africastalking_preferred_over_twilio_when_whatsapp_not_configured(monke
 
     calls = []
     monkeypatch.setattr(m, "_send_whatsapp_otp", lambda phone, code: (calls.append("whatsapp"), True)[1])
-    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code: (calls.append("africastalking"), True)[1])
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: (calls.append("africastalking"), True)[1])
     monkeypatch.setattr(m, "_send_sms_otp", lambda phone, code: (calls.append("sms"), True)[1])
     monkeypatch.setattr(m, "_send_email_otp", lambda email, code: (calls.append("email"), True)[1])
 
@@ -70,7 +70,7 @@ def test_falls_through_to_twilio_when_africastalking_configured_but_send_fails(m
     _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=True, email=True)
 
     calls = []
-    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code: (calls.append("africastalking"), False)[1])
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: (calls.append("africastalking"), False)[1])
     monkeypatch.setattr(m, "_send_sms_otp", lambda phone, code: (calls.append("sms"), True)[1])
     monkeypatch.setattr(m, "_send_email_otp", lambda email, code: (calls.append("email"), True)[1])
 
@@ -323,3 +323,125 @@ def test_send_sms_via_africastalking_returns_false_on_exception(monkeypatch):
     monkeypatch.setattr(httpx, "post", raise_timeout)
 
     assert _send_sms_via_africastalking("+263771234567", "654321") is False
+
+
+# ── result_detail out-param: feeds sms_usage_log without a second real send ─
+
+def test_result_detail_populated_on_success(monkeypatch):
+    import backend.main as m
+    monkeypatch.setattr(m, "AFRICAS_TALKING_USERNAME", "tofambatech")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_API_KEY", "testkey")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_FROM", None)
+    body = _at_success_body(status="Success", status_code=100)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeATResponse(200, body))
+
+    detail = {}
+    result = _send_sms_via_africastalking("+263771234567", "654321", result_detail=detail)
+
+    assert result is True
+    assert detail == {
+        "success": True, "provider_status": "Success", "status_code": 100,
+        "message_id": "ATXid_test", "cost": "ZWL 0.5000",
+    }
+
+
+def test_result_detail_populated_on_provider_rejection(monkeypatch):
+    """The real InsufficientBalance case from production, 2026-08-30."""
+    import backend.main as m
+    monkeypatch.setattr(m, "AFRICAS_TALKING_USERNAME", "tofambatech")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_API_KEY", "testkey")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_FROM", None)
+    body = _at_success_body(status="InsufficientBalance", status_code=405)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeATResponse(200, body))
+
+    detail = {}
+    result = _send_sms_via_africastalking("+263771234567", "654321", result_detail=detail)
+
+    assert result is False
+    assert detail["success"] is False
+    assert detail["provider_status"] == "InsufficientBalance"
+    assert detail["status_code"] == 405
+
+
+def test_result_detail_populated_on_http_failure(monkeypatch):
+    import backend.main as m
+    monkeypatch.setattr(m, "AFRICAS_TALKING_USERNAME", "tofambatech")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_API_KEY", "testkey")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_FROM", None)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeATResponse(401, text="Invalid apiKey"))
+
+    detail = {}
+    result = _send_sms_via_africastalking("+263771234567", "654321", result_detail=detail)
+
+    assert result is False
+    assert detail["success"] is False
+    assert "401" in detail["error"]
+    assert "provider_status" not in detail  # no per-recipient AT response existed to read one from
+
+
+def test_result_detail_populated_on_exception(monkeypatch):
+    import backend.main as m
+    monkeypatch.setattr(m, "AFRICAS_TALKING_USERNAME", "tofambatech")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_API_KEY", "testkey")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_FROM", None)
+    def raise_timeout(*a, **k):
+        raise httpx.TimeoutException("timed out")
+    monkeypatch.setattr(httpx, "post", raise_timeout)
+
+    detail = {}
+    result = _send_sms_via_africastalking("+263771234567", "654321", result_detail=detail)
+
+    assert result is False
+    assert detail == {"success": False, "error": "timed out"}
+
+
+def test_result_detail_left_untouched_when_not_passed(monkeypatch):
+    """Every existing caller that doesn't pass result_detail is unaffected --
+    the parameter is purely additive."""
+    import backend.main as m
+    monkeypatch.setattr(m, "AFRICAS_TALKING_USERNAME", "tofambatech")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_API_KEY", "testkey")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_FROM", None)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeATResponse(200, _at_success_body()))
+
+    assert _send_sms_via_africastalking("+263771234567", "654321") is True  # no crash, no 3rd positional arg needed
+
+
+def test_send_otp_code_collects_africastalking_attempt_into_sms_attempt_log(monkeypatch):
+    """The actual wiring _log_sms_usage relies on: _send_otp_code appends
+    one dict per real Africa's Talking attempt into the caller-supplied list."""
+    import backend.main as m
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=False, email=False)
+    monkeypatch.setattr(m, "AFRICAS_TALKING_USERNAME", "tofambatech")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_API_KEY", "testkey")
+    monkeypatch.setattr(m, "AFRICAS_TALKING_FROM", None)
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: _FakeATResponse(200, _at_success_body(status_code=100)))
+
+    log: list = []
+    channel = _send_otp_code("+263771234567", None, "654321", sms_attempt_log=log)
+
+    assert channel == "sms"
+    assert len(log) == 1
+    assert log[0]["success"] is True
+    assert log[0]["status_code"] == 100
+
+
+# ── _parse_at_cost: splits Africa's Talking's "CUR 0.0000"-style string ────
+
+def test_parse_at_cost_splits_currency_and_amount():
+    from backend.main import _parse_at_cost
+    amount, currency = _parse_at_cost("USD 0.0500")
+    assert amount == 0.05
+    assert currency == "USD"
+
+
+def test_parse_at_cost_handles_none():
+    from backend.main import _parse_at_cost
+    assert _parse_at_cost(None) == (None, None)
+
+
+def test_parse_at_cost_handles_malformed_string():
+    from backend.main import _parse_at_cost
+    assert _parse_at_cost("garbage") == (None, None)
+    assert _parse_at_cost("") == (None, None)
+    assert _parse_at_cost("USD not-a-number") == (None, None)

@@ -959,6 +959,33 @@ async def run_migrations():
             generated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_report_history_firm ON report_history(firm_id, generated_at DESC);
+
+        -- SMS usage tracking (2026-08-31): the Africa's Talking account is
+        -- shared across firm deployments (each firm gets its own Railway
+        -- service/database under this app's one-deployment-per-firm model,
+        -- but they can share the same underlying AT account/credentials
+        -- for billing simplicity) -- this table lets THIS firm's own real
+        -- SMS OTP send cost be attributed to it specifically, so it can be
+        -- checked against actual AT billing over time. Logs every real
+        -- send attempt, success or failure -- a failed/fallback-to-email
+        -- attempt (e.g. an InsufficientBalance rejection) is still logged,
+        -- so gaps in delivered volume are explained by real recorded
+        -- failures rather than looking like missing data.
+        CREATE TABLE IF NOT EXISTS sms_usage_log (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            phone           TEXT NOT NULL,
+            provider        TEXT NOT NULL DEFAULT 'africas_talking',
+            status          TEXT NOT NULL,  -- 'delivered' | 'failed'
+            provider_status TEXT,           -- Africa's Talking's own raw status string, e.g. 'Success' / 'InsufficientBalance'
+            status_code     INT,            -- Africa's Talking's own numeric statusCode, e.g. 100 / 405
+            cost_amount     NUMERIC(10,4),  -- parsed from their "USD 0.0500"-style cost string; NULL when no cost was returned (HTTP failure, exception)
+            cost_currency   TEXT,
+            message_id      TEXT,           -- Africa's Talking's ATXid_... messageId, for traceability against their own delivery reports
+            error_detail    TEXT,           -- HTTP status/body or exception text, only populated when there's no per-recipient AT response to read a provider_status from
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_sms_usage_log_firm ON sms_usage_log(firm_id, created_at DESC);
         """)
 
         # Seed this deployment's firm row from its own env vars -- NOT
@@ -1104,6 +1131,7 @@ PERMISSIONS = {
     "reports:rbz_compliance": {"admin", "partner"},
     "reports:practice_area_breakdown": {"admin", "partner"},
     "reports:matter_review_status": {"admin", "partner"},
+    "reports:sms_usage": {"admin", "partner"},
 }
 
 def _check_permission(user: dict, permission: str):
@@ -1416,7 +1444,9 @@ def _send_email_otp(email: str, code: str) -> bool:
         print(f"[otp] Email send failed: {e}")
         return False
 
-def _send_otp_code(phone: str, email: Optional[str], code: str) -> Optional[str]:
+def _send_otp_code(
+    phone: str, email: Optional[str], code: str, sms_attempt_log: Optional[list] = None
+) -> Optional[str]:
     """
     Sends the OTP via whichever channel is actually configured. Prefers
     WhatsApp (the eventual target, once Meta Business Verification
@@ -1436,13 +1466,23 @@ def _send_otp_code(phone: str, email: Optional[str], code: str) -> Optional[str]
     know which channel was really used. Africa's Talking and Twilio both
     report as "sms" here — the frontend/digest only need to know it went
     to SMS, not which provider handled it.
+
+    `sms_attempt_log`, if passed, collects one dict per real Africa's
+    Talking attempt (success or failure) for request_otp() to persist to
+    sms_usage_log -- see _send_sms_via_africastalking's own
+    `result_detail` docstring. Purely additive; every existing caller
+    that doesn't pass it behaves exactly as before.
     """
     if WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID:
         if _send_whatsapp_otp(phone, code):
             return "whatsapp"
         print(f"[otp] WhatsApp send failed for {phone}, falling back")
     if _AFRICAS_TALKING_CONFIGURED:
-        if _send_sms_via_africastalking(phone, code):
+        at_detail: dict = {}
+        sent = _send_sms_via_africastalking(phone, code, result_detail=at_detail)
+        if sms_attempt_log is not None:
+            sms_attempt_log.append(at_detail)
+        if sent:
             return "sms"
         print(f"[otp] Africa's Talking SMS send failed for {phone}, falling back")
     if _TWILIO_SMS_CONFIGURED:
@@ -1522,7 +1562,27 @@ def _send_sms_otp(phone: str, code: str) -> bool:
         print(f"[otp] SMS send failed: {e}")
         return False
 
-def _send_sms_via_africastalking(phone: str, code: str) -> bool:
+def _parse_at_cost(cost_str: Optional[str]) -> tuple:
+    """
+    Africa's Talking returns cost as a single string like "USD 0.0500" or
+    "ZWL 0.5000" (currency + amount, space-separated) -- split it into
+    (amount: Optional[float], currency: Optional[str]) for sms_usage_log's
+    separate cost_amount/cost_currency columns. Returns (None, None) for
+    anything that isn't that exact two-token shape (missing, malformed,
+    or a currency-less "0.0000") rather than guessing.
+    """
+    if not cost_str:
+        return None, None
+    parts = cost_str.strip().split()
+    if len(parts) != 2:
+        return None, None
+    currency, amount_str = parts
+    try:
+        return float(amount_str), currency
+    except ValueError:
+        return None, None
+
+def _send_sms_via_africastalking(phone: str, code: str, result_detail: Optional[dict] = None) -> bool:
     """
     Sends the OTP as a plain SMS via Africa's Talking's REST API — the
     PRIMARY SMS channel (see the constants above). Same direct-httpx,
@@ -1543,6 +1603,15 @@ def _send_sms_via_africastalking(phone: str, code: str) -> bool:
     Talking's built-in sandbox app is always literally named "sandbox",
     never a custom name), confirmed against the real account before
     this was wired in, not assumed.
+
+    `result_detail`, if passed, is mutated in place with whatever detail
+    is available about this specific attempt (success/failure,
+    provider_status, status_code, cost, message_id, or an error string
+    when there's no per-recipient AT response to read those from) — this
+    is how request_otp() gets what it needs for sms_usage_log without
+    calling Africa's Talking a second time (which would double-send and
+    double-bill a real message). The bool return value and every existing
+    caller/test are unaffected -- this parameter is purely additive.
     """
     try:
         import httpx
@@ -1563,15 +1632,25 @@ def _send_sms_via_africastalking(phone: str, code: str) -> bool:
         )
         if resp.status_code not in (200, 201):
             print(f"[otp] Africa's Talking SMS send failed {resp.status_code}: {resp.text[:300]}")
+            if result_detail is not None:
+                result_detail.update({"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:300]}"})
             return False
         recipients = resp.json().get("SMSMessageData", {}).get("Recipients", [])
         if not recipients:
             print(f"[otp] Africa's Talking SMS send: no recipients in response: {resp.text[:300]}")
+            if result_detail is not None:
+                result_detail.update({"success": False, "error": "no recipients in response"})
             return False
         recipient = recipients[0]
         if recipient.get("status") != "Success":
             print(f"[otp] Africa's Talking SMS send failed for {phone}: "
                   f"status={recipient.get('status')} statusCode={recipient.get('statusCode')}")
+            if result_detail is not None:
+                result_detail.update({
+                    "success": False, "provider_status": recipient.get("status"),
+                    "status_code": recipient.get("statusCode"), "message_id": recipient.get("messageId"),
+                    "cost": recipient.get("cost"),
+                })
             return False
         # Logged on every accepted send (no OTP code in this line) so a
         # "Success" from the API can be checked against real delivery --
@@ -1581,10 +1660,37 @@ def _send_sms_via_africastalking(phone: str, code: str) -> bool:
         print(f"[otp] Africa's Talking SMS accepted for {phone}: "
               f"messageId={recipient.get('messageId')} cost={recipient.get('cost')} "
               f"statusCode={recipient.get('statusCode')}")
+        if result_detail is not None:
+            result_detail.update({
+                "success": True, "provider_status": recipient.get("status"),
+                "status_code": recipient.get("statusCode"), "message_id": recipient.get("messageId"),
+                "cost": recipient.get("cost"),
+            })
         return True
     except Exception as e:
         print(f"[otp] Africa's Talking SMS send failed: {e}")
+        if result_detail is not None:
+            result_detail.update({"success": False, "error": str(e)})
         return False
+
+async def _log_sms_usage(conn, *, phone: str, provider: str, attempt: dict) -> None:
+    """
+    Persists one real Africa's Talking send attempt (success or failure)
+    to sms_usage_log -- see that table's own comment in run_migrations()
+    for why per-firm attribution matters even though the AT account
+    itself is shared. `attempt` is one of the dicts _send_otp_code()
+    collected via _send_sms_via_africastalking's result_detail parameter.
+    """
+    cost_amount, cost_currency = _parse_at_cost(attempt.get("cost"))
+    await conn.execute("""
+        INSERT INTO sms_usage_log (firm_id, phone, provider, status, provider_status,
+                                    status_code, cost_amount, cost_currency, message_id, error_detail)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    """,
+    FIRM_ID, phone, provider,
+    "delivered" if attempt.get("success") else "failed",
+    attempt.get("provider_status"), attempt.get("status_code"),
+    cost_amount, cost_currency, attempt.get("message_id"), attempt.get("error"))
 
 class OTPRequestBody(BaseModel):
     phone: str
@@ -1626,7 +1732,17 @@ async def request_otp(req: OTPRequestBody):
             ON CONFLICT (phone) DO UPDATE SET code=$2, attempts=0, expires_at=$3, firm_id=$4
         """, phone, code, expires, FIRM_ID)
 
-    channel = await asyncio.to_thread(_send_otp_code, phone, known_email, code)
+    sms_attempts: list = []
+    channel = await asyncio.to_thread(_send_otp_code, phone, known_email, code, sms_attempts)
+    if sms_attempts:
+        # Logged regardless of the eventual channel/outcome -- a failed
+        # Africa's Talking attempt that then fell through to email (or to
+        # nothing at all) is still a real, billable-or-not send attempt
+        # worth recording, so gaps in delivered volume are explained by
+        # logged failures rather than looking like missing data.
+        async with _db_pool.acquire() as conn:
+            for attempt in sms_attempts:
+                await _log_sms_usage(conn, phone=phone, provider="africas_talking", attempt=attempt)
     if not channel:
         raise HTTPException(status_code=500, detail="Failed to send login code. Please try again.")
     # Channel is only returned for numbers we've already confirmed are known
@@ -6491,6 +6607,77 @@ async def matter_review_status_report_export(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
+# ── Reports (SMS Usage by Firm) ─────────────────────────────────────────────
+# Partner-tier, own scoped key (reports:sms_usage), same convention as the
+# reports above. Aggregates sms_usage_log (see run_migrations() for why
+# firm_id matters here even under Option B's one-firm-per-deployment
+# model: the Africa's Talking account/credentials can be, and are, shared
+# across separate firm deployments -- this is how each firm's own share of
+# that real shared cost gets attributed back to it, to check against
+# actual AT billing over time).
+
+async def _fetch_sms_usage_by_firm(conn) -> list:
+    """
+    One row per (firm, month). Cost is broken out per currency rather than
+    blindly summed -- Africa's Talking's cost figures are currency-tagged
+    per send (seen as "USD 0.0500" in real testing; nothing stops a
+    different currency showing up later), and silently adding e.g. USD
+    and ZWL amounts together would produce a meaningless number. Grouped
+    in Python, not SQL, since a failed send has NULL cost_amount/currency
+    and still needs to count toward total_sends/failed_count -- doing
+    that split cleanly in one SQL GROUP BY would need FILTER gymnastics
+    for little benefit over a straightforward per-row pass here.
+    """
+    rows = await conn.fetch("""
+        SELECT f.id AS firm_id, f.name AS firm_name,
+               date_trunc('month', s.created_at) AS month,
+               s.status, s.cost_amount, s.cost_currency
+        FROM sms_usage_log s
+        JOIN firms f ON f.id = s.firm_id
+        WHERE s.firm_id = $1
+        ORDER BY month DESC
+    """, FIRM_ID)
+
+    grouped: dict = {}
+    for r in rows:
+        month_str = r["month"].date().isoformat()
+        key = (str(r["firm_id"]), month_str)
+        g = grouped.setdefault(key, {
+            "firm_id": str(r["firm_id"]), "firm_name": r["firm_name"], "month": month_str,
+            "total_sends": 0, "delivered_count": 0, "failed_count": 0, "_cost_by_currency": {},
+        })
+        g["total_sends"] += 1
+        if r["status"] == "delivered":
+            g["delivered_count"] += 1
+        else:
+            g["failed_count"] += 1
+        if r["cost_amount"] is not None and r["cost_currency"]:
+            g["_cost_by_currency"][r["cost_currency"]] = (
+                g["_cost_by_currency"].get(r["cost_currency"], 0.0) + float(r["cost_amount"])
+            )
+
+    result = []
+    for g in grouped.values():
+        g["cost_by_currency"] = [
+            {"currency": c, "total_cost": round(v, 4)} for c, v in sorted(g.pop("_cost_by_currency").items())
+        ]
+        result.append(g)
+    result.sort(key=lambda x: x["month"], reverse=True)
+    return result
+
+@app.get("/api/reports/sms-usage-by-firm")
+async def sms_usage_by_firm_report(request: Request):
+    """
+    Send count and cost-by-currency per firm per month, so this firm's
+    share of the shared Africa's Talking account's real cost can be
+    checked periodically against actual AT billing.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:sms_usage")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_sms_usage_by_firm(conn)
+    return rows
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 

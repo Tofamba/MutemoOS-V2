@@ -2051,6 +2051,14 @@ select{cursor:pointer}
       <div id="mrs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
       <div id="matter-review-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
     </div>
+
+    <div class="card" style="margin-top:1rem">
+      <div class="card-title">📱 SMS Usage by Firm</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        OTP send count and cost per month — the Africa's Talking account is shared across firm deployments, so this attributes this firm's own share of that real cost, to check against actual AT billing over time.
+      </p>
+      <div id="sms-usage-by-firm-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+    </div>
   </div>
 
 </main>
@@ -3507,7 +3515,7 @@ function showTab(tab) {
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
-  if (tab === 'reports') { loadReportHistory(); loadPracticeAreaBreakdown(); loadMatterReviewStatusFilters().then(loadMatterReviewStatus); }
+  if (tab === 'reports') { loadReportHistory(); loadPracticeAreaBreakdown(); loadMatterReviewStatusFilters().then(loadMatterReviewStatus); loadSmsUsageByFirm(); }
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -7580,6 +7588,46 @@ async function downloadMatterReviewStatusCsv() {
     statusEl.textContent = `Error: ${e.message}`;
     statusEl.style.color = 'var(--red)';
   }
+}
+
+// ── Reports (SMS Usage by Firm) ─────────────────────────────────────────────
+
+async function loadSmsUsageByFirm() {
+  const el = document.getElementById('sms-usage-by-firm-list');
+  try {
+    const res = await fetch(`${API}/api/reports/sms-usage-by-firm`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load SMS usage.</em>'; return; }
+    const rows = await res.json();
+    if (!rows.length) { el.innerHTML = '<em>No SMS OTP sends logged yet.</em>'; return; }
+    el.innerHTML = `
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
+            <th style="padding:6px 8px 6px 0">Month</th>
+            <th style="padding:6px 8px">Firm</th>
+            <th style="padding:6px 8px">Sends</th>
+            <th style="padding:6px 8px">Delivered</th>
+            <th style="padding:6px 8px">Failed</th>
+            <th style="padding:6px 8px">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px 6px 0">${r.month.slice(0, 7)}</td>
+              <td style="padding:6px 8px">${escHtml(r.firm_name)}</td>
+              <td style="padding:6px 8px">${r.total_sends}</td>
+              <td style="padding:6px 8px;color:var(--green)">${r.delivered_count}</td>
+              <td style="padding:6px 8px${r.failed_count > 0 ? ';color:var(--red)' : ''}">${r.failed_count}</td>
+              <td style="padding:6px 8px">${r.cost_by_currency.length
+                ? r.cost_by_currency.map(c => `${c.currency} ${c.total_cost.toFixed(4)}`).join(', ')
+                : '<span style="color:var(--ink3)">—</span>'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch(e) { el.innerHTML = '<em>Error loading SMS usage.</em>'; }
 }
 
 function showInviteStatus(msg, type) {
