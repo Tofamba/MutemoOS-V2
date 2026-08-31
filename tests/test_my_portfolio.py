@@ -534,6 +534,44 @@ def test_pdf_export_handles_empty_portfolio_without_crashing(monkeypatch):
     assert "Total Clients: 0" in text
 
 
+def test_pdf_export_handles_multiple_review_status_matters_without_crashing(monkeypatch):
+    """Real bug caught during staging verification, 2026-08-31:
+    multi_cell()'s default cursor behavior leaves x at the right edge of
+    the last wrapped line rather than resetting to the left margin (unlike
+    cell(), used everywhere else in this function) -- a second matter's
+    multi_cell call back-to-back then had zero horizontal space left and
+    raised FPDFException. Needs at least two matters with real, differently
+    -shaped text to reproduce; a single matter (or none) doesn't hit it."""
+    import backend.main as m
+    me = uuid.uuid4()
+    user = {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Farai Nyamande"}
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    _as_current_user(monkeypatch, m, user)
+
+    rows = [
+        {"matter_id": "1", "matter_name": "Divorce and maintenance claim", "matter_number": "FN-001-01",
+         "client_id": "c1", "client_name": "Munyaradzi Gwenzi", "status": "Active",
+         "next_review_date": "2026-09-12", "last_reviewed_date": "2026-08-30", "created_by_name": "Farai Nyamande",
+         "last_activity_kind": "note",
+         "last_activity_text": "To meet with client to discuss what happens to the family trust and plan for pre-trial conference",
+         "last_activity_date": "2026-08-30T16:52:57"},
+        {"matter_id": "2", "matter_name": "Mining claim boundary dispute — HC 4521/26", "matter_number": None,
+         "client_id": None, "client_name": "Nyaradzo Construction & Engineering (Pvt) Ltd", "status": "Active",
+         "next_review_date": None, "last_reviewed_date": None, "created_by_name": "Farai Nyamande",
+         "last_activity_kind": "touched", "last_activity_text": "Touched (no note or document recorded)",
+         "last_activity_date": "2026-08-27T08:10:54"},
+    ]
+    async def fake_review(conn, *, lawyer_id, client_id, status):
+        return rows
+    monkeypatch.setattr(m, "_fetch_matter_review_status_rows", fake_review)
+
+    response = asyncio.run(my_portfolio_export_pdf(_fake_request()))  # must not raise
+
+    text = _pdf_text(response)
+    assert "Divorce and maintenance claim" in text
+    assert "Mining claim boundary dispute" in text
+
+
 def test_csv_export_unauthenticated_gets_401(monkeypatch):
     import backend.main as m
     monkeypatch.setattr(m, "_db_pool", FakePool())

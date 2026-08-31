@@ -6927,7 +6927,13 @@ def _build_my_portfolio_pdf(portfolio: dict) -> bytes:
                 f"next review: {m['next_review_date'] or 'none set'} — "
                 f"{m['last_activity_text'] or ''}"
             )
-            pdf.multi_cell(0, 4.5, _pdf_safe(label))
+            # multi_cell()'s default cursor behavior differs from cell()'s
+            # used everywhere else in this function -- it leaves x at the
+            # right edge of the last wrapped line rather than resetting to
+            # the left margin, so a second call back-to-back gets zero
+            # horizontal space left and raises FPDFException. Explicit
+            # new_x/new_y matches cell()'s own convention here throughout.
+            pdf.multi_cell(0, 4.5, _pdf_safe(label), new_x="LMARGIN", new_y="NEXT")
         pdf.set_font("Helvetica", "", 9)
 
     section_title("Billing Snapshot (firm's own professional fees — not client funds held in trust)")
