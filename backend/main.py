@@ -1564,12 +1564,20 @@ def _send_sms_otp(phone: str, code: str) -> bool:
 
 def _parse_at_cost(cost_str: Optional[str]) -> tuple:
     """
-    Africa's Talking returns cost as a single string like "USD 0.0500" or
-    "ZWL 0.5000" (currency + amount, space-separated) -- split it into
+    Africa's Talking returns cost as a single string like "USD 0.0500"
+    (currency + amount, space-separated) -- split it into
     (amount: Optional[float], currency: Optional[str]) for sms_usage_log's
     separate cost_amount/cost_currency columns. Returns (None, None) for
     anything that isn't that exact two-token shape (missing, malformed,
     or a currency-less "0.0000") rather than guessing.
+
+    In practice this will only ever see USD -- confirmed 2026-08-31:
+    Africa's Talking, like every other platform this app bills through
+    (Railway, Cloudflare, Anthropic), is a USD-only international
+    platform; ZWL never actually occurs here. Kept currency-generic
+    anyway rather than hardcoding USD, since that's a one-line cost
+    (parsing whatever two-token string comes back) against genuine
+    future-proofing if a different SMS provider is ever added.
     """
     if not cost_str:
         return None, None
@@ -6621,13 +6629,16 @@ async def _fetch_sms_usage_by_firm(conn) -> list:
     """
     One row per (firm, month). Cost is broken out per currency rather than
     blindly summed -- Africa's Talking's cost figures are currency-tagged
-    per send (seen as "USD 0.0500" in real testing; nothing stops a
-    different currency showing up later), and silently adding e.g. USD
-    and ZWL amounts together would produce a meaningless number. Grouped
-    in Python, not SQL, since a failed send has NULL cost_amount/currency
-    and still needs to count toward total_sends/failed_count -- doing
-    that split cleanly in one SQL GROUP BY would need FILTER gymnastics
-    for little benefit over a straightforward per-row pass here.
+    per send (always USD in practice, confirmed 2026-08-31: AT, like
+    Railway/Cloudflare/Anthropic, is a USD-only international platform),
+    but the field is kept generic rather than assuming USD, since a
+    different SMS provider added later could genuinely bill in something
+    else, and silently summing mismatched currencies together would
+    produce a meaningless number. Grouped in Python, not SQL, since a
+    failed send has NULL cost_amount/currency and still needs to count
+    toward total_sends/failed_count -- doing that split cleanly in one
+    SQL GROUP BY would need FILTER gymnastics for little benefit over a
+    straightforward per-row pass here.
     """
     rows = await conn.fetch("""
         SELECT f.id AS firm_id, f.name AS firm_name,
