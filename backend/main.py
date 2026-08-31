@@ -4402,6 +4402,52 @@ async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
             results[source] = entries
     return results
 
+# TEMPORARY — one-time real-data verification for My Portfolio (2026-08-31).
+# X-Admin-Token gated, same one-time-verification pattern used for Matter
+# Review Status and SMS usage tracking. Resolves a phone number to a real
+# user (last-9-digits match, since a lawyer typically gives a local
+# "0788529205"-style number while the DB stores "+263788529205"), calls
+# the real _compute_my_portfolio() for that lawyer, and independently
+# cross-checks client_count/matter_count via separate simple queries
+# (deliberately not just re-deriving them from the same function's own
+# output, which would only prove self-consistency, not DB correctness).
+# Remove once verified.
+@app.get("/api/admin/verify-my-portfolio")
+async def admin_verify_my_portfolio(request: Request, phone: str):
+    require_admin_token(request)
+    digits = "".join(ch for ch in phone if ch.isdigit())[-9:]
+    async with _db_pool.acquire() as conn:
+        user_rows = await conn.fetch("SELECT id, phone, display_name FROM users WHERE firm_id=$1", FIRM_ID)
+        match = next((u for u in user_rows if "".join(ch for ch in u["phone"] if ch.isdigit())[-9:] == digits), None)
+        if not match:
+            raise HTTPException(status_code=404, detail=f"No user found matching phone ending in {digits}")
+
+        portfolio = await _compute_my_portfolio(conn, match["id"], match["display_name"])
+
+        raw_client_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, match["id"]
+        )
+        raw_matter_rows = await conn.fetch(
+            "SELECT status FROM matters WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel",
+            FIRM_ID, match["id"]
+        )
+        raw_matters_by_status = {s: 0 for s in MATTER_STATUSES}
+        for r in raw_matter_rows:
+            raw_matters_by_status[r["status"]] = raw_matters_by_status.get(r["status"], 0) + 1
+
+    mismatches = []
+    if portfolio["volume"]["client_count"] != raw_client_count:
+        mismatches.append(f"client_count: portfolio={portfolio['volume']['client_count']} raw={raw_client_count}")
+    if portfolio["volume"]["matters_by_status"] != raw_matters_by_status:
+        mismatches.append(f"matters_by_status: portfolio={portfolio['volume']['matters_by_status']} raw={raw_matters_by_status}")
+
+    return {
+        "matched_user": {"id": str(match["id"]), "phone": match["phone"], "display_name": match["display_name"]},
+        "mismatch_count": len(mismatches), "mismatches": mismatches,
+        "portfolio": portfolio,
+        "raw_cross_check": {"client_count": raw_client_count, "matters_by_status": raw_matters_by_status},
+    }
+
 # TEMPORARY — one-time backfill for Multi-tenancy hardening (Part 3): puts
 # firm_id into every pre-existing firm_precedents chunk's Chroma metadata
 # so _semantic_search_firm()'s new where={"firm_id": ...} filter doesn't
@@ -6670,89 +6716,99 @@ async def my_portfolio(request: Request):
         return _empty_my_portfolio(user)
 
     async with _db_pool.acquire() as conn:
-        # 1. Volume & status
-        client_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, user_id
-        )
-        status_rows = await conn.fetch(
-            "SELECT status, COUNT(*) AS matter_count FROM matters "
-            "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel GROUP BY status",
-            FIRM_ID, user_id
-        )
-        matters_by_status = {s: 0 for s in MATTER_STATUSES}
-        for r in status_rows:
-            # A status outside the known set can't happen today (the
-            # column is constrained at the PATCH layer -- see
-            # VALID_STATUSES), but degrade to counting it rather than
-            # silently dropping it if that constraint is ever loosened.
-            matters_by_status[r["status"]] = matters_by_status.get(r["status"], 0) + r["matter_count"]
-        matter_count = sum(matters_by_status.values())
+        return await _compute_my_portfolio(conn, user_id, user.get("display_name"))
 
-        # 2. Practice-area split -- same column/grouping as the firm-wide
-        # practice_area_breakdown report, just scoped to this lawyer.
-        pa_rows = await conn.fetch(
-            "SELECT practice_area, COUNT(*) AS matter_count FROM matters "
-            "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel "
-            "GROUP BY practice_area ORDER BY matter_count DESC",
-            FIRM_ID, user_id
-        )
-        practice_areas = [
-            {"practice_area": r["practice_area"] or "Uncategorized", "matter_count": r["matter_count"]}
-            for r in pa_rows
-        ]
+async def _compute_my_portfolio(conn, user_id: "_uuid_mod.UUID", lawyer_name: Optional[str]) -> dict:
+    """
+    The actual aggregation, factored out of my_portfolio() so it can also
+    be called directly for a specific lawyer_id -- used by the temporary
+    verify-my-portfolio diagnostic endpoint to check a real lawyer's real
+    numbers without needing their own session cookie. my_portfolio() itself
+    never exposes a lawyer_id parameter; only this internal function does.
+    """
+    # 1. Volume & status
+    client_count = await conn.fetchval(
+        "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, user_id
+    )
+    status_rows = await conn.fetch(
+        "SELECT status, COUNT(*) AS matter_count FROM matters "
+        "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel GROUP BY status",
+        FIRM_ID, user_id
+    )
+    matters_by_status = {s: 0 for s in MATTER_STATUSES}
+    for r in status_rows:
+        # A status outside the known set can't happen today (the
+        # column is constrained at the PATCH layer -- see
+        # VALID_STATUSES), but degrade to counting it rather than
+        # silently dropping it if that constraint is ever loosened.
+        matters_by_status[r["status"]] = matters_by_status.get(r["status"], 0) + r["matter_count"]
+    matter_count = sum(matters_by_status.values())
 
-        # 3. Compliance/risk snapshot -- batched (not N+1) across this
-        # lawyer's own clients, reusing _compute_compliance_status as-is.
-        client_rows = await conn.fetch(
-            "SELECT * FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, user_id
-        )
-        client_ids = [c["id"] for c in client_rows]
-        compliance_by_client, owners_by_client = {}, {}
-        if client_ids:
-            comp_rows = await conn.fetch(
-                "SELECT * FROM client_compliance WHERE client_id = ANY($1) AND firm_id=$2",
-                client_ids, FIRM_ID
-            )
-            compliance_by_client = {c["client_id"]: dict(c) for c in comp_rows}
-            owner_rows = await conn.fetch(
-                "SELECT client_id, verification_status FROM beneficial_owners "
-                "WHERE client_id = ANY($1) AND firm_id=$2",
-                client_ids, FIRM_ID
-            )
-            for o in owner_rows:
-                owners_by_client.setdefault(o["client_id"], []).append(dict(o))
+    # 2. Practice-area split -- same column/grouping as the firm-wide
+    # practice_area_breakdown report, just scoped to this lawyer.
+    pa_rows = await conn.fetch(
+        "SELECT practice_area, COUNT(*) AS matter_count FROM matters "
+        "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel "
+        "GROUP BY practice_area ORDER BY matter_count DESC",
+        FIRM_ID, user_id
+    )
+    practice_areas = [
+        {"practice_area": r["practice_area"] or "Uncategorized", "matter_count": r["matter_count"]}
+        for r in pa_rows
+    ]
 
-        cleared_count = action_required_count = pep_count = 0
-        risk_ratings = {r: 0 for r in RISK_RATINGS}
-        for c in client_rows:
-            compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
-            owners = owners_by_client.get(c["id"], [])
-            status = _compute_compliance_status(dict(c), compliance, owners)
-            if status["compliance_status"] == "Cleared":
-                cleared_count += 1
-            else:
-                action_required_count += 1
-            if compliance.get("is_pep") is True:
-                pep_count += 1
-            risk_ratings[compliance.get("risk_rating") or "NotAssessed"] = (
-                risk_ratings.get(compliance.get("risk_rating") or "NotAssessed", 0) + 1
-            )
+    # 3. Compliance/risk snapshot -- batched (not N+1) across this
+    # lawyer's own clients, reusing _compute_compliance_status as-is.
+    client_rows = await conn.fetch(
+        "SELECT * FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, user_id
+    )
+    client_ids = [c["id"] for c in client_rows]
+    compliance_by_client, owners_by_client = {}, {}
+    if client_ids:
+        comp_rows = await conn.fetch(
+            "SELECT * FROM client_compliance WHERE client_id = ANY($1) AND firm_id=$2",
+            client_ids, FIRM_ID
+        )
+        compliance_by_client = {c["client_id"]: dict(c) for c in comp_rows}
+        owner_rows = await conn.fetch(
+            "SELECT client_id, verification_status FROM beneficial_owners "
+            "WHERE client_id = ANY($1) AND firm_id=$2",
+            client_ids, FIRM_ID
+        )
+        for o in owner_rows:
+            owners_by_client.setdefault(o["client_id"], []).append(dict(o))
 
-        # 4. Review status -- reuses the Matter Review Status report's own
-        # data function directly, lawyer_id-scoped to this caller. No new
-        # query logic duplicated for the underlying rows.
-        review_rows = await _fetch_matter_review_status_rows(
-            conn, lawyer_id=user_id, client_id=None, status=None
+    cleared_count = action_required_count = pep_count = 0
+    risk_ratings = {r: 0 for r in RISK_RATINGS}
+    for c in client_rows:
+        compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
+        owners = owners_by_client.get(c["id"], [])
+        status = _compute_compliance_status(dict(c), compliance, owners)
+        if status["compliance_status"] == "Cleared":
+            cleared_count += 1
+        else:
+            action_required_count += 1
+        if compliance.get("is_pep") is True:
+            pep_count += 1
+        risk_ratings[compliance.get("risk_rating") or "NotAssessed"] = (
+            risk_ratings.get(compliance.get("risk_rating") or "NotAssessed", 0) + 1
         )
 
-        # 5. Billing snapshot -- see the section header comment above for
-        # what's realistically tracked (point-in-time totals only).
-        fee_rows = await conn.fetch(
-            "SELECT client_id, client_name, amount_billed, amount_received FROM matters "
-            "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel "
-            "AND (amount_billed IS NOT NULL OR amount_received IS NOT NULL)",
-            FIRM_ID, user_id
-        )
+    # 4. Review status -- reuses the Matter Review Status report's own
+    # data function directly, lawyer_id-scoped to this caller. No new
+    # query logic duplicated for the underlying rows.
+    review_rows = await _fetch_matter_review_status_rows(
+        conn, lawyer_id=user_id, client_id=None, status=None
+    )
+
+    # 5. Billing snapshot -- see the section header comment above for
+    # what's realistically tracked (point-in-time totals only).
+    fee_rows = await conn.fetch(
+        "SELECT client_id, client_name, amount_billed, amount_received FROM matters "
+        "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel "
+        "AND (amount_billed IS NOT NULL OR amount_received IS NOT NULL)",
+        FIRM_ID, user_id
+    )
 
     today_iso = date.today().isoformat()
     due_soon_cutoff = (date.today() + timedelta(days=REVIEW_DIGEST_LOOKAHEAD_DAYS)).isoformat()
@@ -6787,7 +6843,7 @@ async def my_portfolio(request: Request):
 
     return {
         "has_real_identity": True,
-        "lawyer_id": str(user_id), "lawyer_name": user.get("display_name"),
+        "lawyer_id": str(user_id), "lawyer_name": lawyer_name,
         "volume": {"client_count": client_count, "matter_count": matter_count,
                    "matters_by_status": matters_by_status},
         "practice_areas": practice_areas,
