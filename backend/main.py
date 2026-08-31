@@ -5208,45 +5208,17 @@ async def add_progress_note(matter_id: str, note: ProgressNote, request: Request
 
     entry = _row_to_note(note_row)
 
-    # Quietly scan the note for actionable dates
+    # Quietly scan the note for actionable dates -- same shared pipeline
+    # as document upload/re-scan (_extract_dates_from_text), not a
+    # separate note-specific implementation. Surfaced to the lawyer as a
+    # confirm-before-adding suggestion (showNoteDatePrompt() in the
+    # frontend) -- never created automatically/silently.
     detected_dates = []
     try:
-        today = datetime.utcnow().date().isoformat()
         matter_name = matter["name"]
         internal_ref = matter["internal_ref"] or ""
-
-        def scan_note_sync():
-            msg = client.messages.create(
-                model="claude-sonnet-4-5",
-                max_tokens=400,
-                messages=[{"role": "user", "content": f"""Scan this legal progress note for any specific dates, deadlines, or appointments mentioned.
-Today is {today}.
-
-Return ONLY valid JSON — no other text:
-{{
-  "dates": [
-    {{
-      "title": "brief description of the action",
-      "date": "YYYY-MM-DD",
-      "time": "HH:MM or null",
-      "event_type": "deadline|hearing|meeting|filing|other"
-    }}
-  ]
-}}
-
-If no specific dates are mentioned, return {{"dates": []}}.
-Only include dates with a specific day — ignore vague references like "next week" or "soon".
-
-Note text: {note.text}
-
-JSON:"""}]
-            )
-            raw = msg.content[0].text.strip()
-            raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
-            parsed = json.loads(raw)
-            return parsed.get("dates", [])
-
-        detected_dates = await asyncio.to_thread(scan_note_sync)
+        parsed = await asyncio.to_thread(_extract_dates_from_text, note.text)
+        detected_dates = parsed["dates"]
         for d in detected_dates:
             d["matter_id"] = matter_id
             d["matter_name"] = matter_name
@@ -11116,7 +11088,56 @@ async def export_calendar_ics(request: Request):
         headers={"Content-Disposition": f'attachment; filename="mutemo_calendar.ics"'}
     )
 
-# ── Date Extraction from Documents ────────────────────────────────────────────
+# ── Date Extraction (shared) ────────────────────────────────────────────────
+# One AI date-extraction pipeline, used by every place in this app that
+# scans free text for legal deadlines/hearings/filings/appointments:
+# extract_dates_from_document() (an uploaded file), extract_dates_by_document_id()
+# (an already-indexed document), and add_progress_note() (a progress note's own
+# text, surfacing a "add to calendar?" suggestion — see its own comment).
+# Previously three independently-written Claude prompts doing the same job
+# slightly differently; consolidated 2026-08-31 so "the existing date-
+# extraction pipeline" genuinely means one pipeline, not three near-copies
+# that could quietly drift out of sync with each other.
+
+def _extract_dates_from_text(text: str) -> dict:
+    """
+    Synchronous — every caller runs this via asyncio.to_thread(), same
+    convention the three call sites already used individually before this
+    was consolidated. Returns {"dates": [...], "document_summary": str|None}
+    — document_summary is genuinely optional (a short progress note has no
+    real "summary" of its own; callers that don't use it just ignore it).
+    """
+    today = datetime.utcnow().date().isoformat()
+    msg = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=1500,
+        messages=[{"role": "user", "content": f"""Extract all legal deadlines, hearing dates, filing dates, and appointments from this text.
+Today is {today}. Focus on specific, actionable dates — ignore vague references like "next week" or "soon".
+
+Return ONLY valid JSON:
+{{
+  "dates": [
+    {{
+      "title": "brief description",
+      "date": "YYYY-MM-DD",
+      "time": "HH:MM or null",
+      "event_type": "deadline|hearing|meeting|filing|other",
+      "party": "which party this applies to, or null",
+      "notes": "any additional context"
+    }}
+  ],
+  "document_summary": "one sentence summary of the text, or null if it's too short for a meaningful summary (e.g. a brief progress note)"
+}}
+
+Text (first 8000 chars):
+{text[:8000]}
+
+JSON:"""}]
+    )
+    raw = msg.content[0].text.strip()
+    raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
+    parsed = json.loads(raw)
+    return {"dates": parsed.get("dates", []), "document_summary": parsed.get("document_summary")}
 
 @app.post("/api/extract-dates")
 async def extract_dates_from_document(
@@ -11147,43 +11168,10 @@ async def extract_dates_from_document(
     if not text:
         raise HTTPException(status_code=422, detail="No text could be extracted from this document.")
 
-    today = datetime.utcnow().date().isoformat()
-
-    def extract_dates_sync():
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": f"""Extract all legal deadlines, hearing dates, filing dates, and appointments from this document.
-Today is {today}. Focus on specific, actionable dates.
-
-Return ONLY valid JSON:
-{{
-  "dates": [
-    {{
-      "title": "brief description",
-      "date": "YYYY-MM-DD",
-      "time": "HH:MM or null",
-      "event_type": "deadline|hearing|meeting|filing|other",
-      "party": "which party this applies to, or null",
-      "notes": "any additional context"
-    }}
-  ],
-  "document_summary": "one sentence summary of the document"
-}}
-
-Document text (first 8000 chars):
-{text[:8000]}
-
-JSON:"""}]
-        )
-        raw = msg.content[0].text.strip()
-        raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
-        return json.loads(raw)
-
     try:
-        parsed = await asyncio.to_thread(extract_dates_sync)
-        dates = parsed.get("dates", [])
-        summary = parsed.get("document_summary", "")
+        parsed = await asyncio.to_thread(_extract_dates_from_text, text)
+        dates = parsed["dates"]
+        summary = parsed["document_summary"] or ""
         for d in dates:
             d["matter_id"] = matter_id
             d["matter_name"] = matter_name
@@ -11232,43 +11220,10 @@ async def extract_dates_by_document_id(
             if matter:
                 matter_name = matter["name"]
 
-    today = datetime.utcnow().date().isoformat()
-
-    def extract_dates_sync():
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": f"""Extract all legal deadlines, hearing dates, filing dates, and appointments from this document.
-Today is {today}. Focus on specific, actionable dates.
-
-Return ONLY valid JSON:
-{{
-  "dates": [
-    {{
-      "title": "brief description",
-      "date": "YYYY-MM-DD",
-      "time": "HH:MM or null",
-      "event_type": "deadline|hearing|meeting|filing|other",
-      "party": "which party this applies to, or null",
-      "notes": "any additional context"
-    }}
-  ],
-  "document_summary": "one sentence summary of the document"
-}}
-
-Document text:
-{text[:8000]}
-
-JSON:"""}]
-        )
-        raw = msg.content[0].text.strip()
-        raw = re.sub(r'^```json\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
-        return json.loads(raw)
-
     try:
-        parsed = await asyncio.to_thread(extract_dates_sync)
-        dates = parsed.get("dates", [])
-        summary = parsed.get("document_summary", "")
+        parsed = await asyncio.to_thread(_extract_dates_from_text, text)
+        dates = parsed["dates"]
+        summary = parsed["document_summary"] or ""
         for d in dates:
             d["matter_id"] = matter_id
             d["matter_name"] = matter_name
