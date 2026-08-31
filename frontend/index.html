@@ -2173,6 +2173,27 @@ window.fetch = async (url, opts = {}) => {
       _showStaleSessionNotice();
       throw new Error('Stale session: received an HTML page instead of the expected API response (expired Cloudflare Access session).');
     }
+    // A second, distinct stale-session shape from the one above: this
+    // app's OWN session (mutemo_session cookie, backed by the sessions
+    // table + idle timeout — see session_auth_middleware) can expire
+    // independently of Cloudflare Access's session, and returns a plain
+    // 401 with a perfectly normal JSON body ({"detail":"Authentication
+    // required"}) — no HTML, so the check above never catches it. Left
+    // unhandled, every call site that does `data = await res.json()`
+    // without checking res.ok (loadMatters() among many others) silently
+    // assigns that error object where an array/object of real data was
+    // expected, corrupting shared state in a way that doesn't surface
+    // until some later, unrelated-looking crash (e.g. "matters is not
+    // iterable" from a spread of the corrupted global). Caught once here
+    // instead. request-otp/verify-otp are deliberately excluded — their
+    // own legitimate 401s (wrong/expired OTP code) are login-flow errors,
+    // not evidence of a dead session, and must not trigger this modal
+    // mid-login.
+    const isAuthFlowCall = url.includes('/api/auth/request-otp') || url.includes('/api/auth/verify-otp');
+    if (response.status === 401 && !isAuthFlowCall) {
+      _showStaleSessionNotice();
+      throw new Error('Stale session: the server returned 401 Unauthorized (this app\'s own session has expired).');
+    }
   }
   return response;
 };
