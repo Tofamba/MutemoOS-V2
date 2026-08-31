@@ -6616,6 +6616,189 @@ async def matter_review_status_report_export(
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+# ── My Portfolio (self-scoped, every lawyer — NOT a reports:* endpoint) ────
+# Deliberately outside the reports:* permission family above: those are all
+# admin/partner-tier firm-wide views; this is the opposite shape, modeled on
+# the LawKPIs pattern of splitting dashboards by audience -- every lawyer's
+# own caseload, gated only at matter:read (every real role). There is no
+# lawyer_id query param anywhere on this endpoint -- scoping is always
+# derived server-side from the authenticated session's own user id, so
+# there is no request to manipulate into seeing someone else's portfolio;
+# contrast with the Matter Review Status report above, which is
+# partner-tier and does accept a lawyer_id filter for firm-wide oversight.
+#
+# Ownership boundary: matters/clients.created_by, the same field "My
+# Clients" already uses (window._userId comparison in renderClientsList).
+# NOT matters.assigned_lawyer_id -- that column belongs entirely to the
+# separate panel-lawyer coverage feature and is NULL on this firm's own
+# ordinary matters (see _fetch_matter_review_status_rows's own docstring
+# for the same reasoning, since section 4 below reuses that function
+# directly). This does mean a matter created by one lawyer but now
+# actually being handled by another (no reassignment-of-ownership concept
+# exists yet) won't show up in the second lawyer's portfolio -- a real
+# limitation of what's tracked today, not something invented around.
+#
+# Billing snapshot (section 5): matters.amount_billed/amount_received are
+# the only fee data that exists -- point-in-time totals per matter, no
+# invoice/payment-date/aging concept. "Outstanding" is simply billed minus
+# received, aggregated per client, same arithmetic _row_to_matter already
+# uses for a single matter's fee_balance -- not invented data.
+
+def _empty_my_portfolio(user: dict) -> dict:
+    """Shape returned when there's no real session identity to scope by
+    (AUTH_ENABLED=False's synthetic dev user, id=None) -- an honest empty
+    portfolio rather than either crashing or silently showing firm-wide
+    data under a 'my portfolio' label."""
+    return {
+        "has_real_identity": False,
+        "lawyer_id": None, "lawyer_name": user.get("display_name"),
+        "volume": {"client_count": 0, "matter_count": 0,
+                   "matters_by_status": {s: 0 for s in MATTER_STATUSES}},
+        "practice_areas": [],
+        "compliance": {"cleared_count": 0, "action_required_count": 0, "pep_count": 0,
+                        "risk_ratings": {r: 0 for r in RISK_RATINGS}},
+        "review_status": {"overdue_count": 0, "due_soon_count": 0, "never_reviewed_count": 0, "matters": []},
+        "billing": {"total_billed": 0.0, "total_received": 0.0, "total_outstanding": 0.0, "by_client": []},
+    }
+
+@app.get("/api/my-portfolio")
+async def my_portfolio(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    if user_id is None:
+        return _empty_my_portfolio(user)
+
+    async with _db_pool.acquire() as conn:
+        # 1. Volume & status
+        client_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, user_id
+        )
+        status_rows = await conn.fetch(
+            "SELECT status, COUNT(*) AS matter_count FROM matters "
+            "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel GROUP BY status",
+            FIRM_ID, user_id
+        )
+        matters_by_status = {s: 0 for s in MATTER_STATUSES}
+        for r in status_rows:
+            # A status outside the known set can't happen today (the
+            # column is constrained at the PATCH layer -- see
+            # VALID_STATUSES), but degrade to counting it rather than
+            # silently dropping it if that constraint is ever loosened.
+            matters_by_status[r["status"]] = matters_by_status.get(r["status"], 0) + r["matter_count"]
+        matter_count = sum(matters_by_status.values())
+
+        # 2. Practice-area split -- same column/grouping as the firm-wide
+        # practice_area_breakdown report, just scoped to this lawyer.
+        pa_rows = await conn.fetch(
+            "SELECT practice_area, COUNT(*) AS matter_count FROM matters "
+            "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel "
+            "GROUP BY practice_area ORDER BY matter_count DESC",
+            FIRM_ID, user_id
+        )
+        practice_areas = [
+            {"practice_area": r["practice_area"] or "Uncategorized", "matter_count": r["matter_count"]}
+            for r in pa_rows
+        ]
+
+        # 3. Compliance/risk snapshot -- batched (not N+1) across this
+        # lawyer's own clients, reusing _compute_compliance_status as-is.
+        client_rows = await conn.fetch(
+            "SELECT * FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, user_id
+        )
+        client_ids = [c["id"] for c in client_rows]
+        compliance_by_client, owners_by_client = {}, {}
+        if client_ids:
+            comp_rows = await conn.fetch(
+                "SELECT * FROM client_compliance WHERE client_id = ANY($1) AND firm_id=$2",
+                client_ids, FIRM_ID
+            )
+            compliance_by_client = {c["client_id"]: dict(c) for c in comp_rows}
+            owner_rows = await conn.fetch(
+                "SELECT client_id, verification_status FROM beneficial_owners "
+                "WHERE client_id = ANY($1) AND firm_id=$2",
+                client_ids, FIRM_ID
+            )
+            for o in owner_rows:
+                owners_by_client.setdefault(o["client_id"], []).append(dict(o))
+
+        cleared_count = action_required_count = pep_count = 0
+        risk_ratings = {r: 0 for r in RISK_RATINGS}
+        for c in client_rows:
+            compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
+            owners = owners_by_client.get(c["id"], [])
+            status = _compute_compliance_status(dict(c), compliance, owners)
+            if status["compliance_status"] == "Cleared":
+                cleared_count += 1
+            else:
+                action_required_count += 1
+            if compliance.get("is_pep") is True:
+                pep_count += 1
+            risk_ratings[compliance.get("risk_rating") or "NotAssessed"] = (
+                risk_ratings.get(compliance.get("risk_rating") or "NotAssessed", 0) + 1
+            )
+
+        # 4. Review status -- reuses the Matter Review Status report's own
+        # data function directly, lawyer_id-scoped to this caller. No new
+        # query logic duplicated for the underlying rows.
+        review_rows = await _fetch_matter_review_status_rows(
+            conn, lawyer_id=user_id, client_id=None, status=None
+        )
+
+        # 5. Billing snapshot -- see the section header comment above for
+        # what's realistically tracked (point-in-time totals only).
+        fee_rows = await conn.fetch(
+            "SELECT client_id, client_name, amount_billed, amount_received FROM matters "
+            "WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel "
+            "AND (amount_billed IS NOT NULL OR amount_received IS NOT NULL)",
+            FIRM_ID, user_id
+        )
+
+    today_iso = date.today().isoformat()
+    due_soon_cutoff = (date.today() + timedelta(days=REVIEW_DIGEST_LOOKAHEAD_DAYS)).isoformat()
+    overdue_count = sum(1 for r in review_rows if r["next_review_date"] and r["next_review_date"] < today_iso)
+    due_soon_count = sum(
+        1 for r in review_rows
+        if r["next_review_date"] and today_iso <= r["next_review_date"] <= due_soon_cutoff
+    )
+    never_reviewed_count = sum(1 for r in review_rows if r["next_review_date"] is None)
+
+    by_client: dict = {}
+    total_billed = total_received = 0.0
+    for r in fee_rows:
+        billed = float(r["amount_billed"]) if r["amount_billed"] is not None else 0.0
+        received = float(r["amount_received"]) if r["amount_received"] is not None else 0.0
+        total_billed += billed
+        total_received += received
+        key = str(r["client_id"]) if r["client_id"] else f"unlinked:{r['client_name']}"
+        entry = by_client.setdefault(key, {
+            "client_id": str(r["client_id"]) if r["client_id"] else None,
+            "client_name": r["client_name"], "billed": 0.0, "received": 0.0,
+        })
+        entry["billed"] += billed
+        entry["received"] += received
+    billing_by_client = []
+    for entry in by_client.values():
+        entry["billed"] = round(entry["billed"], 2)
+        entry["received"] = round(entry["received"], 2)
+        entry["outstanding"] = round(entry["billed"] - entry["received"], 2)
+        billing_by_client.append(entry)
+    billing_by_client.sort(key=lambda x: x["outstanding"], reverse=True)
+
+    return {
+        "has_real_identity": True,
+        "lawyer_id": str(user_id), "lawyer_name": user.get("display_name"),
+        "volume": {"client_count": client_count, "matter_count": matter_count,
+                   "matters_by_status": matters_by_status},
+        "practice_areas": practice_areas,
+        "compliance": {"cleared_count": cleared_count, "action_required_count": action_required_count,
+                        "pep_count": pep_count, "risk_ratings": risk_ratings},
+        "review_status": {"overdue_count": overdue_count, "due_soon_count": due_soon_count,
+                           "never_reviewed_count": never_reviewed_count, "matters": review_rows},
+        "billing": {"total_billed": round(total_billed, 2), "total_received": round(total_received, 2),
+                    "total_outstanding": round(total_billed - total_received, 2), "by_client": billing_by_client},
+    }
+
 # ── Reports (SMS Usage by Firm) ─────────────────────────────────────────────
 # Partner-tier, own scoped key (reports:sms_usage), same convention as the
 # reports above. Aggregates sms_usage_log (see run_migrations() for why

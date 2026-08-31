@@ -431,6 +431,7 @@ select{cursor:pointer}
   <button class="nav-btn" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
   <button class="nav-btn active" id="nav-clients" onclick="showTab('clients')">👤 Clients</button>
+  <button class="nav-btn" id="nav-my-portfolio" onclick="showTab('my-portfolio')">📁 My Portfolio</button>
   <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft Document</button>
   <button class="nav-btn" id="nav-contract-review" onclick="showTab('contract-review')" data-role-hide="secretary">📋 Contract Review</button>
   <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge" id="cal-badge" style="display:none">0</span></button>
@@ -820,6 +821,51 @@ select{cursor:pointer}
     <div id="client-detail-content"></div>
   </div>
 
+</div>
+
+<!-- ═══════════════ MY PORTFOLIO TAB ═══════════════ -->
+<!-- Self-scoped, every role — not gated behind admin/partner the way Reports
+     is. Placed next to Clients (its own nav entry, per the "My Clients" →
+     "My Portfolio" naming/adjacency) since it's substantial enough (5
+     sections) to deserve a real destination, not a filter toggle. -->
+<div id="tab-my-portfolio" style="display:none">
+  <div class="section-head">
+    <h2>📁 My Portfolio</h2>
+    <p>Your own caseload — clients and matters you created, at a glance.</p>
+  </div>
+
+  <div id="mp-empty-notice"></div>
+
+  <div class="dash-grid" id="mp-volume-stats"></div>
+
+  <div class="card" style="margin-top:1rem">
+    <div class="card-title">📂 Matters by Status</div>
+    <div id="mp-status-breakdown" style="margin-top:0.75rem;display:flex;flex-wrap:wrap;gap:8px"></div>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <div class="card-title">⚖ Practice Area Split</div>
+    <div id="mp-practice-areas" style="margin-top:0.75rem;display:flex;flex-wrap:wrap;gap:8px"></div>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <div class="card-title">🛡 Compliance &amp; Risk Snapshot</div>
+    <div id="mp-compliance" style="margin-top:0.75rem"></div>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <div class="card-title">🗂 Review Status</div>
+    <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Your own matters needing a review — same logic as the firm-wide Matter Review Status report, scoped to you.</p>
+    <div id="mp-review-summary" style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:8px"></div>
+    <div id="mp-review-table" style="margin-top:0.75rem"></div>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <div class="card-title">💰 Billing Snapshot</div>
+    <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Fees billed / received (the firm's own professional fees — not client funds held in trust), across your own matters.</p>
+    <div class="dash-grid" id="mp-billing-stats" style="margin-top:0.5rem"></div>
+    <div id="mp-billing-table" style="margin-top:0.75rem"></div>
+  </div>
 </div>
 
 <!-- ═══════════════ CALENDAR TAB ═══════════════ -->
@@ -3503,7 +3549,7 @@ async function submitComplianceForm() {
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['dashboard','capture','vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
+  ['dashboard','capture','vault','search','matters','clients','my-portfolio','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
@@ -3511,6 +3557,7 @@ function showTab(tab) {
   if (tab === 'capture') renderCaptureTab();
   if (tab === 'matters') renderMattersList();
   if (tab === 'clients') renderClientsList();
+  if (tab === 'my-portfolio') loadMyPortfolio();
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
@@ -7628,6 +7675,163 @@ async function loadSmsUsageByFirm() {
       </table>
     `;
   } catch(e) { el.innerHTML = '<em>Error loading SMS usage.</em>'; }
+}
+
+// ── My Portfolio ─────────────────────────────────────────────────────────────
+// Self-scoped caseload dashboard: GET /api/my-portfolio takes no lawyer_id
+// param at all — scoping always comes from the caller's own session, so
+// there's nothing here to parameterize per-viewer beyond the fetch itself.
+// Reuses STATUS_COLORS (matter status chip colors) and the same "$" +
+// toLocaleString currency formatting the Dashboard tab's own fees card
+// already uses (_dashFees), for visual consistency between the two.
+
+const _mpFmtCurrency = n => `$${n.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+
+async function loadMyPortfolio() {
+  const emptyNoticeEl = document.getElementById('mp-empty-notice');
+  emptyNoticeEl.innerHTML = '';
+  try {
+    const res = await fetch(`${API}/api/my-portfolio`);
+    if (!res.ok) {
+      emptyNoticeEl.innerHTML = '<div class="dash-empty">Could not load your portfolio.</div>';
+      return;
+    }
+    const data = await res.json();
+
+    if (!data.has_real_identity) {
+      emptyNoticeEl.innerHTML = '<div class="dash-empty">No real login session to scope this to yet — sign in with a real account to see your own portfolio.</div>';
+    }
+
+    _mpRenderVolume(data.volume);
+    _mpRenderPracticeAreas(data.practice_areas);
+    _mpRenderCompliance(data.compliance);
+    _mpRenderReviewStatus(data.review_status);
+    _mpRenderBilling(data.billing);
+  } catch(e) {
+    emptyNoticeEl.innerHTML = '<div class="dash-empty">Error loading your portfolio.</div>';
+  }
+}
+
+function _mpRenderVolume(volume) {
+  const statsEl = document.getElementById('mp-volume-stats');
+  statsEl.innerHTML = [
+    { icon: '👤', value: volume.client_count, label: 'My Clients' },
+    { icon: '📂', value: volume.matter_count, label: 'My Matters' },
+    { icon: '✅', value: volume.matters_by_status['Active'] || 0, label: 'Active' },
+    { icon: '🔒', value: volume.matters_by_status['Closed'] || 0, label: 'Closed' },
+  ].map(s => `
+    <div class="dash-stat-card">
+      <div class="dash-stat-icon">${s.icon}</div>
+      <div><div class="dash-stat-value">${s.value}</div><div class="dash-stat-label">${s.label}</div></div>
+    </div>`).join('');
+
+  const breakdownEl = document.getElementById('mp-status-breakdown');
+  const entries = Object.entries(volume.matters_by_status);
+  breakdownEl.innerHTML = entries.every(([, n]) => n === 0)
+    ? '<em style="color:var(--ink3)">No matters yet.</em>'
+    : entries.map(([status, n]) => `<span class="chip ${STATUS_COLORS[status] || 'chip-gray'}">${escHtml(status)}: ${n}</span>`).join('');
+}
+
+function _mpRenderPracticeAreas(practiceAreas) {
+  const el = document.getElementById('mp-practice-areas');
+  if (!practiceAreas.length) { el.innerHTML = '<em style="color:var(--ink3)">No matters yet.</em>'; return; }
+  const total = practiceAreas.reduce((s, r) => s + r.matter_count, 0);
+  el.innerHTML = practiceAreas.map(r =>
+    `<span class="chip chip-gold">${escHtml(r.practice_area)} <span style="font-weight:400;opacity:0.8">(${r.matter_count} · ${Math.round(r.matter_count / total * 100)}%)</span></span>`
+  ).join('');
+}
+
+function _mpRenderCompliance(compliance) {
+  const el = document.getElementById('mp-compliance');
+  const total = compliance.cleared_count + compliance.action_required_count;
+  if (!total) { el.innerHTML = '<em style="color:var(--ink3)">No clients yet.</em>'; return; }
+  const riskChips = Object.entries(compliance.risk_ratings)
+    .filter(([, n]) => n > 0)
+    .map(([rating, n]) => `<span class="chip ${rating === 'High' ? 'chip-red' : rating === 'Medium' ? 'chip-gold' : rating === 'Low' ? 'chip-green' : 'chip-gray'}">${rating}: ${n}</span>`)
+    .join('');
+  el.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+      <span class="dash-badge dash-badge-green">✓ Cleared: ${compliance.cleared_count}</span>
+      <span class="dash-badge dash-badge-red">⚠ Action Required: ${compliance.action_required_count}</span>
+      ${compliance.pep_count > 0 ? `<span class="dash-badge dash-badge-blue">PEP flagged: ${compliance.pep_count}</span>` : ''}
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:0.6rem">${riskChips}</div>
+  `;
+}
+
+function _mpRenderReviewStatus(reviewStatus) {
+  const summaryEl = document.getElementById('mp-review-summary');
+  summaryEl.innerHTML = `
+    <span class="dash-badge dash-badge-red">⚠ Overdue: ${reviewStatus.overdue_count}</span>
+    <span class="dash-badge dash-badge-blue">⏰ Due within 7 days: ${reviewStatus.due_soon_count}</span>
+    <span class="dash-badge dash-badge-green" style="background:var(--gold2);color:var(--ink2)">— Never reviewed: ${reviewStatus.never_reviewed_count}</span>
+  `;
+
+  const tableEl = document.getElementById('mp-review-table');
+  const rows = reviewStatus.matters;
+  if (!rows.length) { tableEl.innerHTML = '<em style="color:var(--ink3)">No matters to review.</em>'; return; }
+  tableEl.innerHTML = `
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse">
+      <thead>
+        <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
+          <th style="padding:6px 8px 6px 0;white-space:nowrap">Matter</th>
+          <th style="padding:6px 8px;white-space:nowrap">Client</th>
+          <th style="padding:6px 8px;white-space:nowrap">Next Review</th>
+          <th style="padding:6px 8px;min-width:220px">Last Activity</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:6px 8px 6px 0;white-space:nowrap">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
+            <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.client_name || '')}</td>
+            <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
+            <td style="padding:6px 8px">${escHtml(r.last_activity_text)}${r.last_activity_date ? ` <span style="color:var(--ink3);font-size:0.75rem">(${r.last_activity_date.slice(0,10)})</span>` : ''}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+}
+
+function _mpRenderBilling(billing) {
+  const statsEl = document.getElementById('mp-billing-stats');
+  statsEl.innerHTML = [
+    { icon: '💵', value: _mpFmtCurrency(billing.total_billed), label: 'Billed' },
+    { icon: '✅', value: _mpFmtCurrency(billing.total_received), label: 'Received' },
+    { icon: '⚖', value: _mpFmtCurrency(billing.total_outstanding), label: 'Outstanding' },
+  ].map(s => `
+    <div class="dash-stat-card">
+      <div class="dash-stat-icon">${s.icon}</div>
+      <div><div class="dash-stat-value">${s.value}</div><div class="dash-stat-label">${s.label}</div></div>
+    </div>`).join('');
+
+  const tableEl = document.getElementById('mp-billing-table');
+  if (!billing.by_client.length) { tableEl.innerHTML = '<em style="color:var(--ink3)">No fee figures entered yet.</em>'; return; }
+  tableEl.innerHTML = `
+    <table style="width:100%;border-collapse:collapse">
+      <thead>
+        <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
+          <th style="padding:6px 8px 6px 0">Client</th>
+          <th style="padding:6px 8px">Billed</th>
+          <th style="padding:6px 8px">Received</th>
+          <th style="padding:6px 8px">Outstanding</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${billing.by_client.map(c => `
+          <tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:6px 8px 6px 0">${escHtml(c.client_name || '')}</td>
+            <td style="padding:6px 8px">${_mpFmtCurrency(c.billed)}</td>
+            <td style="padding:6px 8px">${_mpFmtCurrency(c.received)}</td>
+            <td style="padding:6px 8px${c.outstanding > 0 ? ';color:var(--red)' : ''}">${_mpFmtCurrency(c.outstanding)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
 }
 
 function showInviteStatus(msg, type) {
