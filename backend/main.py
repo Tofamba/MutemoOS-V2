@@ -4402,52 +4402,6 @@ async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
             results[source] = entries
     return results
 
-# TEMPORARY — one-time real-data verification for My Portfolio (2026-08-31).
-# X-Admin-Token gated, same one-time-verification pattern used for Matter
-# Review Status and SMS usage tracking. Resolves a phone number to a real
-# user (last-9-digits match, since a lawyer typically gives a local
-# "0788529205"-style number while the DB stores "+263788529205"), calls
-# the real _compute_my_portfolio() for that lawyer, and independently
-# cross-checks client_count/matter_count via separate simple queries
-# (deliberately not just re-deriving them from the same function's own
-# output, which would only prove self-consistency, not DB correctness).
-# Remove once verified.
-@app.get("/api/admin/verify-my-portfolio")
-async def admin_verify_my_portfolio(request: Request, phone: str):
-    require_admin_token(request)
-    digits = "".join(ch for ch in phone if ch.isdigit())[-9:]
-    async with _db_pool.acquire() as conn:
-        user_rows = await conn.fetch("SELECT id, phone, display_name FROM users WHERE firm_id=$1", FIRM_ID)
-        match = next((u for u in user_rows if "".join(ch for ch in u["phone"] if ch.isdigit())[-9:] == digits), None)
-        if not match:
-            raise HTTPException(status_code=404, detail=f"No user found matching phone ending in {digits}")
-
-        portfolio = await _compute_my_portfolio(conn, match["id"], match["display_name"])
-
-        raw_client_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM clients WHERE firm_id=$1 AND created_by=$2", FIRM_ID, match["id"]
-        )
-        raw_matter_rows = await conn.fetch(
-            "SELECT status FROM matters WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel",
-            FIRM_ID, match["id"]
-        )
-        raw_matters_by_status = {s: 0 for s in MATTER_STATUSES}
-        for r in raw_matter_rows:
-            raw_matters_by_status[r["status"]] = raw_matters_by_status.get(r["status"], 0) + 1
-
-    mismatches = []
-    if portfolio["volume"]["client_count"] != raw_client_count:
-        mismatches.append(f"client_count: portfolio={portfolio['volume']['client_count']} raw={raw_client_count}")
-    if portfolio["volume"]["matters_by_status"] != raw_matters_by_status:
-        mismatches.append(f"matters_by_status: portfolio={portfolio['volume']['matters_by_status']} raw={raw_matters_by_status}")
-
-    return {
-        "matched_user": {"id": str(match["id"]), "phone": match["phone"], "display_name": match["display_name"]},
-        "mismatch_count": len(mismatches), "mismatches": mismatches,
-        "portfolio": portfolio,
-        "raw_cross_check": {"client_count": raw_client_count, "matters_by_status": raw_matters_by_status},
-    }
-
 # TEMPORARY — one-time backfill for Multi-tenancy hardening (Part 3): puts
 # firm_id into every pre-existing firm_precedents chunk's Chroma metadata
 # so _semantic_search_firm()'s new where={"firm_id": ...} filter doesn't
