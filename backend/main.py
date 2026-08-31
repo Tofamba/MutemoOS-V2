@@ -4394,6 +4394,31 @@ async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
             results[source] = entries
     return results
 
+# TEMPORARY — one-time real-data verification for SMS usage tracking
+# (2026-08-31). X-Admin-Token gated, same one-time-verification pattern
+# used for the Matter Review Status report yesterday. Read-only: shows
+# the most recent sms_usage_log rows plus the report's own aggregation,
+# so a real Africa's Talking send on staging can be confirmed to land
+# correctly before this goes to production. Remove once verified.
+@app.get("/api/admin/verify-sms-usage-tracking")
+async def admin_verify_sms_usage_tracking(request: Request, limit: int = 10):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM sms_usage_log ORDER BY created_at DESC LIMIT $1", limit
+        )
+        report_rows = await _fetch_sms_usage_by_firm(conn)
+    recent = []
+    for r in rows:
+        d = dict(r)
+        d["id"] = str(d["id"])
+        d["firm_id"] = str(d["firm_id"])
+        d["created_at"] = d["created_at"].isoformat()
+        if d.get("cost_amount") is not None:
+            d["cost_amount"] = float(d["cost_amount"])
+        recent.append(d)
+    return {"recent_rows": recent, "report": report_rows}
+
 # TEMPORARY — one-time backfill for Multi-tenancy hardening (Part 3): puts
 # firm_id into every pre-existing firm_precedents chunk's Chroma metadata
 # so _semantic_search_firm()'s new where={"firm_id": ...} filter doesn't
