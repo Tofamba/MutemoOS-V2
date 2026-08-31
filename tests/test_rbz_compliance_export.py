@@ -136,7 +136,11 @@ def _fake_request():
 
 
 def _csv_rows(response):
-    text = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
+    # utf-8-sig strips a leading UTF-8 BOM if present (added 2026-08-31 so
+    # Excel reads non-ASCII characters like em-dashes correctly) and is a
+    # no-op otherwise -- correct either way, unlike plain utf-8 which would
+    # leave a stray ﻿ prefixed onto the first cell.
+    text = response.body.decode("utf-8-sig") if isinstance(response.body, bytes) else response.body.lstrip("﻿")
     return list(csv.reader(io.StringIO(text)))
 
 
@@ -202,6 +206,19 @@ def test_partner_succeeds_with_expected_csv_content(monkeypatch):
     assert ["NGM-001", "Huang Li Qiang", "", "+263771234567", "", "NGM-001-01", "Active"] in data_rows
     assert ["NGM-001", "Huang Li Qiang", "", "+263771234567", "", "NGM-001-02", "Closed"] in data_rows
     assert ["NGM-002", "Vengesai Enterprises", "Jane Muzenda", "", "info@vengesai.co.zw", "", ""] in data_rows
+
+
+def test_csv_export_starts_with_utf8_bom(monkeypatch):
+    """Real bug reported 2026-08-31 (found on My Portfolio's CSV, then
+    confirmed to affect this export too): no BOM meant Excel misread
+    non-ASCII characters as mojibake. Checks the raw bytes directly."""
+    import backend.main as m
+    pool = FakePool(clients=[_client("Huang Li Qiang", client_number="NGM-001")])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    response = asyncio.run(export_rbz_compliance_report(_fake_request()))
+
+    assert response.body[:3] == b"\xef\xbb\xbf"
 
 
 # ── report_history logging ───────────────────────────────────────────────

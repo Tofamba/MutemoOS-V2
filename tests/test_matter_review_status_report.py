@@ -161,7 +161,11 @@ def _fake_request():
 
 
 def _csv_rows(response):
-    text = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
+    # utf-8-sig strips a leading UTF-8 BOM if present (added 2026-08-31 so
+    # Excel reads non-ASCII characters like em-dashes correctly) and is a
+    # no-op otherwise -- correct either way, unlike plain utf-8 which would
+    # leave a stray ﻿ prefixed onto the first cell.
+    text = response.body.decode("utf-8-sig") if isinstance(response.body, bytes) else response.body.lstrip("﻿")
     return list(csv.reader(io.StringIO(text)))
 
 
@@ -461,6 +465,22 @@ def test_csv_export_partner_succeeds_with_expected_content(monkeypatch):
     assert data_row[3] == "Active"
     assert data_row[5] == today.isoformat()
     assert data_row[7] == "Reviewed with client"
+
+
+def test_csv_export_starts_with_utf8_bom(monkeypatch):
+    """Real bug reported 2026-08-31 (found on My Portfolio's CSV, then
+    confirmed to affect this export too): no BOM meant Excel misread
+    non-ASCII characters (matter names commonly contain em-dashes, e.g.
+    'Blue Ridge Traders — Debt collection...') as mojibake. Checks the
+    raw bytes directly."""
+    import backend.main as m
+    matter = _matter("Commercial lease dispute — LC 88/26")
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
+
+    response = asyncio.run(matter_review_status_report_export(_fake_request()))
+
+    assert response.body[:3] == b"\xef\xbb\xbf"
+    assert "Commercial lease dispute — LC 88/26" in response.body.decode("utf-8-sig")
 
 
 def test_csv_export_shows_placeholder_text_for_never_reviewed(monkeypatch):

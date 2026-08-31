@@ -6205,6 +6205,25 @@ async def _log_rbz_compliance_report(conn, user: dict, report_type: str, client_
     _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
     user.get("display_name") or "Unknown", client_count, matter_count)
 
+def _csv_response(content: str, filename: str) -> Response:
+    """
+    Shared by every CSV export in this app (RBZ compliance, Matter
+    Review Status, My Portfolio). Prepends a UTF-8 BOM (U+FEFF) --
+    without it, Excel reads a downloaded CSV using the system's local
+    codepage rather than UTF-8 unless this exact 3-byte marker is
+    present, so any non-ASCII character (an em-dash in a matter name --
+    "Commercial lease dispute — LC 88/26" is a real one from this firm's
+    own data -- an accented name, etc.) renders as mojibake. Found on
+    My Portfolio's CSV specifically (2026-08-31) but confirmed to be a
+    pre-existing gap in all three exports, not unique to that one --
+    fixed here once so it can't recur on a future fourth export either.
+    """
+    return Response(
+        content="﻿" + content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
 @app.get("/api/reports/rbz-compliance-export")
 async def export_rbz_compliance_report(request: Request):
     user = await get_current_user(request)
@@ -6228,11 +6247,7 @@ async def export_rbz_compliance_report(request: Request):
         ])
 
     filename = f"rbz_compliance_export_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
-    return Response(
-        content=buf.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-    )
+    return _csv_response(buf.getvalue(), filename)
 
 @app.get("/api/reports/rbz-compliance-export-pdf")
 async def export_rbz_compliance_report_pdf(request: Request):
@@ -6582,11 +6597,7 @@ async def matter_review_status_report_export(
         ])
 
     filename = f"matter_review_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
-    return Response(
-        content=buf.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-    )
+    return _csv_response(buf.getvalue(), filename)
 
 # ── My Portfolio (self-scoped, every lawyer — NOT a reports:* endpoint) ────
 # Deliberately outside the reports:* permission family above: those are all
@@ -6955,11 +6966,7 @@ async def my_portfolio_export(request: Request):
     portfolio = await _resolve_my_portfolio(request)
     csv_content = _build_my_portfolio_csv(portfolio)
     filename = f"my_portfolio_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
-    return Response(
-        content=csv_content,
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-    )
+    return _csv_response(csv_content, filename)
 
 @app.get("/api/my-portfolio-export-pdf")
 async def my_portfolio_export_pdf(request: Request):

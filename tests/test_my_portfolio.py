@@ -444,7 +444,11 @@ import pdfplumber
 
 
 def _csv_rows(response):
-    text = response.body.decode("utf-8") if isinstance(response.body, bytes) else response.body
+    # utf-8-sig strips a leading UTF-8 BOM if present (added 2026-08-31 so
+    # Excel reads non-ASCII characters like em-dashes correctly) and is a
+    # no-op otherwise -- correct either way, unlike plain utf-8 which would
+    # leave a stray ﻿ prefixed onto the first cell.
+    text = response.body.decode("utf-8-sig") if isinstance(response.body, bytes) else response.body.lstrip("﻿")
     return list(csv.reader(io.StringIO(text)))
 
 
@@ -496,6 +500,52 @@ def test_csv_export_contains_correct_data(monkeypatch):
     assert ["Total Received", "400.0"] in rows
     assert ["Total Outstanding", "600.0"] in rows
     assert ["Huang Li Qiang", "1000.0", "400.0", "600.0"] in rows
+
+
+def test_csv_export_starts_with_utf8_bom(monkeypatch):
+    """Real bug reported 2026-08-31: no BOM meant Excel misread non-ASCII
+    characters (em-dashes, accented names) as mojibake. Checks the raw
+    bytes directly -- the exact 3-byte EF BB BF signature Excel looks
+    for, not just that _csv_rows() happens to parse correctly (which
+    utf-8-sig would mask even if the BOM were missing)."""
+    import backend.main as m
+    _portfolio_fixture(monkeypatch, m)
+
+    response = asyncio.run(my_portfolio_export(_fake_request()))
+
+    assert response.body[:3] == b"\xef\xbb\xbf"
+
+
+def test_csv_export_em_dash_in_matter_name_survives_round_trip(monkeypatch):
+    """The exact real case reported: 'Commercial lease dispute — LC 88/26'
+    -- a real matter name from this firm's own staging data, surfaced via
+    the Review Status section (the only section that carries free-text
+    matter names, rather than just aggregate counts) -- must decode back
+    to a genuine em-dash, not mojibake, after the BOM fix."""
+    import backend.main as m
+    me = uuid.uuid4()
+    user = {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Me"}
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    _as_current_user(monkeypatch, m, user)
+    review_row = {
+        "matter_id": "1", "matter_name": "Commercial lease dispute — LC 88/26", "matter_number": "LC-88-26",
+        "client_id": None, "client_name": None, "status": "Active",
+        "next_review_date": None, "last_reviewed_date": None,
+        "last_activity_kind": "touched", "last_activity_text": "Touched (no note or document recorded)",
+        "last_activity_date": None,
+    }
+    async def fake_review(conn, *, lawyer_id, client_id, status):
+        return [review_row]
+    monkeypatch.setattr(m, "_fetch_matter_review_status_rows", fake_review)
+
+    response = asyncio.run(my_portfolio_export(_fake_request()))
+
+    assert response.body[:3] == b"\xef\xbb\xbf"
+    decoded = response.body.decode("utf-8-sig")
+    assert "Commercial lease dispute — LC 88/26" in decoded
+    rows = _csv_rows(response)
+    assert ["Commercial lease dispute — LC 88/26", "LC-88-26", "", "Active",
+            "None set", "Never reviewed", "Touched (no note or document recorded)"] in rows
 
 
 def test_pdf_export_generates_without_error_and_contains_correct_data(monkeypatch):
