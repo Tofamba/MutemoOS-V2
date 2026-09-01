@@ -3920,6 +3920,21 @@ function deadlineChipHtml(m) {
   return `<span class="chip ${color}" title="${title}">${label}</span>`;
 }
 
+// Matter Health — a computed status (never manually set by a lawyer), from
+// backend.matter_health.compute_matter_health(). Always rendered with its
+// "why" (matter.matter_health.reasons) in the title tooltip -- a color
+// alone is never a useful signal, per that module's own core requirement.
+function matterHealthChipHtml(matter) {
+  const health = matter.matter_health;
+  if (!health) return '';
+  const COLORS = { red: 'chip-red', amber: 'chip-gold', green: 'chip-green', grey: 'chip-gray' };
+  const LABELS = { red: '🔴 Red', amber: '🟡 Amber', green: '🟢 Green', grey: '⚪ Grey' };
+  const color = COLORS[health.status] || 'chip-gray';
+  const label = LABELS[health.status] || health.status;
+  const title = (health.reasons || []).join('; ') || 'Matter Health';
+  return `<span class="chip ${color}" title="${escHtml(title)}">${label}</span>`;
+}
+
 function renderMattersList(filtered = null) {
   const el = document.getElementById('matters-list');
   const countEl = document.getElementById('matters-count');
@@ -4071,6 +4086,10 @@ async function renderMatterPanel(id) {
             </select>
           </div>
           ${matter.custom_status ? `<span class="chip chip-gray">${escHtml(matter.custom_status)}</span>` : ''}
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">HEALTH</label>
+            ${matterHealthChipHtml(matter)}
+          </div>
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">CLIENT</label>
             <input type="text" id="matter-client-search-${id}" placeholder="🔍 Search clients…"

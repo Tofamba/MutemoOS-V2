@@ -39,6 +39,7 @@ from backend.numbering import (
 )
 from backend.case_binder import provision_case_binder
 from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text, INTAKE_MATTER_TYPE_TO_PRACTICE_AREA
+from backend.matter_health import compute_matter_health
 from backend.conveyancing import CONVEYANCING_MILESTONES
 from backend.matter_stages import resolve_stage_sequence, stage_storage_field
 from backend.deadline_engine import try_compute_deadline
@@ -4490,6 +4491,10 @@ async def list_matters(request: Request):
                 row["id"]
             )
         m["progress_notes"] = [_row_to_note(n) for n in note_rows]
+        # Computed status badge (never manually set) -- feeds the matter
+        # panel's health badge directly, since this is the same `matters`
+        # array the panel reads a given matter from.
+        m["matter_health"] = compute_matter_health(m)
         matters.append(m)
     return matters
 
@@ -6489,6 +6494,7 @@ async def _fetch_matter_review_status_rows(
     rows = await conn.fetch(f"""
         SELECT m.id, m.name, m.number, m.matter_number, m.client_id, m.client_name,
                m.status, m.next_review_date, m.last_reviewed_date, m.last_activity,
+               m.next_deadline, m.next_deadline_note,
                m.created_at, m.created_by,
                c.full_name AS client_full_name,
                u.display_name AS created_by_name
@@ -6548,6 +6554,29 @@ async def _fetch_matter_review_status_rows(
             last_activity_text = "Matter created, no activity since"
             last_activity_date = r["created_at"]
 
+        # Computed status badge (never manually set) -- reuses this
+        # function's own richer last_activity_date (most recent of note/
+        # document/raw last_activity/created_at) rather than the bare
+        # last_activity column list_matters() uses, since that's already
+        # computed here for a different purpose and is strictly more
+        # accurate (a document-only update with no note still counts).
+        # A deliberate, small discrepancy vs. the matter panel's own
+        # badge (wired in list_matters() off the plain column) -- not
+        # unifying them costs nothing here and isn't worth the extra
+        # per-matter document/note lookup list_matters() would otherwise
+        # need just to match this report's existing batched query.
+        health = compute_matter_health({
+            "status": r["status"],
+            # .get() rather than [] on the two columns this function just
+            # started selecting -- keeps every pre-existing FakeConnection
+            # fixture across this file's tests working unchanged; a real
+            # asyncpg Record always has both present.
+            "next_deadline": r.get("next_deadline"),
+            "next_review_date": r["next_review_date"],
+            "last_activity": last_activity_date,
+            "created_at": r["created_at"],
+        })
+
         result.append({
             "matter_id": str(r["id"]),
             "matter_name": r["name"],
@@ -6557,10 +6586,12 @@ async def _fetch_matter_review_status_rows(
             "status": r["status"],
             "next_review_date": r["next_review_date"].isoformat() if r["next_review_date"] else None,
             "last_reviewed_date": r["last_reviewed_date"].isoformat() if r["last_reviewed_date"] else None,
+            "next_deadline": r.get("next_deadline").isoformat() if r.get("next_deadline") else None,
             "created_by_name": r["created_by_name"],
             "last_activity_kind": last_activity_kind,
             "last_activity_text": last_activity_text,
             "last_activity_date": last_activity_date.isoformat() if last_activity_date else None,
+            "matter_health": health,
         })
     return result
 

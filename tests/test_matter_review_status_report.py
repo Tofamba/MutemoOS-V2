@@ -78,6 +78,7 @@ class FakeConnection:
                     "client_name": m.get("client_name"), "status": m.get("status"),
                     "next_review_date": m.get("next_review_date"),
                     "last_reviewed_date": m.get("last_reviewed_date"),
+                    "next_deadline": m.get("next_deadline"), "next_deadline_note": m.get("next_deadline_note"),
                     "last_activity": m.get("last_activity"), "created_at": m.get("created_at"),
                     "created_by": m.get("created_by"),
                     "client_full_name": client["full_name"] if client else None,
@@ -123,11 +124,13 @@ class FakePool:
 
 def _matter(name, *, status="Active", next_review_date=None, last_reviewed_date=None,
             last_activity=None, created_at=None, client_id=None, client_name=None,
-            created_by=None, matter_number=None, is_sentinel=False):
+            created_by=None, matter_number=None, is_sentinel=False,
+            next_deadline=None, next_deadline_note=None):
     return {
         "id": uuid.uuid4(), "firm_id": FIRM_ID, "name": name, "number": None,
         "matter_number": matter_number, "status": status,
         "next_review_date": next_review_date, "last_reviewed_date": last_reviewed_date,
+        "next_deadline": next_deadline, "next_deadline_note": next_deadline_note,
         "last_activity": last_activity, "created_at": created_at or datetime(2026, 1, 1, tzinfo=timezone.utc),
         "client_id": client_id, "client_name": client_name, "created_by": created_by,
         "is_sentinel": is_sentinel,
@@ -335,6 +338,65 @@ def test_falls_back_to_created_at_when_never_touched_at_all(monkeypatch):
     assert rows[0]["last_activity_kind"] == "created"
     assert rows[0]["last_activity_text"] == "Matter created, no activity since"
     assert rows[0]["last_activity_date"] == created.isoformat()
+
+
+# ── matter_health (backend/matter_health.py) ────────────────────────────
+# The report attaches a computed status badge per matter, reusing this
+# function's own richer last_activity_date (note/document/raw
+# last_activity/created_at) rather than a second, separate activity
+# lookup -- see the comment at its call site in
+# _fetch_matter_review_status_rows() for why.
+
+def test_matter_review_status_includes_red_for_never_reviewed(monkeypatch):
+    import backend.main as m
+    matter = _matter("Estate of Chikafu", next_review_date=None)
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
+
+    rows = asyncio.run(matter_review_status_report(_fake_request()))
+
+    assert rows[0]["matter_health"]["status"] == "red"
+    assert any("Never entered the review cycle" in r for r in rows[0]["matter_health"]["reasons"])
+
+
+def test_matter_review_status_includes_green_for_a_healthy_matter(monkeypatch):
+    import backend.main as m
+    today = date.today()
+    matter = _matter(
+        "Healthy Matter", next_review_date=today + timedelta(days=20),
+        last_activity=datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
+
+    rows = asyncio.run(matter_review_status_report(_fake_request()))
+
+    assert rows[0]["matter_health"]["status"] == "green"
+
+
+def test_matter_review_status_includes_grey_for_on_hold(monkeypatch):
+    import backend.main as m
+    matter = _matter("Parked Matter", status="On Hold", next_review_date=None)
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
+
+    rows = asyncio.run(matter_review_status_report(_fake_request()))
+
+    assert rows[0]["matter_health"]["status"] == "grey"
+
+
+def test_matter_review_status_flags_an_imminent_deadline_amber(monkeypatch):
+    import backend.main as m
+    today = date.today()
+    matter = _matter(
+        "Conveyancing Transfer", next_review_date=today + timedelta(days=25),
+        next_deadline=today + timedelta(days=10),
+        last_activity=datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
+
+    rows = asyncio.run(matter_review_status_report(_fake_request()))
+
+    assert rows[0]["next_deadline"] == (today + timedelta(days=10)).isoformat()
+    assert rows[0]["matter_health"]["status"] == "amber"
+    assert any("Deadline in 10 day(s)" in r for r in rows[0]["matter_health"]["reasons"])
 
 
 # ── client name resolution ────────────────────────────────────────────────
