@@ -7636,7 +7636,19 @@ const MRS_STATUS_CHIP = {
   'On Hold': 'chip-gray', 'Closed': 'chip-gray',
 };
 
-const MRS_ACTIVITY_TRUNCATE_LEN = 70;
+// Found via real visual check on staging (not just "no errors"): a
+// single-line white-space:nowrap + CSS ellipsis truncation on this
+// column, at its actual rendered width (~250-300px in this app's real
+// content-area max-width), either clips the "▼ more" indicator itself
+// once the manually-truncated text plus the appended " (date)" suffix
+// exceeds that width, or -- without the ellipsis safety net -- visually
+// bleeds into the next column. Switched the cell to wrap normally
+// instead (white-space:normal) rather than chase an exact character
+// count against a width that varies with actual screen size -- a
+// wrapped 75-character preview comfortably fits 2 lines at this
+// column's real width with the indicator always visible, which a
+// single fixed-width line was never going to do reliably.
+const MRS_ACTIVITY_TRUNCATE_LEN = 75;
 
 function _mrsTruncate(text, len = MRS_ACTIVITY_TRUNCATE_LEN) {
   if (!text) return '';
@@ -7659,12 +7671,12 @@ function _mrsToggleExpand(matterId) {
 }
 
 const MRS_COLUMNS = [
-  { key: 'matter_name', label: 'Matter', width: '22%' },
-  { key: 'client_name', label: 'Client', width: '14%' },
-  { key: 'status', label: 'Status', width: '10%' },
-  { key: 'next_review_date', label: 'Next Review', width: '11%' },
-  { key: 'last_reviewed_date', label: 'Last Reviewed', width: '11%' },
-  { key: 'last_activity_date', label: 'Last Activity', width: '24%' },
+  { key: 'matter_name', label: 'Matter', width: '20%' },
+  { key: 'client_name', label: 'Client', width: '13%' },
+  { key: 'status', label: 'Status', width: '9%' },
+  { key: 'next_review_date', label: 'Next Review', width: '10%' },
+  { key: 'last_reviewed_date', label: 'Last Reviewed', width: '10%' },
+  { key: 'last_activity_date', label: 'Last Activity', width: '30%' },
   { key: 'created_by_name', label: 'Created By', width: '8%' },
 ];
 
@@ -7724,7 +7736,7 @@ function _mrsRenderTable() {
               <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.status || '')}</span></td>
               <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
               <td style="padding:6px 8px;white-space:nowrap">${r.last_reviewed_date || '<span style="color:var(--ink3)">Never reviewed</span>'}</td>
-              <td style="padding:6px 8px;${expanded ? 'white-space:normal;word-break:break-word' : 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'}">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
+              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.created_by_name || '')}</td>
             </tr>
           `;
@@ -8000,7 +8012,7 @@ function _mpRenderReviewTable() {
             <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
             <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name || '')}">${escHtml(r.client_name || '')}</td>
             <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
-            <td style="padding:6px 8px;${expanded ? 'white-space:normal;word-break:break-word' : 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'}">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
+            <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
           </tr>
         `;
         }).join('')}
