@@ -4497,6 +4497,16 @@ async def admin_practice_area_fix_real_test(request: Request):
             scratch_ids.append(row3["id"])
             path_results["bulk_import_matters"] = {"matter_type": "conveyancing", "practice_area": row3["practice_area"]}
 
+            # Path 4: a genuinely NULL-practice_area matter with a
+            # confidently-classifiable name, so the backfill run below
+            # actually exercises its UPDATE/sweep-up path for real,
+            # rather than only its "nothing to apply" path (staging's own
+            # real matters all happen to be ambiguous/no_match today).
+            name4 = "SCRATCH BACKFILL TEST — Trust deed administration (DELETE ME)"
+            row4 = await _create_matter_row(conn, FIRM_ID, name4, status="Active",
+                                             created_at=now, last_activity=now)  # practice_area left NULL
+            scratch_ids.append(row4["id"])
+
         # Real backfill run #1, against this environment's actual data.
         async with _db_pool.acquire() as conn:
             plan1 = await _pa_build_plan(conn)
@@ -4508,9 +4518,18 @@ async def admin_practice_area_fix_real_test(request: Request):
         # proving idempotency for real, not just in the fake-connection tests.
         async with _db_pool.acquire() as conn:
             plan2 = await _pa_build_plan(conn)
+            scratch4_row = await conn.fetchrow(
+                "SELECT practice_area FROM matters WHERE id=$1", row4["id"]
+            )
 
         return {
             "path_results": path_results,
+            "backfill_sweep_up_check": {
+                "scratch_matter_name": name4,
+                "practice_area_after_run_1": scratch4_row["practice_area"],
+                "was_in_run_1_to_apply": any(e["id"] == str(row4["id"]) for e in plan1["to_apply"]),
+                "still_in_run_2_to_apply": any(e["id"] == str(row4["id"]) for e in plan2["to_apply"]),
+            },
             "backfill_run_1": {"applied": len(plan1["to_apply"]), "left_for_review": len(plan1["review"])},
             "backfill_run_2_immediately_after": {
                 "applied_would_be": len(plan2["to_apply"]),
