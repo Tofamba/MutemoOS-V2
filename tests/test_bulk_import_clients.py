@@ -213,6 +213,86 @@ def test_bulk_import_docx_still_works_case_parties_null(monkeypatch):
     assert row["client_id"] is None
 
 
+# ── practice_area reuses the already-computed matter_type (fix, 2026-09-01) ─
+# detect_matter_type() was already classifying "Area of Law" text into a
+# real matter_type, then discarding that signal instead of also setting
+# practice_area -- every bulk-imported matter landed as "Uncategorized"
+# regardless of how specific the source law_type text was. See
+# backend/practice_areas.py's INTAKE_MATTER_TYPE_TO_PRACTICE_AREA (shared
+# with the client_intake fix -- same enum vocabulary).
+
+def test_bulk_import_xlsx_sets_practice_area_from_law_type(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_xlsx([{
+        "internal_ref": "NGM 11", "client_name": "Tendai Chikwanha",
+        "subject": "Unfair dismissal claim", "law_type": "employment",
+        "external_ref": "LC 61/26", "status": "Active",
+    }])
+    result = asyncio.run(bulk_import_matters(FakeUploadFile("import.xlsx", content), None))
+
+    assert result["matters"][0]["matter_type"] == "employment"
+    assert result["matters"][0]["practice_area"] == "Labour"
+    assert pool.conn.matters[0]["practice_area"] == "Labour"
+
+
+def test_bulk_import_xlsx_unrecognized_law_type_maps_to_other(monkeypatch):
+    """detect_matter_type() falls back to "other" when nothing in
+    LAW_TYPE_MAP matches -- mapped to the real "Other" practice area
+    bucket, not left NULL, same choice made for the intake path."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_xlsx([{
+        "internal_ref": "NGM 12", "client_name": "Jane Sithole",
+        "subject": "General consultation", "law_type": "something unrecognized",
+        "external_ref": "LC 62/26", "status": "Active",
+    }])
+    result = asyncio.run(bulk_import_matters(FakeUploadFile("import.xlsx", content), None))
+
+    assert result["matters"][0]["matter_type"] == "other"
+    assert result["matters"][0]["practice_area"] == "Other"
+
+
+def test_bulk_import_xlsx_multiple_rows_get_independently_correct_practice_areas(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_xlsx([
+        {"internal_ref": "NGM 13", "client_name": "Client A", "law_type": "trust", "external_ref": "LC 63/26"},
+        {"internal_ref": "NGM 14", "client_name": "Client B", "law_type": "debt collection", "external_ref": "LC 64/26"},
+        {"internal_ref": "NGM 15", "client_name": "Client C", "law_type": "conveyancing", "external_ref": "LC 65/26"},
+    ])
+    result = asyncio.run(bulk_import_matters(FakeUploadFile("import.xlsx", content), None))
+
+    by_ref = {row["internal_ref"]: row for row in pool.conn.matters}
+    assert by_ref["NGM 13"]["practice_area"] == "Trust"
+    assert by_ref["NGM 14"]["practice_area"] == "Debt Collection"
+    assert by_ref["NGM 15"]["practice_area"] == "Conveyancing/Property"
+
+
+def test_bulk_import_docx_also_sets_practice_area(monkeypatch):
+    """Regression check across both file formats -- build_matter_dict() is
+    shared by the xlsx and docx branches, so the docx path must get the
+    same fix for free."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    content = _build_docx([{
+        "internal_ref": "NGM 16", "client_name": "Peter Ndlovu", "subject": "Lease dispute",
+        "law_type": "property", "external_ref": "LC 66/26", "status": "Active",
+    }])
+    result = asyncio.run(bulk_import_matters(FakeUploadFile("import.docx", content), None))
+
+    assert pool.conn.matters[0]["matter_type"] == "commercial_property"
+    assert pool.conn.matters[0]["practice_area"] == "Conveyancing/Property"
+
+
 def test_bulk_import_rejects_unsupported_file_type():
     from fastapi import HTTPException
 

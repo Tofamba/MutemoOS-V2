@@ -108,3 +108,109 @@ def test_empty_database_produces_empty_plan():
     conn = FakeConnection([])
     plan = asyncio.run(_build_plan(conn))
     assert plan == {"to_apply": [], "review": []}
+
+
+# ── cmd_apply() end-to-end idempotency ──────────────────────────────────────
+# _build_plan() already recomputes fresh from live DB state every call (not
+# from a saved report) and only ever selects practice_area IS NULL rows --
+# confirming that translates into a genuinely safe re-run of the real apply
+# command, not just the read-only plan, per instruction.
+
+from types import SimpleNamespace
+
+from scripts.backfill_practice_areas import cmd_apply
+
+
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _ApplyFakeConnection(FakeConnection):
+    """Extends the report-only FakeConnection above with the execute()/
+    transaction()/close() machinery cmd_apply() actually needs."""
+
+    def __init__(self, matters):
+        super().__init__(matters)
+        self.executed = []
+
+    def transaction(self):
+        return _FakeTransaction()
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("UPDATE matters SET practice_area=$1 WHERE id=$2"):
+            practice_area, matter_id = args
+            for m in self.matters:
+                if m["id"] == matter_id:
+                    m["practice_area"] = practice_area
+            self.executed.append((practice_area, matter_id))
+            return "UPDATE 1"
+        raise NotImplementedError(f"FakeConnection.execute: unhandled query: {q}")
+
+    async def close(self):
+        pass
+
+
+def _apply_args(yes=True):
+    return SimpleNamespace(database_url="postgres://fake", yes=yes)
+
+
+def _run_apply_against(monkeypatch, conn, yes=True):
+    import scripts.backfill_practice_areas as m
+
+    class _FakeAsyncpg:
+        @staticmethod
+        async def connect(database_url):
+            return conn
+    monkeypatch.setattr(m, "asyncpg", _FakeAsyncpg())
+    asyncio.run(cmd_apply(_apply_args(yes=yes)))
+
+
+def test_apply_writes_confident_matches_and_leaves_review_matters_untouched(monkeypatch):
+    confident = _matter("Family Trust — Trust")
+    ambiguous = _matter("Mukweva and Paswa Civil — Debt collection/fraud")
+    conn = _ApplyFakeConnection([confident, ambiguous])
+
+    _run_apply_against(monkeypatch, conn)
+
+    assert confident["practice_area"] == "Trust"
+    assert ambiguous["practice_area"] is None
+    assert len(conn.executed) == 1
+
+
+def test_apply_is_idempotent_second_run_touches_nothing(monkeypatch):
+    """The real safety-net property: re-running `apply --yes` against a
+    database that already has this backfill's own results applied must
+    not re-write, double-apply, or error on anything -- _build_plan()'s
+    own WHERE practice_area IS NULL means an already-set matter is simply
+    invisible to the second run's plan."""
+    confident = _matter("Family Trust — Trust")
+    ambiguous = _matter("Mukweva and Paswa Civil — Debt collection/fraud")
+    conn = _ApplyFakeConnection([confident, ambiguous])
+
+    _run_apply_against(monkeypatch, conn)
+    first_run_writes = list(conn.executed)
+    assert len(first_run_writes) == 1
+
+    _run_apply_against(monkeypatch, conn)
+
+    # Zero additional writes on the second run -- the confident matter no
+    # longer matches practice_area IS NULL, and the ambiguous one was
+    # never written in the first place.
+    assert conn.executed == first_run_writes
+    assert confident["practice_area"] == "Trust"  # unchanged, not re-applied
+    assert ambiguous["practice_area"] is None  # still never guessed
+
+
+def test_apply_dry_run_without_yes_writes_nothing(monkeypatch):
+    confident = _matter("Family Trust — Trust")
+    conn = _ApplyFakeConnection([confident])
+
+    _run_apply_against(monkeypatch, conn, yes=False)
+
+    assert conn.executed == []
+    assert confident["practice_area"] is None

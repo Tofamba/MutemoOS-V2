@@ -640,6 +640,68 @@ def test_new_client_gets_a_not_yet_assessed_compliance_row(monkeypatch):
     assert row["risk_rating"] == "NotAssessed"
 
 
+# ── practice_area set from the intake matter_type enum (fix, 2026-09-01) ──
+# Previously req.matter_type (a controlled enum) was collected and stored
+# on matters.matter_type but never mapped onto practice_area at all --
+# every intake-created matter landed as "Uncategorized" in My Portfolio/
+# practice_area_breakdown regardless of how specific the enum value was.
+# See backend/practice_areas.py's INTAKE_MATTER_TYPE_TO_PRACTICE_AREA.
+
+def test_commit_sets_practice_area_from_matter_type(monkeypatch):
+    import backend.main as m
+    lawyer = _lawyer()
+    pool = FakePool(users=[lawyer])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientIntakeRequest(
+        client_name="Farai Chidziva", phone="+263772100012",
+        matter_type="conveyancing", matter_description="Stand 45 Marlborough — Transfer",
+        assigned_lawyer_id=str(lawyer["id"]), commit=True,
+    )
+    result = asyncio.run(client_intake(req, _fake_request()))
+
+    assert result["matter"]["practice_area"] == "Conveyancing/Property"
+    assert pool.conn.matters[0]["practice_area"] == "Conveyancing/Property"
+
+
+def test_preview_mode_also_reports_practice_area(monkeypatch):
+    import backend.main as m
+    lawyer = _lawyer()
+    pool = FakePool(users=[lawyer])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientIntakeRequest(
+        client_name="Farai Chidziva", phone="+263772100012",
+        matter_type="trust", matter_description="Family trust setup",
+        assigned_lawyer_id=str(lawyer["id"]), commit=False,
+    )
+    result = asyncio.run(client_intake(req, _fake_request()))
+
+    assert result["matter"]["practice_area"] == "Trust"
+    assert pool.conn.matters == []  # preview still writes nothing
+
+
+def test_matter_type_with_no_clean_practice_area_maps_to_other(monkeypatch):
+    """mining/customary_law are real INTAKE_MATTER_TYPES values with no
+    single clean PRACTICE_AREAS bucket -- map to "Other" (a real,
+    honest category), not left NULL, same convention as
+    backend/practice_areas.py's own module docstring."""
+    import backend.main as m
+    lawyer = _lawyer()
+    pool = FakePool(users=[lawyer])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = ClientIntakeRequest(
+        client_name="Tinashe Museba", phone="+263772100010",
+        matter_type="mining", matter_description="Mining claim dispute",
+        assigned_lawyer_id=str(lawyer["id"]), commit=True,
+    )
+    result = asyncio.run(client_intake(req, _fake_request()))
+
+    assert result["matter"]["practice_area"] == "Other"
+    assert pool.conn.matters[0]["practice_area"] == "Other"
+
+
 def test_matched_existing_client_gets_no_new_compliance_row(monkeypatch):
     """Reusing an existing client (matched or matched_explicit) must not
     create a second client_compliance row -- only a genuinely new client

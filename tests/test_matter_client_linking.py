@@ -365,6 +365,69 @@ def test_update_matter_rejects_a_practice_area_outside_the_fixed_list(monkeypatc
     assert exc_info.value.status_code == 422
 
 
+# ── practice_area auto-classification (fix, 2026-09-01) ──────────────────
+# create_matter previously never ran any classification at all -- every
+# matter created through the everyday New Matter form landed as
+# "Uncategorized" unless the caller explicitly picked a practice_area.
+# Now mirrors bulk_onboard_from_excel's existing best-effort pattern:
+# classify_practice_area(extract_classification_text(name)), applied only
+# on a confident single-category match.
+
+def test_create_matter_auto_classifies_from_name_when_not_supplied(monkeypatch):
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Chikwanha Estate — Estate administration and probate")
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result["practice_area"] == "Estate/Inheritance"
+
+
+def test_create_matter_explicit_practice_area_wins_over_auto_classification(monkeypatch):
+    """An explicitly-supplied practice_area (e.g. picked from the New
+    Matter form's dropdown) must never be silently overridden by keyword
+    classification, even if the name would classify differently."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Chikwanha Estate — Estate administration and probate",
+                        practice_area="Trust")
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result["practice_area"] == "Trust"
+
+
+def test_create_matter_ambiguous_name_stays_null_not_guessed(monkeypatch):
+    """"Debt collection/fraud" genuinely matches both Debt Collection and
+    Criminal -- must stay NULL, never guessed, same convention as
+    backend/practice_areas.py's own worked example."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Mukweva and Paswa — Debt collection/fraud")
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result.get("practice_area") is None
+
+
+def test_create_matter_no_match_name_stays_null(monkeypatch):
+    """Confirms test_create_matter_without_practice_area_leaves_it_null
+    above still holds for the real reason (no keyword matched), not by
+    coincidence -- a plain party-vs-party name with no descriptive half
+    carries no classification signal at all."""
+    import backend.main as m
+    pool = FakePool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    req = MatterCreate(name="Moyo v Dube")
+    result = asyncio.run(create_matter(req, _fake_request()))
+
+    assert result.get("practice_area") is None
+
+
 # ── update_matter ────────────────────────────────────────────────────────
 
 def test_update_matter_with_client_id_syncs_client_name(monkeypatch):

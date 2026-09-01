@@ -72,6 +72,37 @@ _PRACTICE_AREA_KEYWORDS = {
 }
 
 
+# Maps backend/main.py's INTAKE_MATTER_TYPES (the controlled enum
+# collected by POST /api/onboarding/intake's matter_type field) onto
+# PRACTICE_AREAS. No keyword classification needed for this path at all —
+# the lawyer already picked an unambiguous category from a fixed list at
+# intake time, so the only gap was that practice_area was never actually
+# set from it. Kept here (not in main.py) so it lives next to
+# PRACTICE_AREAS itself, the single source of truth for this concept.
+# Values without a clean single practice area (customary_law, mining) map
+# to "Other" -- an honest catch-all, same convention as the keyword
+# classifier's own "no confident match" behavior, not a guess.
+INTAKE_MATTER_TYPE_TO_PRACTICE_AREA = {
+    "eviction": "Conveyancing/Property",
+    "estate": "Estate/Inheritance",
+    "trust": "Trust",
+    "employment": "Labour",
+    "commercial_property": "Conveyancing/Property",
+    "commercial_contract": "Company/Commercial",
+    "conveyancing": "Conveyancing/Property",
+    "customary_law": "Other",
+    "matrimonial": "Family/Matrimonial",
+    "family_law": "Family/Matrimonial",
+    "company_law": "Company/Commercial",
+    "criminal": "Criminal",
+    "constitutional": "Litigation",
+    "debt_collection": "Debt Collection",
+    "mining": "Other",
+    "litigation_general": "Litigation",
+    "other": "Other",
+}
+
+
 def _normalize(text: str) -> str:
     s = (text or "").lower()
     s = re.sub(r"[^a-z0-9 ]", " ", s)

@@ -38,7 +38,7 @@ from backend.numbering import (
     format_client_number, format_matter_number,
 )
 from backend.case_binder import provision_case_binder
-from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text
+from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text, INTAKE_MATTER_TYPE_TO_PRACTICE_AREA
 from backend.conveyancing import CONVEYANCING_MILESTONES
 from backend.matter_stages import resolve_stage_sequence, stage_storage_field
 from backend.deadline_engine import try_compute_deadline
@@ -4555,6 +4555,18 @@ async def create_matter(matter: MatterCreate, request: Request):
     _check_permission(user, "matter:create")
     if matter.practice_area and matter.practice_area not in PRACTICE_AREAS:
         raise HTTPException(status_code=422, detail=f"practice_area must be one of: {', '.join(PRACTICE_AREAS)}")
+    practice_area = matter.practice_area
+    if not practice_area:
+        # Same opportunistic, best-effort classification
+        # bulk_onboard_from_excel already applies -- only a confident
+        # single-category keyword match is auto-applied; ambiguous/
+        # no-match matters are simply left NULL, never guessed. This was
+        # the one creation path with real free-text descriptions and no
+        # classification at all (confirmed via direct investigation --
+        # see [[project_practice_area_uncategorized]]).
+        classification = classify_practice_area(extract_classification_text(matter.name))
+        if classification["status"] == "matched":
+            practice_area = classification["practice_area"]
     now = datetime.utcnow()
     parsed_deadline = None
     if matter.next_deadline:
@@ -4593,7 +4605,7 @@ async def create_matter(matter: MatterCreate, request: Request):
             number=matter.number or matter.internal_ref,
             internal_ref=matter.internal_ref, external_ref=matter.external_ref,
             client_name=client_name, client_id=client_id, case_parties=matter.case_parties,
-            matter_type=matter.matter_type, practice_area=matter.practice_area,
+            matter_type=matter.matter_type, practice_area=practice_area,
             status=matter.status or "Active", custom_status=matter.custom_status,
             next_deadline=parsed_deadline, next_deadline_note=matter.next_deadline_note,
             numbering_client_number=numbering_client_number,
@@ -5370,6 +5382,15 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
             "id": mid, "name": matter_name, "number": internal_ref,
             "internal_ref": internal_ref or "", "external_ref": external_ref or "",
             "client_name": client_name or "", "matter_type": matter_type,
+            # Reuses this same function's own matter_type classification
+            # (LAW_TYPE_MAP/detect_matter_type() above) rather than leaving
+            # it unused -- previously computed a real category and then
+            # never wrote practice_area at all, the exact "duplicated but
+            # not wired up" gap confirmed by direct investigation (see
+            # [[project_practice_area_uncategorized]]). "other" and any
+            # value with no clean single practice area map to None, same
+            # as the keyword classifier's own no-guess convention.
+            "practice_area": INTAKE_MATTER_TYPE_TO_PRACTICE_AREA.get(matter_type),
             "status": status, "custom_status": "",
             "created_at": now, "last_activity": now,
             "document_count": 0, "notes": notes,
@@ -5482,7 +5503,8 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
                 conn, FIRM_ID, m["name"],
                 number=m["number"], internal_ref=m["internal_ref"], external_ref=m["external_ref"],
                 client_name=m["client_name"], case_parties=m["case_parties"],
-                matter_type=m["matter_type"], status=m["status"], custom_status=m["custom_status"],
+                matter_type=m["matter_type"], practice_area=m["practice_area"],
+                status=m["status"], custom_status=m["custom_status"],
                 created_at=m["created_at"], last_activity=m["last_activity"],
             )
             for note in m.get("notes", []):
@@ -5493,7 +5515,8 @@ async def bulk_import_matters(file: UploadFile = File(...), request: Request = N
             created.append({
                 "id": str(row["id"]), "name": m["name"],
                 "internal_ref": m["internal_ref"], "client_name": m["client_name"],
-                "status": m["status"], "matter_type": m["matter_type"]
+                "status": m["status"], "matter_type": m["matter_type"],
+                "practice_area": m["practice_area"],
             })
 
     return {"created": len(created), "skipped": len(skipped), "matters": created, "skipped_details": skipped}
@@ -6060,6 +6083,12 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
                     conn, FIRM_ID, req.matter_description,
                     client_name=client_full_name, client_id=client_id,
                     status="Active", matter_type=req.matter_type,
+                    # req.matter_type is already a controlled enum
+                    # (INTAKE_MATTER_TYPES) picked by the lawyer at
+                    # intake -- no keyword classification needed, just
+                    # the mapping onto PRACTICE_AREAS that was
+                    # previously never applied at all.
+                    practice_area=INTAKE_MATTER_TYPE_TO_PRACTICE_AREA.get(req.matter_type),
                     assigned_lawyer_id=lawyer_row["id"],
                     numbering_client_number=client_number,
                     created_by=lawyer_row["id"], created_at=now, last_activity=now,
@@ -6069,6 +6098,7 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
                 matter_result = {
                     "action": "created", "matter_id": str(matter_id), "matter_number": matter_number,
                     "name": req.matter_description, "matter_type": req.matter_type,
+                    "practice_area": INTAKE_MATTER_TYPE_TO_PRACTICE_AREA.get(req.matter_type),
                 }
 
                 binder_items = provision_case_binder(
@@ -6166,6 +6196,7 @@ async def client_intake(req: ClientIntakeRequest, request: Request):
             matter_result = {
                 "action": "would_create", "matter_id": None, "matter_number": matter_number,
                 "name": req.matter_description, "matter_type": req.matter_type,
+                "practice_area": INTAKE_MATTER_TYPE_TO_PRACTICE_AREA.get(req.matter_type),
             }
             binder_items = provision_case_binder(
                 {"matter_number": matter_number}, req.matter_type, {"full_name": client_full_name}
