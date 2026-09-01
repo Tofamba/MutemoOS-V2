@@ -4445,50 +4445,6 @@ async def admin_backfill_chroma_firm_id(request: Request):
 
     return summary
 
-# TEMPORARY — runs the real scripts/backfill_next_review_date.py sweep
-# in-process against this environment's actual matters, per instruction
-# ("run the next_review_date backfill now, before this feature is shown
-# to any real user... same pattern as the practice-area sweep"). A
-# standalone script invoked via `railway run` can't reach the private DB
-# host, same reason used for every other one-time admin endpoint this
-# session. Already verified correct end-to-end (including idempotency)
-# via 11 isolated fake-connection tests -- this is the actual, final
-# sweep of real matters, meant to be called once per environment then
-# removed.
-@app.post("/api/admin/run-next-review-date-backfill")
-async def admin_run_next_review_date_backfill(request: Request):
-    require_admin_token(request)
-    from scripts.backfill_next_review_date import _build_plan as _nrd_build_plan
-
-    async with _db_pool.acquire() as conn:
-        plan = await _nrd_build_plan(conn)
-        for e in plan["to_apply"]:
-            await conn.execute("UPDATE matters SET next_review_date=$1 WHERE id=$2",
-                                e["next_review_date"], _uuid_mod.UUID(e["id"]))
-
-    return {
-        "default_date": plan["default_date"],
-        "applied_count": len(plan["to_apply"]),
-        "applied": [{"id": e["id"], "name": e["name"], "status": e["status"]} for e in plan["to_apply"]],
-    }
-
-# TEMPORARY — re-verifies Matter Health's real distribution after the
-# next_review_date backfill above, per instruction ("verify it the same
-# way as the practice-area sweep... real numbers before/after"). Same
-# shape as the earlier (already removed) verify-matter-health endpoint.
-# Remove once verified.
-@app.get("/api/admin/verify-matter-health-after-backfill")
-async def admin_verify_matter_health_after_backfill(request: Request):
-    require_admin_token(request)
-    async with _db_pool.acquire() as conn:
-        rows = await _fetch_matter_review_status_rows(conn, lawyer_id=None, client_id=None, status=None)
-    from collections import Counter
-    return {
-        "total": len(rows),
-        "distribution": dict(Counter(r["matter_health"]["status"] for r in rows)),
-        "rows": rows,
-    }
-
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
