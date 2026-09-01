@@ -93,7 +93,8 @@ async def do_export(database_url: str, chroma_path: str, firm_id: str, out_path:
         chunk_cols = (
             "id, firm_id, document_id, matter_id, chunk_source, text, "
             "chunk_index, page_number, zlr_item_id, citation, case_name, "
-            "taxonomy_category, source_type, source_name, reference, created_at"
+            "taxonomy_category, source_type, source_name, reference, "
+            "validity_flag, created_at"
         )
         chunks = await conn.fetch(
             f"SELECT {chunk_cols} FROM chunks "
@@ -215,14 +216,16 @@ async def do_import(database_url: str, chroma_path: str, firm_id: str, in_path: 
                     id, firm_id, filename, source_type, source_name, reference,
                     document_type, matter_type, doc_date, court, word_count,
                     chunk_count, status, ocr_used, error_message, uploaded_at,
-                    source_url, scraped_at, ocr_confidence, needs_review
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+                    source_url, scraped_at, ocr_confidence, needs_review,
+                    legal_source_type, authority_strength, validity_flag
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
                 ON CONFLICT (id) DO NOTHING
             """,
                 r["id"], _uuid_mod.UUID(firm_id), r["filename"], r["source_type"], r["source_name"],
                 r["reference"], r["document_type"], r["matter_type"], r["doc_date"], r["court"],
                 r["word_count"], r["chunk_count"], r["status"], r["ocr_used"], r["error_message"],
                 r["uploaded_at"], r["source_url"], r["scraped_at"], r["ocr_confidence"], r["needs_review"],
+                r.get("legal_source_type"), r.get("authority_strength"), r.get("validity_flag"),
             )
 
         for row in zlr_entries:
@@ -238,9 +241,9 @@ async def do_import(database_url: str, chroma_path: str, firm_id: str, in_path: 
                     court, judge, case_type, hearing_date, judgment_date,
                     subject_chains, taxonomy_category, summary, raw_text,
                     word_count, chunk_count, ocr_used, ocr_confidence,
-                    needs_review, uploaded_at
+                    needs_review, uploaded_at, legal_source_type, authority_strength
                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                          $17::jsonb,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+                          $17::jsonb,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
                 ON CONFLICT (id) DO NOTHING
             """,
                 r["id"], _uuid_mod.UUID(firm_id), r["filename"], r["source"], r["jurisdiction"],
@@ -248,7 +251,7 @@ async def do_import(database_url: str, chroma_path: str, firm_id: str, in_path: 
                 r["judgment_number"], r["court"], r["judge"], r["case_type"], r["hearing_date"],
                 r["judgment_date"], subject_chains or "[]", r["taxonomy_category"], r["summary"],
                 r["raw_text"], r["word_count"], r["chunk_count"], r["ocr_used"], r["ocr_confidence"],
-                r["needs_review"], r["uploaded_at"],
+                r["needs_review"], r["uploaded_at"], r.get("legal_source_type"), r.get("authority_strength"),
             )
 
         for row in chunks:
@@ -258,14 +261,15 @@ async def do_import(database_url: str, chroma_path: str, firm_id: str, in_path: 
                 INSERT INTO chunks (
                     id, firm_id, document_id, matter_id, chunk_source, text,
                     chunk_index, page_number, zlr_item_id, citation, case_name,
-                    taxonomy_category, source_type, source_name, reference, created_at
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                    taxonomy_category, source_type, source_name, reference,
+                    validity_flag, created_at
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                 ON CONFLICT (id) DO NOTHING
             """,
                 r["id"], _uuid_mod.UUID(firm_id), r["document_id"], r["matter_id"], r["chunk_source"],
                 r["text"], r["chunk_index"], r["page_number"], r["zlr_item_id"], r["citation"],
                 r["case_name"], r["taxonomy_category"], r["source_type"], r["source_name"],
-                r["reference"], r["created_at"],
+                r["reference"], r.get("validity_flag"), r["created_at"],
             )
     finally:
         await conn.close()
