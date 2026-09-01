@@ -42,7 +42,7 @@ from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extra
 from backend.conveyancing import CONVEYANCING_MILESTONES
 from backend.matter_stages import resolve_stage_sequence, stage_storage_field
 from backend.deadline_engine import try_compute_deadline
-from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for
+from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for, AuthorityStrength
 from backend.authority_ranker import rerank
 from backend.docx_export import paragraphs_from_plain_text, paragraphs_from_html, build_docx_bytes
 
@@ -7860,6 +7860,20 @@ async def upload_legal_update(
 
     legal_source_type = classify_legal_update(source_type, reference)
     authority_strength = authority_strength_for(legal_source_type)
+    if validity_flag:
+        # A source whose own enactment/validity is disputed can never be
+        # treated as binding/persuasive authority for grounding-confidence
+        # purposes (backend/grounding.py's compute_grounding(), which keys
+        # authority_hits/sources_sufficient off authority_strength alone)
+        # -- regardless of what its underlying legal_source_type would
+        # normally imply. Found while actually ingesting the disputed
+        # Constitution of Zimbabwe Amendment Act No. 6 of 2026: its
+        # reference text contains "Constitution", which
+        # classify_legal_update() reads as CONSTITUTION -> BINDING, exactly
+        # the "presented as settled, binding law" outcome the validity_flag
+        # mechanism exists to prevent -- confirmed by reading
+        # compute_grounding() directly, not assumed.
+        authority_strength = AuthorityStrength.CONTEXTUAL
 
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""
@@ -7922,6 +7936,11 @@ async def admin_ingest_legal_update(
 
     legal_source_type = classify_legal_update(source_type, reference)
     authority_strength = authority_strength_for(legal_source_type)
+    if validity_flag:
+        # See the identical guard + comment in upload_legal_update() above --
+        # same reasoning, kept in sync since this wrapper duplicates that
+        # function's INSERT rather than calling it.
+        authority_strength = AuthorityStrength.CONTEXTUAL
 
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("""

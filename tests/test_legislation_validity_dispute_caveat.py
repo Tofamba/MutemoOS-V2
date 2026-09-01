@@ -240,3 +240,95 @@ def test_process_legal_update_background_leaves_validity_flag_null_when_not_pass
     assert len(chunk_inserts) >= 1
     for query, args in chunk_inserts:
         assert args[-1] is None
+
+
+# ── authority_strength must be downgraded when validity is disputed ────────
+# Found while actually ingesting Amendment Act No. 6 of 2026 (see
+# [[project_v1_migrated_legislation_unsearchable]]): its reference contains
+# "Constitution", so classify_legal_update() reads it as CONSTITUTION ->
+# authority_strength_for() returns BINDING -- and backend/grounding.py's
+# compute_grounding() keys "sources_sufficient"/"✓ Grounded in N
+# authoritative source(s)" purely off authority_strength, with no awareness
+# of validity_flag at all. Without this guard, a disputed-validity source
+# would silently present as confidently-grounded binding law -- exactly
+# what the validity_flag mechanism exists to prevent.
+
+import asyncio as _asyncio_authority
+
+
+class _FakeInsertConnection:
+    def __init__(self):
+        self.inserted_legal_updates = []
+
+    async def fetchrow(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO legal_updates"):
+            row = {"id": args[0], "firm_id": args[1], "filename": args[2], "authority_strength": args[9]}
+            self.inserted_legal_updates.append(row)
+            return row
+        raise NotImplementedError(f"unhandled query: {q}")
+
+    async def fetch(self, query, *args):
+        raise NotImplementedError(f"unhandled query: {query}")
+
+    async def execute(self, query, *args):
+        return "OK"
+
+
+class _FakeInsertPool:
+    def __init__(self):
+        self.conn = _FakeInsertConnection()
+
+    def acquire(self):
+        return _FakeAcquireCtx(self.conn)
+
+
+class _FakeBackgroundTasks:
+    def add_task(self, *args, **kwargs):
+        pass
+
+
+def test_upload_legal_update_downgrades_authority_strength_when_validity_flagged(monkeypatch):
+    import backend.main as m
+    pool = _FakeInsertPool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    class _FakeRequest:
+        headers = {}
+        cookies = {}
+
+    asyncio.run(m.upload_legal_update(
+        background_tasks=_FakeBackgroundTasks(),
+        file=None, source_type="legislation", source_name="Veritas",
+        reference="Constitution of Zimbabwe Amendment Act No. 6 of 2026",
+        source_url="", scraped_at="", summary="text", title="Amendment Act No. 6",
+        validity_flag="Enactment challenged — no referendum held per s.328",
+        request=_FakeRequest(),
+    ))
+
+    assert pool.conn.inserted_legal_updates[0]["authority_strength"] == "contextual"
+
+
+def test_upload_legal_update_leaves_authority_strength_alone_when_unflagged(monkeypatch):
+    """The base Constitution -- no validity dispute -- must keep its real
+    BINDING authority_strength. Zero regression for the common case."""
+    import backend.main as m
+    pool = _FakeInsertPool()
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    class _FakeRequest:
+        headers = {}
+        cookies = {}
+
+    asyncio.run(m.upload_legal_update(
+        background_tasks=_FakeBackgroundTasks(),
+        file=None, source_type="legislation", source_name="Veritas",
+        reference="Constitution of Zimbabwe, Consolidated as at 2023",
+        source_url="", scraped_at="", summary="text", title="Constitution",
+        validity_flag="",  # explicit -- calling the route function directly
+        # bypasses FastAPI's Form() resolution, so the real default
+        # (Form("")) would otherwise be a Form marker object, not "".
+        request=_FakeRequest(),
+    ))
+
+    assert pool.conn.inserted_legal_updates[0]["authority_strength"] == "binding"
