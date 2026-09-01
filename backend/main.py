@@ -6595,22 +6595,6 @@ async def _fetch_matter_review_status_rows(
         })
     return result
 
-# TEMPORARY — one-time real staging verification for Matter Health
-# (backend/matter_health.py), per instruction: "real verification against
-# actual matters (including Mould Enterprises and whatever's currently
-# overdue in the Matter Review Status data) before production." A real
-# staging login isn't available here (real phone/OTP required, same
-# limitation as every other real-environment verification this session),
-# so this calls _fetch_matter_review_status_rows() in-process -- the exact
-# function both the report and My Portfolio already use -- against this
-# environment's real data. Remove once verified.
-@app.get("/api/admin/verify-matter-health")
-async def admin_verify_matter_health(request: Request):
-    require_admin_token(request)
-    async with _db_pool.acquire() as conn:
-        rows = await _fetch_matter_review_status_rows(conn, lawyer_id=None, client_id=None, status=None)
-    return {"total": len(rows), "rows": rows}
-
 @app.get("/api/reports/matter-review-status")
 async def matter_review_status_report(
     request: Request,
