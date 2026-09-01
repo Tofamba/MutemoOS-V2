@@ -4444,6 +4444,85 @@ async def admin_backfill_chroma_firm_id(request: Request):
 
     return summary
 
+# TEMPORARY — one-time real-environment verification for the
+# practice_area fixes (create_matter/client_intake/bulk_import_matters
+# auto-classification). A real staging login isn't available here (real
+# phone/OTP required, confirmed via the browser), so this proves the
+# fix's actual logic -- classify_practice_area()/
+# INTAKE_MATTER_TYPE_TO_PRACTICE_AREA feeding _create_matter_row() --
+# against this environment's REAL Postgres schema, using the exact same
+# helper every one of the three fixed endpoints calls. The pytest suite
+# already exercises the real, unmodified endpoint functions themselves
+# (AUTH_ENABLED is False in that process); what's genuinely new here is
+# confirming the live schema/column accepts these writes for real. Also
+# runs the real backfill_practice_areas.py logic against this
+# environment's actual NULL-practice_area matters, twice, to confirm
+# idempotency for real (not just in the isolated fake-connection tests).
+# Scratch matters are deleted in a finally block; the backfill run is
+# real and NOT rolled back (that's the point -- it's the actual sweep the
+# user asked for). Remove this endpoint once verified.
+@app.post("/api/admin/practice-area-fix-real-test")
+async def admin_practice_area_fix_real_test(request: Request):
+    require_admin_token(request)
+    from scripts.backfill_practice_areas import _build_plan as _pa_build_plan
+
+    now = datetime.utcnow()
+    scratch_ids = []
+    path_results = {}
+    try:
+        async with _db_pool.acquire() as conn:
+            # Path 1: create_matter's new best-effort classification.
+            name1 = "SCRATCH TEST create_matter path — Estate administration and probate (DELETE ME)"
+            classification = classify_practice_area(extract_classification_text(name1))
+            pa1 = classification.get("practice_area") if classification["status"] == "matched" else None
+            row1 = await _create_matter_row(conn, FIRM_ID, name1, status="Active",
+                                             practice_area=pa1, created_at=now, last_activity=now)
+            scratch_ids.append(row1["id"])
+            path_results["create_matter"] = {"name": name1, "practice_area": row1["practice_area"]}
+
+            # Path 2: client_intake's INTAKE_MATTER_TYPE_TO_PRACTICE_AREA mapping.
+            pa2 = INTAKE_MATTER_TYPE_TO_PRACTICE_AREA.get("trust")
+            row2 = await _create_matter_row(conn, FIRM_ID, "SCRATCH TEST client_intake path (DELETE ME)",
+                                             status="Active", matter_type="trust", practice_area=pa2,
+                                             created_at=now, last_activity=now)
+            scratch_ids.append(row2["id"])
+            path_results["client_intake"] = {"matter_type": "trust", "practice_area": row2["practice_area"]}
+
+            # Path 3: bulk_import_matters reusing the same mapping on its
+            # own already-computed matter_type (detect_matter_type("conveyancing") == "conveyancing").
+            pa3 = INTAKE_MATTER_TYPE_TO_PRACTICE_AREA.get("conveyancing")
+            row3 = await _create_matter_row(conn, FIRM_ID, "SCRATCH TEST bulk_import_matters path (DELETE ME)",
+                                             status="Active", matter_type="conveyancing", practice_area=pa3,
+                                             created_at=now, last_activity=now)
+            scratch_ids.append(row3["id"])
+            path_results["bulk_import_matters"] = {"matter_type": "conveyancing", "practice_area": row3["practice_area"]}
+
+        # Real backfill run #1, against this environment's actual data.
+        async with _db_pool.acquire() as conn:
+            plan1 = await _pa_build_plan(conn)
+            for e in plan1["to_apply"]:
+                await conn.execute("UPDATE matters SET practice_area=$1 WHERE id=$2",
+                                    e["practice_area"], _uuid_mod.UUID(e["id"]))
+
+        # Real backfill run #2 immediately after -- must apply zero rows,
+        # proving idempotency for real, not just in the fake-connection tests.
+        async with _db_pool.acquire() as conn:
+            plan2 = await _pa_build_plan(conn)
+
+        return {
+            "path_results": path_results,
+            "backfill_run_1": {"applied": len(plan1["to_apply"]), "left_for_review": len(plan1["review"])},
+            "backfill_run_2_immediately_after": {
+                "applied_would_be": len(plan2["to_apply"]),
+                "left_for_review": len(plan2["review"]),
+                "idempotent": len(plan2["to_apply"]) == 0,
+            },
+        }
+    finally:
+        async with _db_pool.acquire() as conn:
+            for mid in scratch_ids:
+                await conn.execute("DELETE FROM matters WHERE id=$1 AND firm_id=$2", mid, FIRM_ID)
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
