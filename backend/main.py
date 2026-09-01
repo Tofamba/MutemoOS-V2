@@ -4472,6 +4472,23 @@ async def admin_run_next_review_date_backfill(request: Request):
         "applied": [{"id": e["id"], "name": e["name"], "status": e["status"]} for e in plan["to_apply"]],
     }
 
+# TEMPORARY — re-verifies Matter Health's real distribution after the
+# next_review_date backfill above, per instruction ("verify it the same
+# way as the practice-area sweep... real numbers before/after"). Same
+# shape as the earlier (already removed) verify-matter-health endpoint.
+# Remove once verified.
+@app.get("/api/admin/verify-matter-health-after-backfill")
+async def admin_verify_matter_health_after_backfill(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_matter_review_status_rows(conn, lawyer_id=None, client_id=None, status=None)
+    from collections import Counter
+    return {
+        "total": len(rows),
+        "distribution": dict(Counter(r["matter_health"]["status"] for r in rows)),
+        "rows": rows,
+    }
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
