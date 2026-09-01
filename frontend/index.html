@@ -2098,6 +2098,8 @@ select{cursor:pointer}
         <select id="mrs-filter-status" style="font-size:0.8rem;padding:4px 8px" onchange="loadMatterReviewStatus()">
           <option value="">All statuses</option>
         </select>
+        <input type="text" id="mrs-search" placeholder="🔍 Search matter or client…" oninput="_mrsSetSearch(this.value)"
+          style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:200px"/>
         <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterReviewStatusCsv()">⬇ Download CSV</button>
       </div>
       <div id="mrs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
@@ -7608,46 +7610,143 @@ function _mrsFilterParams() {
   return params;
 }
 
+// Redesigned 2026-09-01 -- the plain table broke down visually at real
+// scale (176 real matters, long free-text Last Activity notes with no
+// truncation or fixed column widths). Visual/UX fix only, per
+// instruction -- the fetch/filter contract with the backend
+// (_mrsFilterParams(), the /api/reports/matter-review-status shape)
+// is unchanged; everything below is purely how the same rows render.
+//
+// _mrsRows is cached client-side after fetch so search/sort/expand are
+// all instant re-renders, not re-fetches -- the backend already sorts
+// next_review_date ASC NULLS FIRST server-side, but a lawyer sorting by
+// a different column here shouldn't cost a round trip.
+let _mrsRows = [];
+let _mrsExpanded = new Set();
+let _mrsSort = { key: 'next_review_date', dir: 1 };
+let _mrsSearch = '';
+
+// Same chip-red/gold/green/gray classes Matter Health's badges use this
+// week (matterHealthChipHtml/deadlineChipHtml) -- reused here for visual
+// consistency, not because matters.status and matter_health.status are
+// the same concept (they aren't: this is the lawyer-set Active/Awaiting
+// Client/etc. field, matter_health is the separate computed indicator).
+const MRS_STATUS_CHIP = {
+  'Active': 'chip-green', 'Awaiting Client': 'chip-gold', 'Awaiting Court': 'chip-blue',
+  'On Hold': 'chip-gray', 'Closed': 'chip-gray',
+};
+
+const MRS_ACTIVITY_TRUNCATE_LEN = 70;
+
+function _mrsTruncate(text, len = MRS_ACTIVITY_TRUNCATE_LEN) {
+  if (!text) return '';
+  return text.length > len ? text.slice(0, len).trimEnd() + '…' : text;
+}
+
+function _mrsSetSearch(value) {
+  _mrsSearch = (value || '').trim().toLowerCase();
+  _mrsRenderTable();
+}
+
+function _mrsSetSort(key) {
+  _mrsSort = _mrsSort.key === key ? { key, dir: _mrsSort.dir * -1 } : { key, dir: 1 };
+  _mrsRenderTable();
+}
+
+function _mrsToggleExpand(matterId) {
+  if (_mrsExpanded.has(matterId)) _mrsExpanded.delete(matterId); else _mrsExpanded.add(matterId);
+  _mrsRenderTable();
+}
+
+const MRS_COLUMNS = [
+  { key: 'matter_name', label: 'Matter', width: '22%' },
+  { key: 'client_name', label: 'Client', width: '14%' },
+  { key: 'status', label: 'Status', width: '10%' },
+  { key: 'next_review_date', label: 'Next Review', width: '11%' },
+  { key: 'last_reviewed_date', label: 'Last Reviewed', width: '11%' },
+  { key: 'last_activity_date', label: 'Last Activity', width: '24%' },
+  { key: 'created_by_name', label: 'Created By', width: '8%' },
+];
+
+function _mrsRenderTable() {
+  const el = document.getElementById('matter-review-status-list');
+  const statusEl = document.getElementById('mrs-status');
+  if (!el) return;
+
+  let rows = _mrsRows;
+  if (_mrsSearch) {
+    rows = rows.filter(r =>
+      (r.matter_name || '').toLowerCase().includes(_mrsSearch) ||
+      (r.client_name || '').toLowerCase().includes(_mrsSearch)
+    );
+  }
+  const { key, dir } = _mrsSort;
+  rows = [...rows].sort((a, b) => {
+    const av = a[key] ?? '', bv = b[key] ?? '';
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  if (!rows.length) {
+    el.innerHTML = _mrsRows.length ? '<em>No matters match this search.</em>' : '<em>No matters match these filters.</em>';
+    statusEl.textContent = '';
+    return;
+  }
+
+  const sortArrow = (k) => _mrsSort.key === k ? (_mrsSort.dir === 1 ? ' ▲' : ' ▼') : '';
+
+  el.innerHTML = `
+    <div style="overflow:auto;max-height:65vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup>${MRS_COLUMNS.map(c => `<col style="width:${c.width}">`).join('')}</colgroup>
+      <thead>
+        <tr style="text-align:left">
+          ${MRS_COLUMNS.map(c => `
+            <th style="padding:6px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
+                       background:var(--paper2);border-bottom:1px solid var(--gold2);user-select:none;z-index:1"
+                onclick="_mrsSetSort('${c.key}')" title="Click to sort">${c.label}${sortArrow(c.key)}</th>
+          `).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => {
+          const expanded = _mrsExpanded.has(r.matter_id);
+          const needsExpand = (r.last_activity_text || '').length > MRS_ACTIVITY_TRUNCATE_LEN;
+          const activityText = expanded ? (r.last_activity_text || '') : _mrsTruncate(r.last_activity_text);
+          const activityDate = r.last_activity_date ? ` (${r.last_activity_date.slice(0, 10)})` : '';
+          const statusChip = MRS_STATUS_CHIP[r.status] || 'chip-gray';
+          return `
+            <tr style="border-bottom:1px solid var(--border);${needsExpand ? 'cursor:pointer' : ''}"
+                ${needsExpand ? `onclick="_mrsToggleExpand('${r.matter_id}')" title="${expanded ? 'Click to collapse' : 'Click to see full activity'}"` : ''}>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name || '')}">${escHtml(r.client_name || '')}</td>
+              <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.status || '')}</span></td>
+              <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${r.last_reviewed_date || '<span style="color:var(--ink3)">Never reviewed</span>'}</td>
+              <td style="padding:6px 8px;${expanded ? 'white-space:normal;word-break:break-word' : 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'}">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.created_by_name || '')}</td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+  statusEl.textContent = `${rows.length} matter${rows.length === 1 ? '' : 's'}${_mrsSearch ? ` (filtered from ${_mrsRows.length})` : ''}`;
+  statusEl.style.color = 'var(--ink3)';
+}
+
 async function loadMatterReviewStatus() {
   const el = document.getElementById('matter-review-status-list');
   const statusEl = document.getElementById('mrs-status');
   try {
     const res = await fetch(`${API}/api/reports/matter-review-status?${_mrsFilterParams()}`);
     if (!res.ok) { el.innerHTML = '<em>Could not load matter review status.</em>'; return; }
-    const rows = await res.json();
-    if (!rows.length) { el.innerHTML = '<em>No matters match these filters.</em>'; statusEl.textContent = ''; return; }
-    el.innerHTML = `
-      <div style="overflow-x:auto">
-      <table style="width:100%;border-collapse:collapse">
-        <thead>
-          <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
-            <th style="padding:6px 8px 6px 0;white-space:nowrap">Matter</th>
-            <th style="padding:6px 8px;white-space:nowrap">Client</th>
-            <th style="padding:6px 8px;white-space:nowrap">Status</th>
-            <th style="padding:6px 8px;white-space:nowrap">Next Review</th>
-            <th style="padding:6px 8px;white-space:nowrap">Last Reviewed</th>
-            <th style="padding:6px 8px;min-width:220px">Last Activity</th>
-            <th style="padding:6px 8px;white-space:nowrap">Created By</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map(r => `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:6px 8px 6px 0;white-space:nowrap">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
-              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.client_name || '')}</td>
-              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.status || '')}</td>
-              <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
-              <td style="padding:6px 8px;white-space:nowrap">${r.last_reviewed_date || '<span style="color:var(--ink3)">Never reviewed</span>'}</td>
-              <td style="padding:6px 8px">${escHtml(r.last_activity_text)}${r.last_activity_date ? ` <span style="color:var(--ink3);font-size:0.75rem">(${r.last_activity_date.slice(0,10)})</span>` : ''}</td>
-              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.created_by_name || '')}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-      </div>
-    `;
-    statusEl.textContent = `${rows.length} matter${rows.length === 1 ? '' : 's'}`;
-    statusEl.style.color = 'var(--ink3)';
+    _mrsRows = await res.json();
+    _mrsExpanded = new Set();
+    if (!_mrsRows.length) { el.innerHTML = '<em>No matters match these filters.</em>'; statusEl.textContent = ''; return; }
+    _mrsRenderTable();
   } catch(e) { el.innerHTML = '<em>Error loading matter review status.</em>'; }
 }
 
@@ -7850,29 +7949,61 @@ function _mpRenderReviewStatus(reviewStatus) {
     <span class="dash-badge dash-badge-green" style="background:var(--gold2);color:var(--ink2)">— Never reviewed: ${reviewStatus.never_reviewed_count}</span>
   `;
 
+  _mpReviewStatusRows = reviewStatus.matters;
+  _mpRenderReviewTable();
+}
+
+// Same overflow bug as the Matter Review Status report above (long
+// free-text Last Activity content, no fixed widths) -- fixed
+// consistently here too, per instruction. Scoped lighter than that
+// report's redesign (no search/sort): this table is bounded to one
+// lawyer's own caseload via My Portfolio, not the whole firm's, so
+// there's no real-world row count here that search/sort was actually
+// solving a problem for -- truncation + fixed widths + sticky header is
+// the actual fix for the actual bug, not a reason to add UI this table
+// doesn't need.
+let _mpReviewStatusRows = [];
+let _mpReviewExpanded = new Set();
+
+function _mpToggleReviewExpand(matterId) {
+  if (_mpReviewExpanded.has(matterId)) _mpReviewExpanded.delete(matterId); else _mpReviewExpanded.add(matterId);
+  _mpRenderReviewTable();
+}
+
+function _mpRenderReviewTable() {
   const tableEl = document.getElementById('mp-review-table');
-  const rows = reviewStatus.matters;
+  const rows = _mpReviewStatusRows;
   if (!rows.length) { tableEl.innerHTML = '<em style="color:var(--ink3)">No matters to review.</em>'; return; }
   tableEl.innerHTML = `
-    <div style="overflow-x:auto">
-    <table style="width:100%;border-collapse:collapse">
+    <div style="overflow:auto;max-height:50vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup>
+        <col style="width:28%"><col style="width:20%"><col style="width:14%"><col style="width:38%">
+      </colgroup>
       <thead>
-        <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
-          <th style="padding:6px 8px 6px 0;white-space:nowrap">Matter</th>
-          <th style="padding:6px 8px;white-space:nowrap">Client</th>
-          <th style="padding:6px 8px;white-space:nowrap">Next Review</th>
-          <th style="padding:6px 8px;min-width:220px">Last Activity</th>
+        <tr style="text-align:left">
+          <th style="padding:6px 8px;white-space:nowrap;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2);z-index:1">Matter</th>
+          <th style="padding:6px 8px;white-space:nowrap;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2);z-index:1">Client</th>
+          <th style="padding:6px 8px;white-space:nowrap;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2);z-index:1">Next Review</th>
+          <th style="padding:6px 8px;white-space:nowrap;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2);z-index:1">Last Activity</th>
         </tr>
       </thead>
       <tbody>
-        ${rows.map(r => `
-          <tr style="border-bottom:1px solid var(--border)">
-            <td style="padding:6px 8px 6px 0;white-space:nowrap">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
-            <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.client_name || '')}</td>
+        ${rows.map(r => {
+          const expanded = _mpReviewExpanded.has(r.matter_id);
+          const needsExpand = (r.last_activity_text || '').length > MRS_ACTIVITY_TRUNCATE_LEN;
+          const activityText = expanded ? (r.last_activity_text || '') : _mrsTruncate(r.last_activity_text);
+          const activityDate = r.last_activity_date ? ` (${r.last_activity_date.slice(0, 10)})` : '';
+          return `
+          <tr style="border-bottom:1px solid var(--border);${needsExpand ? 'cursor:pointer' : ''}"
+              ${needsExpand ? `onclick="_mpToggleReviewExpand('${r.matter_id}')" title="${expanded ? 'Click to collapse' : 'Click to see full activity'}"` : ''}>
+            <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
+            <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name || '')}">${escHtml(r.client_name || '')}</td>
             <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
-            <td style="padding:6px 8px">${escHtml(r.last_activity_text)}${r.last_activity_date ? ` <span style="color:var(--ink3);font-size:0.75rem">(${r.last_activity_date.slice(0,10)})</span>` : ''}</td>
+            <td style="padding:6px 8px;${expanded ? 'white-space:normal;word-break:break-word' : 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'}">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
           </tr>
-        `).join('')}
+        `;
+        }).join('')}
       </tbody>
     </table>
     </div>
