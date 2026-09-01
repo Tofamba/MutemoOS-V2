@@ -4506,8 +4506,11 @@ async def admin_corpus_snapshot_real_test(request: Request):
             if sample_chunk:
                 async with _db_pool.acquire() as conn:
                     pg_row = await conn.fetchrow(
+                        # chunks.id is TEXT, not UUID (chunk ids are plain
+                        # strings, unlike chunks.document_id) -- pass the
+                        # exported id straight through, no UUID() coercion.
                         "SELECT id, text FROM chunks WHERE id=$1 AND firm_id=$2",
-                        _uuid_mod.UUID(sample_chunk["id"]), scratch_firm_id,
+                        sample_chunk["id"], scratch_firm_id,
                     )
                 _, legal_col, zlr_col = get_chroma_collections()
                 col = legal_col if sample_chunk["chunk_source"] == "legal" else zlr_col
