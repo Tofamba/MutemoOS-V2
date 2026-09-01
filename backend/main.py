@@ -4402,6 +4402,50 @@ async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
             results[source] = entries
     return results
 
+# TEMPORARY — one-time re-confirmation for the v1-migrated legal_updates gap
+# (see the [[project_v1_migrated_legislation_unsearchable]] memory from an
+# earlier session). X-Admin-Token gated, same one-time-verification pattern
+# used repeatedly elsewhere. Re-checks: for every legal_updates row with no
+# source_url (the reliable v1-migrated marker -- migrate_to_postgres.py
+# never sets source_url/scraped_at, only mutemo-legal-feed's post-migration
+# pusher does), the claimed chunk_count vs actual chunks-table rows vs
+# actual Chroma vector count. Remove once the re-confirmation is done.
+@app.get("/api/admin/verify-v1-migrated-legal-updates")
+async def admin_verify_v1_migrated_legal_updates(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, filename, source_type, reference, doc_date, status, chunk_count, uploaded_at
+            FROM legal_updates
+            WHERE firm_id=$1 AND source_url IS NULL
+            ORDER BY filename
+        """, FIRM_ID)
+
+    _, legal_col, _ = get_chroma_collections()
+    results = []
+    for r in rows:
+        doc_id = str(r["id"])
+        async with _db_pool.acquire() as conn:
+            actual_chunks = await conn.fetchval(
+                "SELECT COUNT(*) FROM chunks WHERE document_id=$1 AND chunk_source='legal'", r["id"]
+            )
+        try:
+            chroma_hit = legal_col.get(where={"document_id": doc_id})
+            actual_vectors = len(chroma_hit.get("ids", []))
+        except Exception as e:
+            actual_vectors = f"error: {e}"
+        results.append({
+            "id": doc_id, "filename": r["filename"], "reference": r["reference"],
+            "status": r["status"], "claimed_chunk_count": r["chunk_count"],
+            "actual_chunks_rows": actual_chunks, "actual_chroma_vectors": actual_vectors,
+            "gap": r["status"] == "complete" and r["chunk_count"] > 0 and actual_chunks == 0,
+        })
+    return {
+        "total_v1_migrated_rows": len(results),
+        "rows_with_confirmed_gap": sum(1 for r in results if r["gap"]),
+        "rows": results,
+    }
+
 # TEMPORARY — one-time backfill for Multi-tenancy hardening (Part 3): puts
 # firm_id into every pre-existing firm_precedents chunk's Chroma metadata
 # so _semantic_search_firm()'s new where={"firm_id": ...} filter doesn't
