@@ -7890,6 +7890,75 @@ async def upload_legal_update(
     return {**_row_to_doc(row), "processing": True,
             "message": "Document received. Indexing is running in the background."}
 
+# TEMPORARY — one-time manual ingestion wrapper for the Constitution
+# re-ingestion (base 2023 consolidated text + the separately-flagged
+# Amendment Act No. 6 of 2026 + Constitution Watch 8/2026 bulletin), per
+# [[project_v1_migrated_legislation_unsearchable]]. The real
+# /api/legal-updates/upload only accepts the feed-service token (not to be
+# reused for a manual one-off) or a genuine logged-in user session (none
+# available here) — this reuses the exact same underlying INSERT +
+# _process_legal_update_background() logic, gated by X-Admin-Token
+# instead. Unlike the real endpoint, this AWAITS the background function
+# directly rather than firing it via BackgroundTasks, so the response
+# itself reports the real chunk count immediately — no separate polling
+# needed to confirm a document actually indexed. Remove once the three
+# documents are confirmed ingested with real (non-zero) chunk counts.
+@app.post("/api/admin/ingest-legal-update")
+async def admin_ingest_legal_update(
+    request: Request,
+    file: UploadFile = File(...),
+    source_type: str = Form(...),
+    source_name: str = Form(""),
+    reference: str = Form(""),
+    title: str = Form(""),
+    validity_flag: str = Form(""),
+):
+    require_admin_token(request)
+
+    content = await file.read()
+    filename = title.strip() or file.filename or "document"
+    ext = (file.filename or "").lower().rsplit(".", 1)[-1] if file.filename and "." in file.filename else "bin"
+    item_id = str(_uuid_mod.uuid4())
+
+    legal_source_type = classify_legal_update(source_type, reference)
+    authority_strength = authority_strength_for(legal_source_type)
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO legal_updates
+                (id, firm_id, filename, source_type, source_name, reference,
+                 status, uploaded_at, legal_source_type, authority_strength, validity_flag)
+            VALUES ($1,$2,$3,$4,$5,$6,'processing',NOW(),$7,$8,$9)
+            RETURNING *
+        """,
+        _uuid_mod.UUID(item_id), FIRM_ID, filename, source_type, source_name, reference,
+        legal_source_type.value, authority_strength.value, validity_flag or None
+        )
+
+    await _process_legal_update_background(
+        item_id, content, filename, ext, source_type, source_name, reference,
+        summary="", validity_flag=validity_flag or None,
+    )
+
+    async with _db_pool.acquire() as conn:
+        final_row = await conn.fetchrow("SELECT * FROM legal_updates WHERE id=$1", _uuid_mod.UUID(item_id))
+        actual_chunks = await conn.fetchval(
+            "SELECT COUNT(*) FROM chunks WHERE document_id=$1 AND chunk_source='legal'", _uuid_mod.UUID(item_id)
+        )
+
+    _, legal_col, _ = get_chroma_collections()
+    try:
+        chroma_hit = legal_col.get(where={"document_id": item_id})
+        actual_vectors = len(chroma_hit.get("ids", []))
+    except Exception as e:
+        actual_vectors = f"error: {e}"
+
+    return {
+        **_row_to_doc(final_row),
+        "actual_chunks_rows": actual_chunks,
+        "actual_chroma_vectors": actual_vectors,
+    }
+
 @app.delete("/api/legal-updates/{item_id}")
 async def delete_legal_update(item_id: str, request: Request):
     user = await get_current_user(request)
