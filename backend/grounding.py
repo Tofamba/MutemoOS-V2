@@ -291,7 +291,20 @@ def format_context(results: list, legal_results: list, zlr_results: list) -> str
             context_parts.append(f"[FIRM PRECEDENT — {filename}]\n{r['text']}")
     for r in (legal_results or [])[:3]:
         ref = r.get("reference") or r.get("source_name") or "Legal Source"
-        if r.get("source_type") in CONTEXT_SOURCE_TYPES:
+        # Same mechanism as the firm-precedent DRAFT/REVIEW/SUPERSEDED
+        # label above -- but this is NOT that mechanism. documents.
+        # document_status is a firm-precedent lifecycle concept (Draft
+        # awaiting sign-off, etc.) with no equivalent on legislation.
+        # validity_flag is a distinct, legislation-specific concept: the
+        # legislation's own ENACTMENT is disputed (e.g. Veritas's published
+        # position that Constitution Amendment Act No. 6 of 2026 was never
+        # validly enacted, s.328 referendum never held). Checked deliberately
+        # rather than assumed to already be covered by the firm-precedent
+        # mechanism -- confirmed it wasn't before adding this.
+        validity_flag = r.get("validity_flag")
+        if validity_flag:
+            context_parts.append(f"[LEGISLATION — {ref} — ⚠ VALIDITY DISPUTED: {validity_flag}]\n{r['text']}")
+        elif r.get("source_type") in CONTEXT_SOURCE_TYPES:
             context_parts.append(f"[BACKGROUND CONTEXT — {ref} ({r.get('source_type')})]\n{r['text']}")
         else:
             context_parts.append(f"[{ref}]\n{r['text']}")

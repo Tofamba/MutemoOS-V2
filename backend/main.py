@@ -671,6 +671,21 @@ async def run_migrations():
         ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS legal_source_type TEXT;
         ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS authority_strength TEXT;
         CREATE INDEX IF NOT EXISTS idx_legal_updates_legal_type ON legal_updates(legal_source_type);
+        -- Validity-dispute flag (2026-09-01): legislation whose enactment is
+        -- itself genuinely, publicly disputed (e.g. Veritas's published
+        -- position that Constitution Amendment Act No. 6 of 2026 was never
+        -- validly enacted -- s.328 required a referendum that never
+        -- happened). Free text, not a boolean, since the caveat needs to
+        -- say WHY, not just that something's wrong. Distinct from
+        -- documents.document_status (Draft/Review/Final/...), which is a
+        -- firm-precedent lifecycle concept and doesn't apply to legislation
+        -- at all -- confirmed by reading _semantic_search_legal()/
+        -- format_context() directly rather than assuming the DRAFT-status
+        -- caveat mechanism already covers this. Denormalized onto chunks
+        -- too (see the chunks table below), same convention already used
+        -- for source_type/source_name/reference on legal chunks, so
+        -- format_context() can surface it without a join at query time.
+        ALTER TABLE legal_updates ADD COLUMN IF NOT EXISTS validity_flag TEXT;
 
         CREATE TABLE IF NOT EXISTS zlr_entries (
             id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -778,6 +793,11 @@ async def run_migrations():
         CREATE INDEX IF NOT EXISTS idx_chunks_firm ON chunks(firm_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(firm_id, chunk_source);
+        -- Denormalized from legal_updates.validity_flag at chunk-creation
+        -- time, same convention as source_type/source_name/reference above
+        -- -- lets format_context() surface a disputed-validity caveat
+        -- directly in the text the model reads, with no join needed.
+        ALTER TABLE chunks ADD COLUMN IF NOT EXISTS validity_flag TEXT;
         -- reconcile_chroma_index() used to compare ChromaDB against Postgres
         -- by COUNT(*) alone -- equal counts were treated as "in sync" even
         -- if the actual chunk contents differed (e.g. a stale/wrong vector
@@ -7702,8 +7722,15 @@ async def list_legal_updates(source_type: Optional[str] = None, request: Request
 
 async def _process_legal_update_background(item_id: str, content: bytes, filename: str, ext: str,
                                             source_type: str, source_name: str, reference: str,
-                                            summary: str = ""):
-    """Background task: extract, classify, chunk, and index a legal update document."""
+                                            summary: str = "", validity_flag: Optional[str] = None):
+    """Background task: extract, classify, chunk, and index a legal update document.
+
+    validity_flag: free-text caveat for legislation whose enactment is
+    itself disputed (see legal_updates.validity_flag's own comment in
+    run_migrations()) -- denormalized onto every chunk, same as
+    source_type/source_name/reference, so format_context() can surface it
+    directly in what the model reads without a join.
+    """
     text = ""
     word_count = 0
     page_count = 1
@@ -7743,19 +7770,21 @@ async def _process_legal_update_background(item_id: str, content: bytes, filenam
             c["source_type"] = source_type
             c["source_name"] = source_name
             c["reference"] = reference
+            c["validity_flag"] = validity_flag
         if new_chunks:
             await asyncio.to_thread(index_chunks_in_chroma, new_chunks, "legal")
             async with _db_pool.acquire() as conn:
                 for c in new_chunks:
                     await conn.execute("""
                         INSERT INTO chunks (id, firm_id, document_id, matter_id, chunk_source,
-                                           text, chunk_index, page_number, source_type, source_name, reference, created_at)
-                        VALUES ($1,$2,$3,'legal_updates','legal',$4,$5,$6,$7,$8,$9,NOW())
+                                           text, chunk_index, page_number, source_type, source_name, reference,
+                                           validity_flag, created_at)
+                        VALUES ($1,$2,$3,'legal_updates','legal',$4,$5,$6,$7,$8,$9,$10,NOW())
                         ON CONFLICT (id) DO NOTHING
                     """,
                     c["id"], FIRM_ID, _uuid_mod.UUID(item_id),
                     c["text"], c["chunk_index"], c.get("page_number", 1),
-                    source_type, source_name, reference
+                    source_type, source_name, reference, validity_flag
                     )
             chunk_count = len(new_chunks)
 
@@ -7796,6 +7825,7 @@ async def upload_legal_update(
     scraped_at: str = Form(""),
     summary: str = Form(""),
     title: str = Form(""),
+    validity_flag: str = Form(""),
     request: Request = None,
 ):
     if request:
@@ -7836,14 +7866,14 @@ async def upload_legal_update(
             INSERT INTO legal_updates
                 (id, firm_id, filename, source_type, source_name, reference,
                  source_url, scraped_at, status, uploaded_at,
-                 legal_source_type, authority_strength)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'processing',NOW(),$9,$10)
+                 legal_source_type, authority_strength, validity_flag)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'processing',NOW(),$9,$10,$11)
             ON CONFLICT (firm_id, source_url) WHERE source_url IS NOT NULL DO NOTHING
             RETURNING *
         """,
         _uuid_mod.UUID(item_id), FIRM_ID, filename, source_type, source_name, reference,
         source_url or None, scraped_at_ts,
-        legal_source_type.value, authority_strength.value
+        legal_source_type.value, authority_strength.value, validity_flag or None
         )
 
     if not row:
@@ -7854,7 +7884,7 @@ async def upload_legal_update(
 
     background_tasks.add_task(
         _process_legal_update_background, item_id, content, filename, ext,
-        source_type, source_name, reference, summary
+        source_type, source_name, reference, summary, validity_flag or None
     )
 
     return {**_row_to_doc(row), "processing": True,
@@ -7932,6 +7962,12 @@ async def search_legal_updates(req: LegalUpdateSearchRequest, request: Request):
             "court": item.get("court"),
             "page_number": chunk.get("page_number"),
             "chunk_index": chunk.get("chunk_index"),
+            # Surfaced here too, not just in the AI-synthesis path
+            # (format_context()) -- a lawyer browsing raw keyword-search
+            # results directly (this endpoint never synthesizes an answer)
+            # deserves the same disputed-validity caveat, not just someone
+            # who happens to trigger AI synthesis on the same chunk.
+            "validity_flag": item.get("validity_flag"),
         })
     return {"answer": None, "results": results}
 
@@ -10131,6 +10167,7 @@ def _semantic_search_legal(req, chunks: list) -> list:
                     "reference": chunk.get("reference"),
                     "legal_source_type": chunk.get("legal_source_type"),
                     "authority_strength": chunk.get("authority_strength"),
+                    "validity_flag": chunk.get("validity_flag"),
                 })
                 if len(results) >= req.limit:
                     break
@@ -10195,14 +10232,16 @@ RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT
 - Where firm precedent or legal sources below are relevant, cross-reference them explicitly (e.g. "this clause is consistent with/departs from [reference]")
 - If the document appears to have a legal defect, gap, or unusual provision, flag it clearly
 - If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection
-- If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
+- If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent
+- If a legislation source below is labeled VALIDITY DISPUTED, explicitly state that its enactment is disputed and why (using the reason given in the label) — never present it as settled, binding law, and never silently treat it as amending or superseding another source""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
     else:
         instructions = """Answer directly and practically:
 - If firm precedents are present, identify patterns and note them by document ID
 - If legislation or case law is present, summarise the relevant legal position and cite by reference
 - Flag variations over time
 - For drafting queries, suggest specific language from the firm precedents
-- If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
+- If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent
+- If a legislation source below is labeled VALIDITY DISPUTED, explicitly state that its enactment is disputed and why (using the reason given in the label) — never present it as settled, binding law, and never silently treat it as amending or superseding another source""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
 
     try:
         msg = client.messages.create(
