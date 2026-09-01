@@ -4444,6 +4444,103 @@ async def admin_backfill_chroma_firm_id(request: Request):
 
     return summary
 
+# TEMPORARY — one-time REAL staging test for the corpus-snapshot tooling
+# (scripts/corpus_snapshot.py), per [[project_corpus_snapshot_tooling]].
+# Runs the real export -> consistency gate -> import sequence against
+# THIS environment's actual DATABASE_URL/CHROMA_DATA_DIR (a standalone
+# script invoked via `railway run` can't reach the private DB host or
+# Chroma volume -- same reason prior one-time admin endpoints this
+# session ran in-process instead, e.g. admin_backfill_chroma_firm_id
+# above). Deliberately does NOT touch R2 -- this is validating the
+# riskiest, newest logic (the gate, and cross-firm-id resolution) against
+# real data before anything is wired to the actual shared snapshot path,
+# per instruction ("staging-first with a real restore-and-search test
+# before anything touches the shared snapshot path").
+#
+# Imports this environment's real corpus into a SCRATCH firm_id (a throwaway
+# `firms` row created and deleted within this same call), then proves the
+# restore actually resolves: picks one real chunk from the export and
+# confirms it's independently findable both in Postgres (scoped to the
+# scratch firm_id) and in Chroma (by the same preserved id) -- the same
+# id-resolution risk copy_shared_corpus_to_new_firm.py's own docstring
+# was originally tested against. Cascade-deletes the scratch firm's
+# Postgres rows in a finally block; Chroma vectors need no cleanup since
+# legal_updates/zlr_index are firm-unscoped and ids are preserved, not
+# regenerated -- nothing new was actually written there, only resolved.
+# Remove this endpoint once this test has run and its results are confirmed.
+@app.post("/api/admin/corpus-snapshot-real-test")
+async def admin_corpus_snapshot_real_test(request: Request):
+    require_admin_token(request)
+    import json
+    import tempfile
+    from scripts.copy_shared_corpus_to_new_firm import do_export, do_import
+    from scripts.corpus_snapshot import compute_consistency_gate
+
+    database_url = os.environ["DATABASE_URL"]
+    chroma_path = os.environ.get(
+        "CHROMA_DATA_DIR", os.path.join(os.path.dirname(__file__), "..", "data", "chroma")
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        export_path = os.path.join(tmp, "corpus.json")
+        await do_export(database_url, chroma_path, str(FIRM_ID), export_path)
+        with open(export_path, "r", encoding="utf-8") as f:
+            export = json.load(f)
+
+        gate = compute_consistency_gate(export)
+        if not gate["clean"]:
+            return {"gate": gate, "restore_test": "skipped -- gate is not clean, fix the underlying documents first"}
+
+        scratch_firm_id = _uuid_mod.uuid4()
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO firms (id, name) VALUES ($1, $2)",
+                scratch_firm_id, "SCRATCH corpus-snapshot test firm (DELETE ME)"
+            )
+
+        try:
+            await do_import(database_url, chroma_path, str(scratch_firm_id), export_path, apply=True)
+
+            resolution = None
+            sample_chunk = export["chunks"][0] if export["chunks"] else None
+            if sample_chunk:
+                async with _db_pool.acquire() as conn:
+                    pg_row = await conn.fetchrow(
+                        "SELECT id, text FROM chunks WHERE id=$1 AND firm_id=$2",
+                        _uuid_mod.UUID(sample_chunk["id"]), scratch_firm_id,
+                    )
+                _, legal_col, zlr_col = get_chroma_collections()
+                col = legal_col if sample_chunk["chunk_source"] == "legal" else zlr_col
+                chroma_hit = col.get(ids=[sample_chunk["id"]])
+                resolution = {
+                    "sample_chunk_id": sample_chunk["id"],
+                    "chunk_source": sample_chunk["chunk_source"],
+                    "postgres_row_found_under_scratch_firm": pg_row is not None,
+                    "chroma_vector_found": len(chroma_hit.get("ids", [])) == 1,
+                    "text_matches_between_postgres_and_export": (pg_row["text"] == sample_chunk["text"]) if pg_row else False,
+                }
+
+            async with _db_pool.acquire() as conn:
+                counts = {
+                    "chunks": await conn.fetchval("SELECT COUNT(*) FROM chunks WHERE firm_id=$1", scratch_firm_id),
+                    "legal_updates": await conn.fetchval("SELECT COUNT(*) FROM legal_updates WHERE firm_id=$1", scratch_firm_id),
+                    "zlr_entries": await conn.fetchval("SELECT COUNT(*) FROM zlr_entries WHERE firm_id=$1", scratch_firm_id),
+                }
+
+            return {
+                "gate": gate,
+                "scratch_firm_id": str(scratch_firm_id),
+                "restored_counts": counts,
+                "resolution_check": resolution,
+            }
+        finally:
+            # Cascade-deletes every Postgres row written under this
+            # scratch firm_id (legal_updates/zlr_entries/chunks all
+            # REFERENCES firms(id) ON DELETE CASCADE). Chroma is untouched
+            # deliberately -- see the comment above this endpoint.
+            async with _db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM firms WHERE id=$1", scratch_firm_id)
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
