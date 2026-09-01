@@ -4444,33 +4444,6 @@ async def admin_backfill_chroma_firm_id(request: Request):
 
     return summary
 
-# TEMPORARY — runs the real scripts/backfill_practice_areas.py sweep
-# in-process against this environment's actual matters, per instruction
-# ("re-run backfill_practice_areas.py afterward against staging first,
-# then production"). A standalone script invoked via `railway run` can't
-# reach the private DB host, same reason used for every other one-time
-# admin endpoint this session. Already verified correct end-to-end
-# (including its UPDATE/sweep-up path and idempotency) against staging
-# with synthetic scratch data -- this is the actual, final sweep of real
-# matters, meant to be called once per environment then removed.
-@app.post("/api/admin/run-practice-area-backfill")
-async def admin_run_practice_area_backfill(request: Request):
-    require_admin_token(request)
-    from scripts.backfill_practice_areas import _build_plan as _pa_build_plan
-
-    async with _db_pool.acquire() as conn:
-        plan = await _pa_build_plan(conn)
-        for e in plan["to_apply"]:
-            await conn.execute("UPDATE matters SET practice_area=$1 WHERE id=$2",
-                                e["practice_area"], _uuid_mod.UUID(e["id"]))
-
-    return {
-        "applied_count": len(plan["to_apply"]),
-        "applied": plan["to_apply"],
-        "left_for_review_count": len(plan["review"]),
-        "left_for_review": plan["review"],
-    }
-
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
