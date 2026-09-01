@@ -7959,6 +7959,28 @@ async def admin_ingest_legal_update(
         "actual_chroma_vectors": actual_vectors,
     }
 
+# TEMPORARY — companion to admin_ingest_legal_update() above: lets a smoke
+# test (or a mistaken ingest) be cleaned up without a real session, same
+# X-Admin-Token gate. Remove alongside the ingest wrapper.
+@app.delete("/api/admin/legal-update/{item_id}")
+async def admin_delete_legal_update(item_id: str, request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        chunk_rows = await conn.fetch(
+            "SELECT id FROM chunks WHERE document_id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(item_id), FIRM_ID
+        )
+        chunk_ids = [r["id"] for r in chunk_rows]
+        result = await conn.execute(
+            "DELETE FROM legal_updates WHERE id=$1 AND firm_id=$2",
+            _uuid_mod.UUID(item_id), FIRM_ID
+        )
+    if result == "DELETE 0":
+        raise HTTPException(status_code=404, detail="Not found")
+    if chunk_ids:
+        await asyncio.to_thread(remove_chunks_from_chroma, chunk_ids, "legal")
+    return {"deleted": True}
+
 @app.delete("/api/legal-updates/{item_id}")
 async def delete_legal_update(item_id: str, request: Request):
     user = await get_current_user(request)
