@@ -26,13 +26,21 @@ Postgres/Chroma read/write logic. This script adds three things on top:
    (or the next onboarding run) can see what's in a snapshot without
    downloading and inspecting the full corpus file.
 
-3. R2 (S3-compatible) transport: uploads to a DEDICATED
-   CORPUS_SNAPSHOT_BUCKET (never the per-firm documents bucket used for
-   client uploads) at corpus-snapshots/<utc-timestamp>/ (permanent
-   history) and corpus-snapshots/latest/ (the rolling pointer real
-   onboarding reads from). Same R2 endpoint/credentials as the app's
-   existing document storage (R2_ENDPOINT/R2_ACCESS_KEY_ID/
-   R2_SECRET_ACCESS_KEY) -- just a different bucket.
+3. R2 (S3-compatible) transport: uploads under a dedicated
+   corpus-snapshots/ prefix at corpus-snapshots/<utc-timestamp>/
+   (permanent history) and corpus-snapshots/latest/ (the rolling pointer
+   real onboarding reads from), inside whatever bucket CORPUS_SNAPSHOT_BUCKET
+   names. Same R2 endpoint/credentials as the app's existing document
+   storage (R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY).
+   Real-provisioning finding (2026-09-02): the existing R2 credential is
+   scoped to the single mutemoos-documents bucket, not account-wide
+   (confirmed live -- ListBuckets 403s with AccessDenied) -- creating a
+   genuinely separate bucket would need a brand new R2 API token that
+   nothing in this codebase can create, so CORPUS_SNAPSHOT_BUCKET is set
+   to the existing mutemoos-documents bucket, isolated from per-firm
+   client uploads by the corpus-snapshots/ key prefix alone, not by a
+   separate bucket. No new credential to manage. Revisit if a genuinely
+   account-scoped R2 token is ever provisioned by hand for other reasons.
 
 Manual trigger only, by design -- run this deliberately at whatever
 cadence onboarding actually needs, not on every legal-feed scrape. Wired
