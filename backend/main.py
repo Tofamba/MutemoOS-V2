@@ -4290,33 +4290,6 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
-# TEMPORARY -- Mutemo Test Partner's seeded placeholder phone number
-# (+263770000001) isn't a real, reachable number, so OTP login as that
-# account can't actually work. Updating it to a real number the user can
-# receive SMS at (2026-09-02). Removed once done.
-@app.post("/api/admin/staging-update-user-phone")
-async def admin_staging_update_user_phone(request: Request):
-    require_admin_token(request)
-    body = await request.json()
-    display_name = body["display_name"]
-    new_phone = body["phone"]
-    async with _db_pool.acquire() as conn:
-        existing = await conn.fetchrow(
-            "SELECT display_name FROM users WHERE firm_id=$1 AND phone=$2", FIRM_ID, new_phone
-        )
-        if existing:
-            raise HTTPException(
-                status_code=409,
-                detail=f"{new_phone} is already in use by {existing['display_name']}"
-            )
-        row = await conn.fetchrow(
-            "UPDATE users SET phone=$1 WHERE firm_id=$2 AND display_name=$3 RETURNING id, display_name, phone, is_active",
-            new_phone, FIRM_ID, display_name
-        )
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
-    return dict(row) | {"id": str(row["id"])}
-
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
