@@ -4306,6 +4306,115 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- URGENT direct forensic investigation (2026-09-02): Money
+# Laundering and Proceeds of Crime Act sections reportedly unretrievable
+# via Search Vault despite being cited earlier this week. Read-only --
+# no writes, no deletes. Checks legal_updates rows, real chunks rows,
+# real Chroma vectors for those exact chunk ids, orphaned chunks (in case
+# the legal_updates row itself is gone but chunks survive, or vice versa),
+# and runs one real semantic query against the actual production Chroma
+# collection to test the live retrieval path end to end, not just presence.
+# Removed once the investigation concludes.
+@app.get("/api/admin/investigate-mlpca")
+async def admin_investigate_mlpca(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        legal_rows = await conn.fetch("""
+            SELECT id, filename, source_type, source_name, reference, document_type,
+                   matter_type, status, chunk_count, word_count, uploaded_at, source_url,
+                   scraped_at, validity_flag, authority_strength, legal_source_type,
+                   ocr_used, needs_review
+            FROM legal_updates
+            WHERE firm_id=$1 AND (
+                filename ILIKE '%money laundering%' OR filename ILIKE '%proceeds of crime%'
+                OR filename ILIKE '%mlpca%' OR filename ILIKE '%9:24%' OR filename ILIKE '%9-24%'
+                OR reference ILIKE '%money laundering%' OR reference ILIKE '%proceeds of crime%'
+                OR source_name ILIKE '%money laundering%' OR source_name ILIKE '%proceeds of crime%'
+            )
+            ORDER BY uploaded_at
+        """, FIRM_ID)
+
+        doc_results = []
+        all_found_chunk_ids = []
+        for r in legal_rows:
+            doc_id = r["id"]
+            chunk_rows = await conn.fetch(
+                "SELECT id, chunk_index, LEFT(text, 160) AS preview FROM chunks "
+                "WHERE document_id=$1 AND firm_id=$2 AND chunk_source='legal' ORDER BY chunk_index",
+                doc_id, FIRM_ID
+            )
+            chunk_ids = [str(c["id"]) for c in chunk_rows]
+            all_found_chunk_ids.extend(chunk_ids)
+            doc_results.append({
+                "legal_update": {k: (str(v) if isinstance(v, _uuid_mod.UUID) else v) for k, v in dict(r).items()},
+                "real_chunks_row_count": len(chunk_rows),
+                "chunk_ids": chunk_ids,
+                "chunk_previews": [c["preview"] for c in chunk_rows[:6]],
+            })
+
+        # Orphan search: real chunk text mentioning the Act by name, regardless
+        # of which document_id it's attached to -- catches a chunk surviving
+        # under a document_id whose legal_updates row is itself gone, or a
+        # miscategorized/duplicate ingestion the filename search above missed.
+        orphan_chunks = await conn.fetch("""
+            SELECT id, document_id, chunk_index, LEFT(text, 160) AS preview, created_at
+            FROM chunks
+            WHERE firm_id=$1 AND chunk_source='legal'
+              AND text ILIKE '%money laundering and proceeds of crime%'
+            ORDER BY document_id, chunk_index
+            LIMIT 100
+        """, FIRM_ID)
+        orphan_doc_ids = {str(r["document_id"]) for r in orphan_chunks}
+        known_doc_ids = {str(r["id"]) for r in legal_rows}
+
+    # Real Chroma check -- do these exact chunk ids actually have vectors?
+    _, legal_col, _ = get_chroma_collections()
+    chroma_collection_total = legal_col.count()
+    chroma_check = None
+    if all_found_chunk_ids:
+        got = legal_col.get(ids=all_found_chunk_ids, include=["metadatas"])
+        found_in_chroma = set(got["ids"])
+        chroma_check = {
+            "requested": len(all_found_chunk_ids),
+            "found_in_chroma": len(found_in_chroma),
+            "missing_from_chroma": [cid for cid in all_found_chunk_ids if cid not in found_in_chroma],
+        }
+
+    # Real end-to-end retrieval test -- the actual live query path, not an
+    # inference. A phrase pattern a lawyer would plausibly search, matching
+    # this Act's real subject matter (money laundering offences).
+    query_vec = (await asyncio.to_thread(embed_texts, ["money laundering and proceeds of crime offences"]))[0]
+    if hasattr(query_vec[0], "__len__"):
+        query_vec = query_vec[0]
+    search_result = legal_col.query(query_embeddings=[query_vec], n_results=8, include=["documents", "metadatas", "distances"])
+    live_search_hits = []
+    for cid, doc, meta, dist in zip(
+        search_result["ids"][0], search_result["documents"][0],
+        search_result["metadatas"][0], search_result["distances"][0]
+    ):
+        live_search_hits.append({
+            "chunk_id": cid, "similarity": round(max(0.0, 1.0 - dist), 3),
+            "document_id": (meta or {}).get("document_id"),
+            "snippet": (doc or "")[:150],
+        })
+
+    return {
+        "legal_updates_matches": doc_results,
+        "orphan_chunks_by_text_search": {
+            "count": len(orphan_chunks),
+            "distinct_document_ids": list(orphan_doc_ids),
+            "document_ids_not_in_legal_updates_matches_above": list(orphan_doc_ids - known_doc_ids),
+            "sample": [
+                {"id": str(r["id"]), "document_id": str(r["document_id"]), "chunk_index": r["chunk_index"],
+                 "preview": r["preview"], "created_at": r["created_at"].isoformat()}
+                for r in orphan_chunks[:10]
+            ],
+        },
+        "chroma_legal_collection_total_vectors": chroma_collection_total,
+        "chroma_check_for_found_chunks": chroma_check,
+        "live_semantic_search_test": live_search_hits,
+    }
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
