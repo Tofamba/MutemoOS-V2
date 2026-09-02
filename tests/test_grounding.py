@@ -57,6 +57,11 @@ def test_rewrites_entirely_absent_from_the_corpus():
 
 
 def test_rewrites_several_close_variants():
+    """Exact replacement wording differs by grammatical family (see
+    test_rewrites_preserve_grammar_not_just_substring_presence for the
+    precise expected string per case) -- what every variant must share is
+    that "the corpus" is gone and it's rescoped to this specific search,
+    logged exactly once."""
     variants = [
         "Section 20 is missing from the corpus.",
         "The PEP definition does not exist in the corpus.",
@@ -66,7 +71,8 @@ def test_rewrites_several_close_variants():
     ]
     for text in variants:
         result, qc_log = scope_corpus_absence_claims(text)
-        assert "not found in this search" in result, f"failed for: {text!r}"
+        assert "the corpus" not in result.lower(), f"failed for: {text!r} -> {result!r}"
+        assert "this search" in result, f"failed for: {text!r} -> {result!r}"
         assert len(qc_log) == 1, f"failed for: {text!r}"
 
 
@@ -89,6 +95,48 @@ def test_leaves_scoped_honest_language_untouched():
 def test_empty_text_returns_unchanged():
     assert scope_corpus_absence_claims("") == ("", [])
     assert scope_corpus_absence_claims(None) == (None, [])
+
+
+def test_rewrites_preserve_grammar_not_just_substring_presence():
+    """The adjectival family (absent from/missing from) leaves the
+    original auxiliary verb (is/are) untouched before the match; the
+    verb-phrase family (does not exist/no longer exists/not found/not
+    present) captures its own verb and only rewrites the object -- a
+    single blind replacement across both broke grammar in real
+    production testing (2026-09-02), see the regression test below."""
+    cases = [
+        ("Section 20 is missing from the corpus.",
+         "Section 20 is not found in this search."),
+        ("The PEP definition does not exist in the corpus.",
+         "The PEP definition does not exist in the sources retrieved for this search."),
+        ("These sections are not present in the corpus.",
+         "These sections are not present in the sources retrieved for this search."),
+        ("The provision is not found in the corpus.",
+         "The provision is not found in the sources retrieved for this search."),
+        ("This clause no longer exists in the corpus.",
+         "This clause no longer exists in the sources retrieved for this search."),
+    ]
+    for original, expected in cases:
+        result, _ = scope_corpus_absence_claims(original)
+        assert result == expected, f"{original!r} -> {result!r}, expected {expected!r}"
+
+
+def test_regression_real_production_sentence_now_reads_grammatically():
+    """The exact class of sentence a real production answer produced
+    (2026-09-02) before this fix: 'are absent from the corpus' swallowed
+    whole by a single blind replacement produced 'they not found in this
+    search' -- missing the auxiliary verb entirely."""
+    original = (
+        "The fact that sections 17 and 20 were not retrieved in this search "
+        "does not establish that they are absent from the corpus."
+    )
+    result, qc_log = scope_corpus_absence_claims(original)
+    assert result == (
+        "The fact that sections 17 and 20 were not retrieved in this search "
+        "does not establish that they are not found in this search."
+    )
+    assert "not found in this search" in result
+    assert len(qc_log) == 1
 
 
 def test_rewrites_multiple_occurrences_in_one_answer():

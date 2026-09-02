@@ -397,10 +397,28 @@ def apply_confidence_safeguard(answer_text: str, grounding: dict) -> str:
 # backstop for a known bad pattern, not a substitute for the prompt-level
 # instructions in synthesise_answer_sync() and run_legal_research_agent()
 # that should stop the model writing this in the first place.
-_CORPUS_ABSENCE_PATTERN = re.compile(
-    r"\b(?:is\s+|are\s+)?(?:entirely\s+)?"
-    r"(?:absent from|missing from|not (?:found|present) in|does not exist in|"
-    r"do not exist in|no longer exists? in)\s+the\s+corpus\b",
+# Two grammatically-distinct families of the same overclaiming pattern,
+# handled separately because a single blind replacement broke grammar in
+# real testing (2026-09-02): "...does not establish that they [are]
+# absent from the corpus" -> "...does not establish that they not found
+# in this search" once "are absent from the corpus" was swallowed whole
+# and replaced with a bare fragment, dropping the auxiliary verb.
+#
+# Adjectival family ("absent from"/"missing from" the corpus) -- the
+# auxiliary verb (is/are/was/were) sits in the original text BEFORE the
+# match and is left untouched, so replacing just this phrase reads
+# naturally: "is absent from the corpus" -> "is not found in this search".
+_CORPUS_ABSENCE_ADJECTIVE_PATTERN = re.compile(
+    r"\b(?:entirely\s+)?(?:absent from|missing from)\s+the\s+corpus\b",
+    re.IGNORECASE,
+)
+# Verb-phrase family -- the verb itself ("does/do not exist", "no longer
+# exists/exist", "[is/are] not found/present") is part of the claim, so
+# it's captured and preserved; only the "... in the corpus" object is
+# rewritten to name what was actually searched, not the whole corpus.
+_CORPUS_ABSENCE_VERB_PATTERN = re.compile(
+    r"\b((?:(?:is|are|was|were)\s+)?not (?:found|present)|does not exist|"
+    r"do not exist|no longer exists?)\s+in\s+the\s+corpus\b",
     re.IGNORECASE,
 )
 
@@ -410,24 +428,34 @@ def scope_corpus_absence_claims(answer_text: str) -> tuple:
     Deterministic backstop, same convention as verify_citations()/
     verify_inline_case_citations(): rewrites any surviving "absent from/
     missing from/does not exist in the corpus"-style phrasing to the
-    honest, retrieval-scoped equivalent, and logs each rewrite so it's
-    visible in qc_log rather than silently altering the answer.
+    honest, retrieval-scoped equivalent, preserving each sentence's own
+    grammar (see the two-pattern split above), and logs each rewrite so
+    it's visible in qc_log rather than silently altering the answer.
     """
     if not answer_text:
         return answer_text, []
     qc_log = []
 
-    def _replace(m):
+    def _log(original):
         qc_log.append({
             "qc_status": "absence_claim_rescoped",
-            "original_text": m.group(0),
+            "original_text": original,
             "qc_reason": "A single query's retrieval can only establish what was found by "
                          "that search, not what does or doesn't exist in the corpus as a "
                          "whole -- rewritten to avoid overclaiming.",
         })
+
+    def _replace_adjective(m):
+        _log(m.group(0))
         return "not found in this search"
 
-    return _CORPUS_ABSENCE_PATTERN.sub(_replace, answer_text), qc_log
+    def _replace_verb(m):
+        _log(m.group(0))
+        return f"{m.group(1)} in the sources retrieved for this search"
+
+    text = _CORPUS_ABSENCE_ADJECTIVE_PATTERN.sub(_replace_adjective, answer_text)
+    text = _CORPUS_ABSENCE_VERB_PATTERN.sub(_replace_verb, text)
+    return text, qc_log
 
 
 def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
