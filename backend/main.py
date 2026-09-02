@@ -4290,6 +4290,114 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- staging demo-data setup for the Client Compliance Status
+# report's real external-partner attachment (2026-09-02). Same reasoning as
+# every other real-data admin endpoint this week: the real PATCH
+# /api/clients/{id}/compliance endpoint needs a session cookie the shell
+# can't produce, so this does the same upsert directly via the admin token,
+# against a hand-picked set of EXISTING fictional staging clients (no new
+# clients created). Removed once the demo CSV is generated and confirmed.
+@app.post("/api/admin/staging-compliance-demo-setup")
+async def admin_staging_compliance_demo_setup(request: Request):
+    require_admin_token(request)
+    body = await request.json()
+    action = body.get("action")
+
+    async with _db_pool.acquire() as conn:
+        if action == "inspect":
+            client_ids = [_uuid_mod.UUID(cid) for cid in body["client_ids"]]
+            clients = await conn.fetch(
+                "SELECT id, full_name, client_type FROM clients WHERE id = ANY($1) AND firm_id=$2",
+                client_ids, FIRM_ID
+            )
+            compliance = await conn.fetch(
+                "SELECT * FROM client_compliance WHERE client_id = ANY($1) AND firm_id=$2",
+                client_ids, FIRM_ID
+            )
+            owners = await conn.fetch(
+                "SELECT * FROM beneficial_owners WHERE client_id = ANY($1) AND firm_id=$2",
+                client_ids, FIRM_ID
+            )
+            users = await conn.fetch("SELECT id, display_name, role FROM users WHERE firm_id=$1", FIRM_ID)
+            return {
+                "clients": [dict(r) | {"id": str(r["id"])} for r in clients],
+                "compliance": [
+                    {k: (str(v) if isinstance(v, _uuid_mod.UUID) else v) for k, v in dict(r).items()}
+                    for r in compliance
+                ],
+                "owners": [
+                    {k: (str(v) if isinstance(v, _uuid_mod.UUID) else v) for k, v in dict(r).items()}
+                    for r in owners
+                ],
+                "users": [{"id": str(u["id"]), "display_name": u["display_name"], "role": u["role"]} for u in users],
+            }
+
+        elif action == "apply":
+            results = []
+            for op in body["operations"]:
+                cid = _uuid_mod.UUID(op["client_id"])
+                comp = dict(op.get("compliance") or {})
+                if "senior_management_approved_by" in comp and comp["senior_management_approved_by"]:
+                    comp["senior_management_approved_by"] = _uuid_mod.UUID(comp["senior_management_approved_by"])
+                if "senior_management_approved_date" in comp and comp["senior_management_approved_date"]:
+                    comp["senior_management_approved_date"] = date.fromisoformat(comp["senior_management_approved_date"])
+                if "conflict_check_reviewed_by" in comp and comp["conflict_check_reviewed_by"]:
+                    comp["conflict_check_reviewed_by"] = _uuid_mod.UUID(comp["conflict_check_reviewed_by"])
+                if "conflict_check_reviewed_date" in comp and comp["conflict_check_reviewed_date"]:
+                    comp["conflict_check_reviewed_date"] = date.fromisoformat(comp["conflict_check_reviewed_date"])
+                comp["updated_at"] = datetime.utcnow()
+
+                cols = list(comp.keys())
+                set_clause = ", ".join(f"{k}=EXCLUDED.{k}" for k in cols)
+                placeholders = ", ".join(f"${i+3}" for i in range(len(cols)))
+                await conn.execute(
+                    f"""
+                    INSERT INTO client_compliance (client_id, firm_id, {', '.join(cols)})
+                    VALUES ($1, $2, {placeholders})
+                    ON CONFLICT (client_id) DO UPDATE SET {set_clause}
+                    """,
+                    cid, FIRM_ID, *comp.values()
+                )
+
+                bo = op.get("beneficial_owner")
+                if bo:
+                    verified_by = _uuid_mod.UUID(bo["verified_by"]) if bo.get("verified_by") else None
+                    verified_date = date.fromisoformat(bo["verified_date"]) if bo.get("verified_date") else None
+                    await conn.execute(
+                        """
+                        INSERT INTO beneficial_owners
+                            (client_id, firm_id, owner_name, date_of_birth, nationality,
+                             id_or_passport_number, residential_address, ownership_or_control_basis,
+                             ownership_percentage, verification_status, verified_date, verified_by)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                        """,
+                        cid, FIRM_ID, bo["owner_name"],
+                        date.fromisoformat(bo["date_of_birth"]) if bo.get("date_of_birth") else None,
+                        bo.get("nationality"), bo.get("id_or_passport_number"), bo.get("residential_address"),
+                        bo.get("ownership_or_control_basis"),
+                        float(bo["ownership_percentage"]) if bo.get("ownership_percentage") is not None else None,
+                        bo.get("verification_status", "Verified"), verified_date, verified_by,
+                    )
+
+                client_row = await conn.fetchrow("SELECT * FROM clients WHERE id=$1", cid)
+                compliance_row = await conn.fetchrow(
+                    "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+                )
+                owner_rows = await conn.fetch(
+                    "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+                )
+                compliance_dict = _row_to_client_compliance(compliance_row)
+                status = _compute_compliance_status(dict(client_row), compliance_dict, [dict(r) for r in owner_rows])
+                results.append({
+                    "client_id": str(cid), "client_name": client_row["full_name"],
+                    "compliance_status": status["compliance_status"], "missing": status["missing"],
+                    "is_pep": compliance_dict.get("is_pep"), "risk_rating": compliance_dict.get("risk_rating"),
+                })
+            return {"results": results}
+
+        else:
+            raise HTTPException(status_code=400, detail="action must be 'inspect' or 'apply'")
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
