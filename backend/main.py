@@ -4306,29 +4306,6 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
-# TEMPORARY -- real end-to-end verification of the corpus-scope-honesty
-# fix (2026-09-02): runs the REAL, complete /api/search pipeline
-# (_run_plain_search_job, unmodified -- same retrieval, same grounding,
-# same research agent, same synthesis, same QC passes including the new
-# scope_corpus_absence_claims()) for two real queries, synchronously, so
-# the actual final answer text can be inspected directly. Removed once
-# verified.
-@app.post("/api/admin/verify-corpus-scope-honesty-fix")
-async def admin_verify_corpus_scope_honesty_fix(request: Request):
-    require_admin_token(request)
-    body = await request.json()
-    query = body["query"]
-    job_id = str(_uuid_mod.UUID(int=0))  # fixed, overwritten each call -- throwaway
-    job_user = {"id": None, "firm_id": FIRM_ID, "display_name": "Admin Verification", "role": "partner"}
-    _search_jobs[job_id] = {
-        "status": JobStatus.PENDING, "result": None, "error": None,
-        "firm_id": str(FIRM_ID), "created_at": datetime.utcnow().isoformat(),
-    }
-    req = SearchRequest(query=query, limit=8)
-    await _run_plain_search_job(job_id, req, job_user)
-    job = _search_jobs.pop(job_id, {})
-    return {"status": job.get("status"), "result": job.get("result"), "error": job.get("error")}
-
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
