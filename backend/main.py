@@ -4306,6 +4306,17 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- real-data verification for the PEP risk-rating fix
+# (2026-09-02). Runs the real, unchanged report function against real
+# staging data. Removed once verified.
+@app.get("/api/admin/verify-pep-risk-rating-fix")
+async def admin_verify_pep_risk_rating_fix(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_client_compliance_roster_rows(conn)
+    watch_names = {"Anchorflow Holdings", "Mould Enterprises (Pvt) Ltd"}
+    return [r for r in rows if r["client_name"] in watch_names]
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
