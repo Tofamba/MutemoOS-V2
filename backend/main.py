@@ -4285,6 +4285,37 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- corpus-snapshot tooling real-verification (2026-09-02), to be
+# removed once the R2-bucket-vs-path decision for CORPUS_SNAPSHOT_BUCKET is
+# made and the real publish/restore run is done. See the
+# corpus-snapshot-tooling project memory / .claude/skills/firm-onboarding/
+# SKILL.md Step 3.
+#
+# Read-only: ListBuckets, not CreateBucket. Answers "is the existing R2
+# credential (R2_ACCESS_KEY_ID/SECRET, already used for the mutemoos-documents
+# bucket) scoped account-wide, or locked to that one bucket?" without
+# creating anything -- a single-bucket-scoped R2 API token 403s on
+# ListBuckets; an account-scoped one lists every bucket in the account.
+# That answer decides whether a new CORPUS_SNAPSHOT_BUCKET can reuse the
+# existing credential (no new secret to manage) or would need a brand new
+# R2 API token created by hand in the Cloudflare dashboard (nothing here can
+# create one).
+@app.get("/api/admin/corpus-snapshot-check-r2-scope")
+async def admin_corpus_snapshot_check_r2_scope(request: Request):
+    require_admin_token(request)
+    if not R2_ENABLED:
+        return {"r2_enabled": False}
+    try:
+        resp = await asyncio.to_thread(_r2_client.list_buckets)
+        buckets = [b["Name"] for b in resp.get("Buckets", [])]
+        return {"account_scoped": True, "buckets": buckets}
+    except ClientError as e:
+        return {
+            "account_scoped": False,
+            "error_code": e.response.get("Error", {}).get("Code"),
+            "error_message": e.response.get("Error", {}).get("Message"),
+        }
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
