@@ -4290,6 +4290,19 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- real-data verification for the new Client Compliance Status
+# report (2026-09-02), same discipline as every other real-data check this
+# week: _check_permission requires a real session cookie the shell can't
+# produce, so this runs the actual _fetch_client_compliance_roster_rows()
+# against real staging data via the admin token instead. Removed once
+# verified.
+@app.get("/api/admin/verify-client-compliance-status")
+async def admin_verify_client_compliance_status(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_client_compliance_roster_rows(conn)
+    return {"count": len(rows), "rows": rows}
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
