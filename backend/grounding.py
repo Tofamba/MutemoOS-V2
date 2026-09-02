@@ -344,10 +344,36 @@ def display_label(r: dict) -> str:
     return "Unknown Source"
 
 
+REPHRASE_SUGGESTION = (
+    "\n\n💡 **Retrieval was thin for this query.** If you expected more directly "
+    "on-point material, try rephrasing using the specific statutory language, "
+    "section numbers, or defined terms you're looking for, rather than a general "
+    "or process-oriented question — a query's own wording drives what gets "
+    "retrieved, and one phrased closer to the source text routinely finds "
+    "content that a general question misses, even when that content exists in "
+    "the corpus. This does not mean the content is or isn't present — only that "
+    "this specific search didn't surface it strongly."
+)
+
+
 def apply_confidence_safeguard(answer_text: str, grounding: dict) -> str:
-    """Prepend a hard warning when an under-grounded answer still reads as assertive."""
+    """
+    Two independent things when grounding is insufficient, neither
+    contingent on the other: (1) prepend a hard warning when the answer
+    still reads as assertive despite thin grounding (pre-existing), and
+    (2) always append a neutral rephrasing suggestion (2026-09-02, real
+    incident) — thin retrieval is equally consistent with "this genuinely
+    isn't in the corpus" and "this is in the corpus but the query's own
+    wording didn't match it well" (confirmed live: a meta-phrased query
+    about the research process retrieved nothing relevant for content that
+    a directly-phrased query found immediately, ranked #1). The suggestion
+    is deliberately worded not to assert either possibility -- overclaiming
+    presence would be as wrong as the "entirely absent from the corpus"
+    overclaim that prompted this fix.
+    """
     if not answer_text or grounding.get("sources_sufficient", True):
         return answer_text
+    result = answer_text
     snippet = answer_text[:500].lower()
     if any(term.lower() in snippet for term in BANNED_ASSERTIVE_TERMS):
         warning = (
@@ -356,8 +382,52 @@ def apply_confidence_safeguard(answer_text: str, grounding: dict) -> str:
             "principles and non-binding background context — verify all citations "
             "independently."
         )
-        return f"{warning}\n\n{answer_text}"
-    return answer_text
+        result = f"{warning}\n\n{result}"
+    return f"{result}{REPHRASE_SUGGESTION}"
+
+
+# Catches the specific overclaiming phrasing the real 2026-09-02 incident
+# produced ("the customer identification provisions ... are entirely
+# absent from the retrieved material" / earlier draft language "entirely
+# absent from the corpus") and close variants -- a single query's
+# retrieval can only support "not found by this search," never a claim
+# about the corpus's actual contents. Deliberately narrow and literal
+# (like verify_citations()'s exact-string matching) rather than an
+# attempt at general semantic understanding -- this is a deterministic
+# backstop for a known bad pattern, not a substitute for the prompt-level
+# instructions in synthesise_answer_sync() and run_legal_research_agent()
+# that should stop the model writing this in the first place.
+_CORPUS_ABSENCE_PATTERN = re.compile(
+    r"\b(?:is\s+|are\s+)?(?:entirely\s+)?"
+    r"(?:absent from|missing from|not (?:found|present) in|does not exist in|"
+    r"do not exist in|no longer exists? in)\s+the\s+corpus\b",
+    re.IGNORECASE,
+)
+
+
+def scope_corpus_absence_claims(answer_text: str) -> tuple:
+    """
+    Deterministic backstop, same convention as verify_citations()/
+    verify_inline_case_citations(): rewrites any surviving "absent from/
+    missing from/does not exist in the corpus"-style phrasing to the
+    honest, retrieval-scoped equivalent, and logs each rewrite so it's
+    visible in qc_log rather than silently altering the answer.
+    """
+    if not answer_text:
+        return answer_text, []
+    qc_log = []
+
+    def _replace(m):
+        qc_log.append({
+            "qc_status": "absence_claim_rescoped",
+            "original_text": m.group(0),
+            "qc_reason": "A single query's retrieval can only establish what was found by "
+                         "that search, not what does or doesn't exist in the corpus as a "
+                         "whole -- rewritten to avoid overclaiming.",
+        })
+        return "not found in this search"
+
+    return _CORPUS_ABSENCE_PATTERN.sub(_replace, answer_text), qc_log
 
 
 def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
@@ -477,11 +547,30 @@ def run_legal_research_agent(query: str, context: str) -> dict:
     Haiku-based structured gap-analysis pass. NOT a second legal opinion —
     a research completeness map. Only invoked when compute_grounding
     already found the retrieval insufficient.
+
+    Corpus-scope guardrail (2026-09-02, real incident): a single query's
+    retrieval can only ever establish what THAT query surfaced, never what
+    does or doesn't exist in the corpus as a whole — a badly-phrased query
+    (e.g. a long meta-question about the research process itself, rather
+    than the actual statutory language) can retrieve nothing relevant even
+    when the real content is present, correctly indexed, and retrievable
+    by a differently-phrased query for the same content. Confirmed live:
+    a query asking whether specific Money Laundering and Proceeds of Crime
+    Act sections were "retrievable" pulled back unrelated court-rules and
+    news content and this agent (before this guardrail existed) echoed the
+    query's own "entirely absent from the corpus" framing back as a
+    finding — the actual statutory text was present and ranked #1 the
+    moment it was searched for directly. The explicit instruction below
+    stops this agent from ever asserting or implying non-existence in the
+    corpus; scoping to "not established by the retrieved sources" is the
+    most that a single retrieval can honestly support.
     """
     prompt = f"""You are a legal research completeness analyst. You do not answer the client's question or give legal advice.
 Analyze ONLY whether the retrieved sources below are sufficient to answer the query, and identify specific gaps.
 
 Do not infer missing statutory text from general legal knowledge, similar legislation, or the query itself. Only report what the retrieved material does or does not establish — never fill a gap with a value you believe is likely correct.
+
+CRITICAL SCOPE LIMIT: you can only see what THIS query's retrieval surfaced — you have no way to know whether a provision exists elsewhere in the corpus under a different query phrasing, a different document, or different wording. NEVER state or imply that something "is absent from," "does not exist in," or "is missing from" the corpus — that is a claim about the whole corpus that a single retrieval cannot support, and it may simply be wrong (a query that doesn't match the source material's own wording — e.g. a question about the research process rather than the substantive legal text — routinely retrieves nothing relevant even when the content is present and easily found by a better-matched query). Describe every gap only as what THIS retrieval did or did not establish (e.g. "the retrieved sources do not contain X" or "not established by the sources retrieved for this query"), never as a fact about the corpus's actual contents.
 
 Query: {query}
 
@@ -494,7 +583,7 @@ Respond ONLY with valid JSON, no other text, in this exact structure:
   "gaps": [
     {{
       "issue": "short description of the legal issue",
-      "missing_authority": "what specific provision/text is missing — describe the GAP, never state what you believe the missing value is",
+      "missing_authority": "what specific provision/text the RETRIEVED SOURCES do not establish — describe the gap in what was retrieved, never state what you believe the missing value is, and never claim it is absent from the corpus as a whole",
       "reason": "why the retrieved excerpts don't resolve this",
       "priority": "high" | "medium" | "low"
     }}

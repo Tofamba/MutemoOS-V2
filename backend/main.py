@@ -31,7 +31,7 @@ import time
 import hmac
 from datetime import datetime, timedelta, date
 from enum import Enum
-from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent
+from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent, scope_corpus_absence_claims
 from backend.client_migration import match_client_name
 from backend.numbering import (
     generate_initials, disambiguate_initials, next_sequence,
@@ -4305,6 +4305,29 @@ async def reindex_from_db(request: Request):
         "zlr_entries_processed": indexed_zlr,
         "chunks_created": len(all_chunks),
     }
+
+# TEMPORARY -- real end-to-end verification of the corpus-scope-honesty
+# fix (2026-09-02): runs the REAL, complete /api/search pipeline
+# (_run_plain_search_job, unmodified -- same retrieval, same grounding,
+# same research agent, same synthesis, same QC passes including the new
+# scope_corpus_absence_claims()) for two real queries, synchronously, so
+# the actual final answer text can be inspected directly. Removed once
+# verified.
+@app.post("/api/admin/verify-corpus-scope-honesty-fix")
+async def admin_verify_corpus_scope_honesty_fix(request: Request):
+    require_admin_token(request)
+    body = await request.json()
+    query = body["query"]
+    job_id = str(_uuid_mod.UUID(int=0))  # fixed, overwritten each call -- throwaway
+    job_user = {"id": None, "firm_id": FIRM_ID, "display_name": "Admin Verification", "role": "partner"}
+    _search_jobs[job_id] = {
+        "status": JobStatus.PENDING, "result": None, "error": None,
+        "firm_id": str(FIRM_ID), "created_at": datetime.utcnow().isoformat(),
+    }
+    req = SearchRequest(query=query, limit=8)
+    await _run_plain_search_job(job_id, req, job_user)
+    job = _search_jobs.pop(job_id, {})
+    return {"status": job.get("status"), "result": job.get("result"), "error": job.get("error")}
 
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
@@ -9384,6 +9407,9 @@ async def _run_plain_search_job(job_id: str, req: SearchRequest, user: dict):
         answer, confidence_qc_log = enforce_confidence_consistency(answer)
         qc_log = qc_log + confidence_qc_log
 
+        answer, absence_qc_log = scope_corpus_absence_claims(answer)
+        qc_log = qc_log + absence_qc_log
+
         answer = apply_confidence_safeguard(answer, grounding)
 
         research_agent_status = (
@@ -9671,6 +9697,8 @@ async def _run_document_search_job(
             firm_name=firm["name"], firm_city=firm["city"],
         )
         print(f"[search_job:{job_id}] SYNTHESIS_COMPLETE")
+
+        answer, _absence_qc_log = scope_corpus_absence_claims(answer)
 
         grounding = compute_grounding(results, legal_results, zlr_results, has_attached_doc=True)
         answer = apply_confidence_safeguard(answer, grounding)
@@ -10391,10 +10419,19 @@ Status: {deadline_info['status']}
             f"- {g['issue']}: missing {g['missing_authority']} ({g['reason']})"
             for g in research_map["gaps"]
         )
+        # "NEVER claim..." line added 2026-09-02 after a real incident: a
+        # meta-phrased query about the research process itself (not the
+        # actual statutory language) retrieved unrelated content, and the
+        # model asserted the relevant sections were "entirely absent from
+        # the corpus" with "High" confidence -- the sections were present,
+        # correctly indexed, and ranked #1 the moment they were searched
+        # for directly. A single retrieval can only ever show what THAT
+        # query surfaced, never what does or doesn't exist in the corpus.
         research_map_block = f"""
 RESEARCH GAP MAP (this is a completeness analysis of the retrieved material, NOT legal authority — never cite it as a source; use it only to state precisely what the retrieved sources do not establish):
 {gap_lines}
-"""
+
+NEVER state or imply that something "is absent from," "does not exist in," or "is missing from" the corpus, and never claim High confidence in non-existence — a single query's retrieval cannot establish that. Describe every gap only as what the sources retrieved FOR THIS QUERY do or do not establish (e.g. "not found in the sources retrieved for this query," "not established by this search"). If retrieval for this query was thin, say so plainly and note that a differently-phrased query — closer to the actual statutory language or defined terms rather than a general question — may retrieve different material; do not assert or imply that the underlying content is missing or unavailable."""
 
     if attached_doc_text:
         instructions = """Answer the question about the attached document directly and specifically:
