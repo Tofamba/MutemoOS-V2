@@ -4290,6 +4290,51 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- staging demo-client rename for the Client Compliance Status
+# report's real external-partner attachment (2026-09-02): "Tobacco Company
+# of Zimbabwe" and "Zimasco Holdings" turned out to name real companies,
+# not fictional ones -- renaming the two affected staging clients before
+# regenerating the demo CSV. Removed once the renamed CSV is confirmed.
+@app.post("/api/admin/staging-rename-client")
+async def admin_staging_rename_client(request: Request):
+    require_admin_token(request)
+    body = await request.json()
+    cid = _uuid_mod.UUID(body["client_id"])
+    new_name = body["full_name"]
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE clients SET full_name=$1, updated_at=$2 WHERE id=$3 AND firm_id=$4 RETURNING id, full_name",
+            new_name, datetime.utcnow(), cid, FIRM_ID
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return {"client_id": str(row["id"]), "full_name": row["full_name"]}
+
+# TEMPORARY -- same reasoning/removal plan as the rename endpoint above:
+# regenerates the real demo CSV (byte-for-byte the same output
+# client_compliance_status_report_export() produces) after the rename, so
+# the actual attachment reflects the corrected names, not just the
+# underlying data.
+@app.get("/api/admin/staging-export-client-compliance-csv")
+async def admin_staging_export_client_compliance_csv(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_client_compliance_roster_rows(conn)
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Client Number", "Client Name", "Client Type", "Compliance Status",
+                      "Outstanding", "PEP", "Risk Rating"])
+    for r in rows:
+        writer.writerow([
+            r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
+            r["compliance_status"], "; ".join(r["missing"]),
+            "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
+            r["risk_rating"],
+        ])
+    filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(buf.getvalue(), filename)
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
