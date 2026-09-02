@@ -1155,6 +1155,11 @@ PERMISSIONS = {
     # reports:sms_usage removed 2026-09-02 -- SMS Usage by Firm is Tofamba's
     # own Africa's Talking cost-attribution view, not a firm-facing report;
     # its endpoint is gated by require_admin_token() instead, see below.
+    # Dedicated key, not reusing rbz_compliance/matter_review_status --
+    # PEP/risk-rating data is more sensitive than what any existing report
+    # exposes, so it gets its own gate even though the role tier (admin,
+    # partner) happens to be identical today.
+    "reports:client_compliance_status": {"admin", "partner"},
 }
 
 def _check_permission(user: dict, permission: str):
@@ -6681,6 +6686,109 @@ async def matter_review_status_report_export(
         ])
 
     filename = f"matter_review_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(buf.getvalue(), filename)
+
+# ── Reports (Client Compliance Status) ──────────────────────────────────────
+# Partner-tier, own scoped key (reports:client_compliance_status) -- see the
+# PERMISSIONS comment above for why this isn't folded into an existing key.
+# Firm-wide, unlike My Portfolio's own compliance snapshot (main.py ~6774,
+# "Compliance/risk snapshot" comment), which is scoped to one lawyer's own
+# clients and only ever emits aggregate counts (cleared_count,
+# action_required_count, pep_count, a risk_ratings histogram) -- this report
+# is the real per-client roster that snapshot was never meant to be: every
+# firm client's actual computed status, PEP flag, risk rating, and full
+# outstanding-requirements list, for an actual remediation sweep rather than
+# a dashboard tile. No report_history logging -- same category as
+# practice_area_breakdown/matter_review_status above (an internal
+# operational view, not the RBZ export's regulatory audit-trail need).
+
+async def _fetch_client_compliance_roster_rows(conn) -> list:
+    """
+    One row per client, firm-wide. Reuses _compute_compliance_status()
+    completely unchanged -- the exact same function powering the client
+    detail page's own compliance badge (see get_client(), main.py
+    ~4721-4724) -- so this report can never drift from what a lawyer sees
+    on the client's own page; there is no second, parallel compliance
+    calculation to keep in sync.
+
+    Batched the same way My Portfolio's own compliance snapshot already
+    does it (client_compliance/beneficial_owners fetched once via
+    ANY($1), not N+1 per client) -- proven at real production scale
+    already, just kept per-client here instead of folded into counters.
+    """
+    client_rows = await conn.fetch(
+        "SELECT * FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+    )
+    client_ids = [c["id"] for c in client_rows]
+    compliance_by_client, owners_by_client = {}, {}
+    if client_ids:
+        comp_rows = await conn.fetch(
+            "SELECT * FROM client_compliance WHERE client_id = ANY($1) AND firm_id=$2",
+            client_ids, FIRM_ID
+        )
+        compliance_by_client = {c["client_id"]: dict(c) for c in comp_rows}
+        owner_rows = await conn.fetch(
+            "SELECT client_id, verification_status FROM beneficial_owners "
+            "WHERE client_id = ANY($1) AND firm_id=$2",
+            client_ids, FIRM_ID
+        )
+        for o in owner_rows:
+            owners_by_client.setdefault(o["client_id"], []).append(dict(o))
+
+    result = []
+    for c in client_rows:
+        compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
+        owners = owners_by_client.get(c["id"], [])
+        status = _compute_compliance_status(dict(c), compliance, owners)
+        result.append({
+            "client_id": str(c["id"]),
+            "client_number": c["client_number"],
+            "client_name": c["full_name"],
+            "client_type": c["client_type"],
+            "compliance_status": status["compliance_status"],
+            "missing": status["missing"],
+            "is_pep": compliance.get("is_pep"),
+            "risk_rating": compliance.get("risk_rating") or "NotAssessed",
+        })
+    return result
+
+@app.get("/api/reports/client-compliance-status")
+async def client_compliance_status_report(request: Request):
+    """
+    Firm-wide AML compliance roster: every client's real, computed
+    compliance status (never manually set), PEP flag, risk rating, and
+    full outstanding-requirements list -- built for an actual remediation
+    sweep, not a summary dashboard.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_client_compliance_roster_rows(conn)
+    return rows
+
+@app.get("/api/reports/client-compliance-status-export")
+async def client_compliance_status_report_export(request: Request):
+    """Same data/permission as the JSON report above -- CSV download,
+    same convention as every other report export."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_client_compliance_roster_rows(conn)
+
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Client Number", "Client Name", "Client Type", "Compliance Status",
+                      "Outstanding", "PEP", "Risk Rating"])
+    for r in rows:
+        writer.writerow([
+            r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
+            r["compliance_status"], "; ".join(r["missing"]),
+            "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
+            r["risk_rating"],
+        ])
+
+    filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
 
 # ── My Portfolio (self-scoped, every lawyer — NOT a reports:* endpoint) ────

@@ -2067,6 +2067,7 @@ select{cursor:pointer}
         <option value="rbz">⬇ RBZ Compliance Export</option>
         <option value="practice-area">📂 Matters by Practice Area</option>
         <option value="matter-review-status">🗂 Matter Review Status</option>
+        <option value="client-compliance-status">🛡 Client Compliance Status</option>
       </select>
     </div>
 
@@ -2139,6 +2140,30 @@ select{cursor:pointer}
         </div>
         <div id="mrs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
         <div id="matter-review-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card" id="report-panel-client-compliance-status" style="display:none;margin-top:1rem">
+      <div class="card-title">🛡 Client Compliance Status</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Every firm client's real AML compliance status, PEP flag, risk rating, and full outstanding-requirements list — a remediation roster, not just a Cleared/Action Required count.
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadClientComplianceStatus()">▶ Generate</button>
+      </div>
+      <!-- Same results-step-after-Generate pattern as Matter Review Status
+           above (search box + CSV download + table stay hidden until
+           generated at least once). No filter step -- this report is
+           always firm-wide, per instruction, so there's nothing to
+           configure before Generate. -->
+      <div id="ccs-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="ccs-search" placeholder="🔍 Search client name or number…" oninput="_ccsSetSearch(this.value)"
+            style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadClientComplianceStatusCsv()">⬇ Download CSV</button>
+        </div>
+        <div id="ccs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="client-compliance-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
       </div>
     </div>
 
@@ -3641,7 +3666,7 @@ function showTab(tab) {
 // it was Tofamba's own AT cost-attribution view, not a firm-facing report;
 // see backend/main.py's sms_usage_by_firm_report() for where it now lives
 // (operator-only, require_admin_token()).
-const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status'];
+const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'client-compliance-status'];
 let _mrsFiltersLoaded = false;
 let _mrsHasGenerated = false;
 
@@ -7849,6 +7874,185 @@ async function downloadMatterReviewStatusCsv() {
     const disposition = res.headers.get('Content-Disposition') || '';
     const match = disposition.match(/filename="([^"]+)"/);
     const filename = match ? match[1] : 'matter_review_status.csv';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ CSV downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+// ── Client Compliance Status report ─────────────────────────────────────────
+// Firm-wide AML remediation roster (backend/main.py, 2026-09-02) -- every
+// client's real, computed compliance status, PEP flag, risk rating, and
+// full outstanding-requirements list. Table styling deliberately reuses the
+// exact same pattern as Matter Review Status above (fixed <colgroup>
+// widths, sticky sortable header, search-filters-client-side-only,
+// truncate+expand for the one long free-text-shaped column) for visual
+// consistency across Reports, not because the two reports share any data.
+//
+// _ccsRows cached client-side after fetch, same reasoning as _mrsRows --
+// search/sort/expand are instant re-renders, no re-fetch.
+let _ccsRows = [];
+let _ccsExpanded = new Set();
+let _ccsSort = { key: 'client_name', dir: 1 };
+let _ccsSearch = '';
+
+// Same chip-green/gold/red/gray classes Matter Health/Matter Review Status
+// already established this week, for visual consistency across the app --
+// two states here (Cleared/Action Required), not four, since that's the
+// whole set _compute_compliance_status() ever returns.
+const CCS_STATUS_CHIP = { 'Cleared': 'chip-green', 'Action Required': 'chip-red' };
+const CCS_RISK_CHIP = { 'Low': 'chip-green', 'Medium': 'chip-gold', 'High': 'chip-red', 'NotAssessed': 'chip-gray' };
+
+// The Outstanding column is the one long, variable-length, list-shaped
+// field here (same role Last Activity plays in Matter Review Status) --
+// reuses _mrsTruncate() directly rather than duplicating it, just with its
+// own length constant, since per instruction this report's whole point is
+// showing the full list on request, not hiding it behind a count.
+const CCS_OUTSTANDING_TRUNCATE_LEN = 75;
+
+function _ccsSetSearch(value) {
+  _ccsSearch = (value || '').trim().toLowerCase();
+  _ccsRenderTable();
+}
+
+function _ccsSetSort(key) {
+  _ccsSort = _ccsSort.key === key ? { key, dir: _ccsSort.dir * -1 } : { key, dir: 1 };
+  _ccsRenderTable();
+}
+
+function _ccsToggleExpand(clientId) {
+  if (_ccsExpanded.has(clientId)) _ccsExpanded.delete(clientId); else _ccsExpanded.add(clientId);
+  _ccsRenderTable();
+}
+
+const CCS_COLUMNS = [
+  { key: 'client_number', label: 'Client #', width: '9%' },
+  { key: 'client_name', label: 'Client', width: '18%' },
+  { key: 'client_type', label: 'Type', width: '9%' },
+  { key: 'compliance_status', label: 'Status', width: '11%' },
+  { key: 'is_pep', label: 'PEP', width: '6%' },
+  { key: 'risk_rating', label: 'Risk', width: '9%' },
+  { key: 'missing', label: 'Outstanding', width: '38%' },
+];
+
+function _ccsRenderTable() {
+  const el = document.getElementById('client-compliance-status-list');
+  const statusEl = document.getElementById('ccs-status');
+  if (!el) return;
+
+  let rows = _ccsRows;
+  if (_ccsSearch) {
+    rows = rows.filter(r =>
+      (r.client_name || '').toLowerCase().includes(_ccsSearch) ||
+      (r.client_number || '').toLowerCase().includes(_ccsSearch)
+    );
+  }
+  const { key, dir } = _ccsSort;
+  rows = [...rows].sort((a, b) => {
+    // 'missing' sorts by outstanding-item count, not the array itself
+    // (arrays have no meaningful < / > ordering) -- everything else
+    // sorts on its own value directly, same as Matter Review Status.
+    const av = key === 'missing' ? a.missing.length : (a[key] ?? '');
+    const bv = key === 'missing' ? b.missing.length : (b[key] ?? '');
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  if (!rows.length) {
+    el.innerHTML = _ccsRows.length ? '<em>No clients match this search.</em>' : '<em>No clients found.</em>';
+    statusEl.textContent = '';
+    return;
+  }
+
+  const sortArrow = (k) => _ccsSort.key === k ? (_ccsSort.dir === 1 ? ' ▲' : ' ▼') : '';
+
+  el.innerHTML = `
+    <div style="overflow:auto;max-height:65vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup>${CCS_COLUMNS.map(c => `<col style="width:${c.width}">`).join('')}</colgroup>
+      <thead>
+        <tr style="text-align:left">
+          ${CCS_COLUMNS.map(c => `
+            <th style="padding:6px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
+                       background:var(--paper2);border-bottom:1px solid var(--gold2);user-select:none;z-index:1"
+                onclick="_ccsSetSort('${c.key}')" title="Click to sort">${c.label}${sortArrow(c.key)}</th>
+          `).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => {
+          const expanded = _ccsExpanded.has(r.client_id);
+          const outstandingFull = (r.missing || []).join('; ');
+          const needsExpand = outstandingFull.length > CCS_OUTSTANDING_TRUNCATE_LEN;
+          const outstandingText = r.missing.length
+            ? (expanded ? outstandingFull : _mrsTruncate(outstandingFull, CCS_OUTSTANDING_TRUNCATE_LEN))
+            : '<span style="color:var(--green)">None</span>';
+          const statusChip = CCS_STATUS_CHIP[r.compliance_status] || 'chip-gray';
+          const riskChip = CCS_RISK_CHIP[r.risk_rating] || 'chip-gray';
+          const pepText = r.is_pep === true ? '<span style="color:var(--red);font-weight:600">Yes</span>'
+            : r.is_pep === false ? 'No' : '<span style="color:var(--ink3)">—</span>';
+          return `
+            <tr style="border-bottom:1px solid var(--border);${needsExpand ? 'cursor:pointer' : ''}"
+                ${needsExpand ? `onclick="_ccsToggleExpand('${r.client_id}')" title="${expanded ? 'Click to collapse' : 'Click to see full outstanding list'}"` : ''}>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_number || '')}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name)}">${escHtml(r.client_name)}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_type || '')}</td>
+              <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.compliance_status)}</span></td>
+              <td style="padding:6px 8px">${pepText}</td>
+              <td style="padding:6px 8px"><span class="chip ${riskChip}">${escHtml(r.risk_rating)}</span></td>
+              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.missing.length ? escHtml(outstandingText) : outstandingText}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+  statusEl.textContent = `${rows.length} client${rows.length === 1 ? '' : 's'}${_ccsSearch ? ` (filtered from ${_ccsRows.length})` : ''}`;
+  statusEl.style.color = 'var(--ink3)';
+}
+
+async function loadClientComplianceStatus() {
+  document.getElementById('ccs-results').style.display = 'block';
+  const el = document.getElementById('client-compliance-status-list');
+  const statusEl = document.getElementById('ccs-status');
+  try {
+    const res = await fetch(`${API}/api/reports/client-compliance-status`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load client compliance status.</em>'; return; }
+    _ccsRows = await res.json();
+    _ccsExpanded = new Set();
+    if (!_ccsRows.length) { el.innerHTML = '<em>No clients found.</em>'; statusEl.textContent = ''; return; }
+    _ccsRenderTable();
+  } catch(e) { el.innerHTML = '<em>Error loading client compliance status.</em>'; }
+}
+
+async function downloadClientComplianceStatusCsv() {
+  const statusEl = document.getElementById('ccs-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/client-compliance-status-export`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'client_compliance_status.csv';
 
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
