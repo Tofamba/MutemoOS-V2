@@ -4395,8 +4395,31 @@ async def admin_staging_compliance_demo_setup(request: Request):
                 })
             return {"results": results}
 
+        elif action == "export_csv":
+            # Byte-for-byte the same output client_compliance_status_report_export()
+            # produces -- same _fetch_client_compliance_roster_rows() call, same
+            # csv.writer columns, same _csv_response() wrapper -- just reachable
+            # via the admin token instead of a real partner/admin session cookie,
+            # since this is the actual real-partner-facing attachment being
+            # generated for real, not a description of what it would contain.
+            rows = await _fetch_client_compliance_roster_rows(conn)
+            import csv, io as _io
+            buf = _io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(["Client Number", "Client Name", "Client Type", "Compliance Status",
+                              "Outstanding", "PEP", "Risk Rating"])
+            for r in rows:
+                writer.writerow([
+                    r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
+                    r["compliance_status"], "; ".join(r["missing"]),
+                    "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
+                    r["risk_rating"],
+                ])
+            filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+            return _csv_response(buf.getvalue(), filename)
+
         else:
-            raise HTTPException(status_code=400, detail="action must be 'inspect' or 'apply'")
+            raise HTTPException(status_code=400, detail="action must be 'inspect', 'apply', or 'export_csv'")
 
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
