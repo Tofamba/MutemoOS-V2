@@ -4306,6 +4306,67 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- URGENT, direct resolution of a reported contradiction
+# (2026-09-02): user quoted two specific real statutory phrases (ss.17,
+# 20) said to be confirmed present multiple times this week, against a
+# separate query that reportedly concluded ss.3-37C are "entirely
+# absent". Checks BOTH layers independently for each phrase: (1) does
+# the literal text exist at all in the chunks table (ILIKE, source-of-
+# truth, independent of any ranking), and (2) does it actually surface
+# through the real /api/search code path (_semantic_search_legal(),
+# same Postgres query, same defaults) when that literal phrase is used
+# AS the search query. Read-only. Removed once resolved.
+@app.get("/api/admin/resolve-mlpca-contradiction")
+async def admin_resolve_mlpca_contradiction(request: Request):
+    require_admin_token(request)
+    phrases = [
+        "for a customer who is an individual, his or her full name and date and place of birth",
+        "shall have appropriate risk management systems",
+        "politically-exposed person",
+    ]
+    async with _db_pool.acquire() as conn:
+        literal_matches = {}
+        for phrase in phrases:
+            rows = await conn.fetch(
+                """
+                SELECT c.id, c.document_id, c.chunk_index, lu.filename, lu.status
+                FROM chunks c
+                LEFT JOIN legal_updates lu ON lu.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='legal' AND c.text ILIKE $2
+                """,
+                FIRM_ID, f"%{phrase}%"
+            )
+            literal_matches[phrase] = [
+                {"chunk_id": str(r["id"]), "document_id": str(r["document_id"]),
+                 "chunk_index": r["chunk_index"], "filename": r["filename"], "status": r["status"]}
+                for r in rows
+            ]
+
+        legal_chunk_rows = await conn.fetch(
+            """
+            SELECT c.*, lu.legal_source_type, lu.authority_strength
+            FROM chunks c
+            LEFT JOIN legal_updates lu ON lu.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='legal'
+            """,
+            FIRM_ID
+        )
+    legal_chunks = [dict(r) for r in legal_chunk_rows]
+
+    search_results = {}
+    for phrase in phrases:
+        req = SearchRequest(query=phrase, limit=8)
+        hits = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
+        search_results[phrase] = [
+            {"document_id": h["document_id"], "similarity": h["similarity"], "snippet": h["text"][:200]}
+            for h in hits
+        ]
+
+    return {
+        "literal_text_matches_in_chunks_table": literal_matches,
+        "real_search_path_results": search_results,
+    }
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
