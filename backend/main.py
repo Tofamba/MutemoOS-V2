@@ -4415,6 +4415,57 @@ async def admin_investigate_mlpca(request: Request):
         "live_semantic_search_test": live_search_hits,
     }
 
+# TEMPORARY -- URGENT, companion to admin_investigate_mlpca() above
+# (2026-09-02): reproduces the REAL /api/search code path exactly --
+# same Postgres query building legal_chunks (_run_plain_search_job,
+# main.py ~9409-9417), same _semantic_search_legal() call, same
+# SearchRequest defaults (limit=8) -- rather than a raw Chroma-only test,
+# to see whether the real result-assembly/filtering logic (not just
+# vector presence) is what's actually failing. Removed once concluded.
+@app.get("/api/admin/investigate-mlpca-real-search-path")
+async def admin_investigate_mlpca_real_search_path(request: Request):
+    require_admin_token(request)
+    queries = [
+        "acquires, uses or possesses property knowing or suspecting that it is the proceeds of crime",
+        "risk-based approach by financial institutions and designated non-financial businesses and professions",
+        "freezing of property in connection with unexplained wealth orders",
+        "dealing with property",
+    ]
+    async with _db_pool.acquire() as conn:
+        legal_chunk_rows = await conn.fetch(
+            """
+            SELECT c.*, lu.legal_source_type, lu.authority_strength
+            FROM chunks c
+            LEFT JOIN legal_updates lu ON lu.id = c.document_id
+            WHERE c.firm_id=$1 AND c.chunk_source='legal'
+            """,
+            FIRM_ID
+        )
+    legal_chunks = [dict(r) for r in legal_chunk_rows]
+    mlpca_doc_ids = {"c4053564-5e74-4a2e-8a56-7b96329a21db", "501eb0e7-04be-4577-900c-2c58af0bad66"}
+    mlpca_chunks_in_pool = [c for c in legal_chunks if str(c.get("document_id")) in mlpca_doc_ids]
+
+    query_results = {}
+    for q in queries:
+        req = SearchRequest(query=q, limit=8)
+        hits = await asyncio.to_thread(_semantic_search_legal, req, legal_chunks)
+        query_results[q] = {
+            "total_hits_returned": len(hits),
+            "mlpca_hits": [h for h in hits if h["document_id"] in mlpca_doc_ids],
+            "all_hit_document_ids_and_similarity": [
+                {"document_id": h["document_id"], "similarity": h["similarity"], "snippet": h["text"][:100]}
+                for h in hits
+            ],
+        }
+
+    return {
+        "total_legal_chunks_fetched_from_postgres": len(legal_chunks),
+        "mlpca_chunks_present_in_that_pool": len(mlpca_chunks_in_pool),
+        "search_default_limit": 8,
+        "chroma_n_results_considered_for_that_limit": 16,  # min(limit*2, collection_count); collection has thousands
+        "query_reproductions": query_results,
+    }
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
