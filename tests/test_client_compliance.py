@@ -306,6 +306,12 @@ def test_compliance_status_blocked_until_pep_approved(monkeypatch):
 
 
 def test_compliance_status_cleared_once_pep_approved(monkeypatch):
+    """A real risk_rating is included here (not left at the schema's
+    default 'NotAssessed') so this stays a genuinely fully-cleared PEP
+    case after the 2026-09-02 fix below -- risk_rating is now a second,
+    independent PEP requirement alongside senior-management approval,
+    see test_pep_risk_rating_required_* below for that behavior on its
+    own."""
     client = _client_row(m.FIRM_ID, client_type="Individual")
     pool = FakePool(clients=[client])
     monkeypatch.setattr(m, "_db_pool", pool)
@@ -318,6 +324,7 @@ def test_compliance_status_cleared_once_pep_approved(monkeypatch):
             senior_management_approved_by=approver_id,
             senior_management_approved_date="2026-08-01",
             conflict_check_reviewed=True,
+            risk_rating="Medium",
         ),
         None,
     ))
@@ -325,6 +332,106 @@ def test_compliance_status_cleared_once_pep_approved(monkeypatch):
 
     assert result["compliance_status"] == "Cleared"
     assert result["missing"] == []
+
+
+# ── compliance_status: PEP risk rating requirement (2026-09-02) ─────────────
+# Narrow fix, not a general one: risk_rating is NOT required for clearance
+# for any other client (a non-PEP client's risk_rating, assessed or not,
+# never affects compliance_status) -- only a PEP client is held to it, since
+# PEP status implies elevated risk by definition in standard AML/CFT
+# practice, so a PEP left at the schema's default risk_rating='NotAssessed'
+# shouldn't be able to show as fully "Cleared". Found while tracing a real
+# client (Anchorflow Holdings, formerly named Zimasco Holdings on staging)
+# that cleared with risk_rating still NotAssessed -- a real gap, not the
+# intended design.
+
+def test_pep_risk_rating_required_not_assessed_blocks_clearance(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    approver_id = str(uuid.uuid4())
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(
+            is_pep=True, identity_verification_status="Verified",
+            senior_management_approved_by=approver_id,
+            senior_management_approved_date="2026-08-01",
+            conflict_check_reviewed=True,
+            # risk_rating deliberately left unset -- stays at the schema
+            # default 'NotAssessed'.
+        ),
+        None,
+    ))
+    result = asyncio.run(get_client_compliance(str(client["id"]), None))
+
+    assert result["compliance_status"] == "Action Required"
+    assert result["missing"] == ["Risk rating required for PEP client"]
+
+
+def test_pep_risk_rating_set_clears_normally(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    approver_id = str(uuid.uuid4())
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(
+            is_pep=True, identity_verification_status="Verified",
+            senior_management_approved_by=approver_id,
+            senior_management_approved_date="2026-08-01",
+            conflict_check_reviewed=True,
+            risk_rating="High",
+        ),
+        None,
+    ))
+    result = asyncio.run(get_client_compliance(str(client["id"]), None))
+
+    assert result["compliance_status"] == "Cleared"
+    assert result["missing"] == []
+
+
+def test_non_pep_client_unaffected_by_risk_rating_regardless_of_value(monkeypatch):
+    """The general design is deliberately untouched: a non-PEP client's
+    risk_rating -- NotAssessed, or any real value -- never appears in
+    missing[] and never affects compliance_status."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(
+            is_pep=False, identity_verification_status="Verified",
+            conflict_check_reviewed=True,
+            # risk_rating left unset -- stays 'NotAssessed'.
+        ),
+        None,
+    ))
+    result = asyncio.run(get_client_compliance(str(client["id"]), None))
+
+    assert result["compliance_status"] == "Cleared"
+    assert result["missing"] == []
+    assert not any("risk rating" in item.lower() for item in result["missing"])
+
+
+def test_pep_never_screened_does_not_also_demand_a_risk_rating(monkeypatch):
+    """is_pep is None (never screened) -- only "PEP screening not
+    completed" should appear; the new risk_rating check only applies once
+    is_pep is actually True, not merely possible."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(identity_verification_status="Verified", conflict_check_reviewed=True),
+        None,
+    ))
+    result = asyncio.run(get_client_compliance(str(client["id"]), None))
+
+    assert result["missing"] == ["PEP screening not completed"]
 
 
 # ── compliance_status: missing vs. complete items ────────────────────────

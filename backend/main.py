@@ -4061,8 +4061,8 @@ def _compute_compliance_status(client: dict, compliance: Optional[dict], benefic
     """
     "Cleared" requires every one of: identity verified, beneficial
     ownership resolved (verified, or not applicable), PEP screening done
-    (and senior management approval if PEP), and the conflict check
-    reviewed.
+    (and senior management approval + a real risk rating if PEP), and the
+    conflict check reviewed.
 
     Conflict check: reuses the real, existing GET /api/matters/check-conflict
     (fuzzy name-similarity search against every matter, already live on the
@@ -4071,6 +4071,19 @@ def _compute_compliance_status(client: dict, compliance: Optional[dict], benefic
     on client_compliance is what "Cleared" actually gates on: a lawyer
     has run the check for this client and confirmed there's no conflict
     (see runClientConflictCheck()/markConflictReviewed() in index.html).
+
+    Risk rating (2026-09-02, narrow fix): NOT required for clearance in
+    general -- it's a separate, ongoing internal classification, not one
+    of the Act's discrete CDD steps, and every other client is unaffected
+    by it here on purpose. The one exception is a PEP: standard AML/CFT
+    practice treats PEP status as elevated risk by definition, so a PEP
+    client left at the schema's default risk_rating='NotAssessed' was
+    able to show fully "Cleared" despite the relationship's risk never
+    actually being rated -- a real gap, not the intended design (found
+    2026-09-02 while tracing why a real PEP client cleared with
+    risk_rating still NotAssessed). Fixed narrowly: only PEP clients are
+    held to this; a non-PEP client's risk_rating, assessed or not, never
+    affects compliance_status, unchanged from before.
     """
     compliance = compliance or _DEFAULT_CLIENT_COMPLIANCE
     missing = []
@@ -4094,8 +4107,11 @@ def _compute_compliance_status(client: dict, compliance: Optional[dict], benefic
     is_pep = compliance.get("is_pep")
     if is_pep is None:
         missing.append("PEP screening not completed")
-    elif is_pep is True and not compliance.get("senior_management_approved_by"):
-        missing.append("Senior management approval required (PEP)")
+    elif is_pep is True:
+        if not compliance.get("senior_management_approved_by"):
+            missing.append("Senior management approval required (PEP)")
+        if (compliance.get("risk_rating") or "NotAssessed") == "NotAssessed":
+            missing.append("Risk rating required for PEP client")
 
     if not compliance.get("conflict_check_reviewed"):
         missing.append("Conflict check not reviewed")

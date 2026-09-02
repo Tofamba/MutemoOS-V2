@@ -242,6 +242,35 @@ def test_pep_client_missing_senior_management_approval_is_flagged(monkeypatch):
     assert row["risk_rating"] == "High"
 
 
+def test_pep_client_with_approval_but_unassessed_risk_is_flagged(monkeypatch):
+    """The narrow 2026-09-02 fix, visible at the report level: a PEP
+    client can have senior-management approval squared away and still be
+    Action Required if its risk was never actually rated -- found via a
+    real client (Anchorflow Holdings, staging) that cleared with
+    risk_rating still NotAssessed despite being a PEP."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Anchorflow Holdings", client_type="Company")
+    compliance = _compliance(
+        client["id"], identity_verification_status="Verified",
+        client_is_beneficial_owner="Yes", is_pep=True,
+        senior_management_approved_by=uuid.uuid4(),
+        conflict_check_reviewed=True,
+        # risk_rating deliberately left at the _compliance() default,
+        # "NotAssessed".
+    )
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    row = rows[0]
+    assert row["compliance_status"] == "Action Required"
+    assert row["missing"] == ["Risk rating required for PEP client"]
+    assert row["is_pep"] is True
+    assert row["risk_rating"] == "NotAssessed"
+
+
 def test_legal_person_beneficial_ownership_satisfied_by_a_verified_owner(monkeypatch):
     import backend.main as m
     partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
