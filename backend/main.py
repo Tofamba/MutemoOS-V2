@@ -4290,6 +4290,20 @@ async def reindex_from_db(request: Request):
         "chunks_created": len(all_chunks),
     }
 
+# TEMPORARY -- read-only lookup so the user can find which staging login
+# (phone/email) actually holds admin/partner role, to switch off an
+# associate account that can't see reports:* (2026-09-02). Removed once
+# looked up.
+@app.get("/api/admin/staging-list-users")
+async def admin_staging_list_users(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT display_name, phone, email, role FROM users WHERE firm_id=$1 ORDER BY role, display_name",
+            FIRM_ID
+        )
+    return [dict(r) for r in rows]
+
 @app.post("/api/admin/reclassify-zlr")
 async def reclassify_zlr(request: Request):
     require_admin_token(request)
