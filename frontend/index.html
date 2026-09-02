@@ -2056,10 +2056,33 @@ select{cursor:pointer}
   <div id="tab-reports" style="display:none">
     <div class="section-head">
       <h2>📊 Reports</h2>
-      <p>RBZ compliance export of all clients and matters. Partner access only.</p>
+      <p>Pick a report below, configure it if needed, then generate — nothing renders until you ask for it.</p>
     </div>
 
     <div class="card">
+      <div class="card-title">📄 Select a Report</div>
+      <select id="reports-picker" onchange="_selectReport(this.value)"
+        style="font-size:0.85rem;padding:6px 10px;margin-top:0.5rem;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:260px">
+        <option value="">— Choose a report —</option>
+        <option value="rbz">⬇ RBZ Compliance Export</option>
+        <option value="practice-area">📂 Matters by Practice Area</option>
+        <option value="matter-review-status">🗂 Matter Review Status</option>
+        <option value="sms-usage">📱 SMS Usage by Firm</option>
+      </select>
+    </div>
+
+    <!-- Each panel below is the "configure, then Generate" step for one
+         report -- per instruction, nothing here auto-renders on tab open
+         (showTab('reports') used to fire all four loads unconditionally,
+         which is exactly what dumped every report's full table onto the
+         page by default). Only one panel is visible at a time, toggled
+         by _selectReport() below; each report's own Generate action is
+         unchanged from before (generateComplianceExport(),
+         loadPracticeAreaBreakdown(), loadMatterReviewStatus(),
+         loadSmsUsageByFirm()) -- this is a visibility/sequencing
+         restructure, not new report logic. -->
+
+    <div class="card" id="report-panel-rbz" style="display:none;margin-top:1rem">
       <div class="card-title">⬇ RBZ Compliance Export</div>
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
         Every client (client number, name, contact person, phone/email) and their matters (matter number, status), firm-wide. Available as CSV or PDF — same data either way.
@@ -2071,47 +2094,64 @@ select{cursor:pointer}
       </div>
     </div>
 
-    <div class="card" style="margin-top:1rem">
-      <div class="card-title">🕘 Report History</div>
-      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Every export generated, so the firm can show a record of regular reporting.</p>
-      <div id="report-history-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
-    </div>
-
-    <div class="card" style="margin-top:1rem">
+    <div class="card" id="report-panel-practice-area" style="display:none;margin-top:1rem">
       <div class="card-title">📂 Matters by Practice Area</div>
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Firm-wide matter count per practice area.</p>
-      <div id="practice-area-breakdown-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadPracticeAreaBreakdown()">▶ Generate</button>
+      </div>
+      <div id="practice-area-breakdown-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)"></div>
     </div>
 
-    <div class="card" style="margin-top:1rem">
+    <div class="card" id="report-panel-matter-review-status" style="display:none;margin-top:1rem">
       <div class="card-title">🗂 Matter Review Status</div>
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
         Every matter's review state and last real activity, soonest-due / most-overdue first — an on-demand audit of the whole caseload, not just what's currently flagged in the reminder digest.
       </p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:0.75rem;align-items:center">
-        <select id="mrs-filter-lawyer" style="font-size:0.8rem;padding:4px 8px" onchange="loadMatterReviewStatus()">
+        <select id="mrs-filter-lawyer" style="font-size:0.8rem;padding:4px 8px" onchange="_mrsFilterChanged()">
           <option value="">All lawyers (by created by)</option>
         </select>
-        <select id="mrs-filter-client" style="font-size:0.8rem;padding:4px 8px" onchange="loadMatterReviewStatus()">
+        <select id="mrs-filter-client" style="font-size:0.8rem;padding:4px 8px" onchange="_mrsFilterChanged()">
           <option value="">All clients</option>
         </select>
-        <select id="mrs-filter-status" style="font-size:0.8rem;padding:4px 8px" onchange="loadMatterReviewStatus()">
+        <select id="mrs-filter-status" style="font-size:0.8rem;padding:4px 8px" onchange="_mrsFilterChanged()">
           <option value="">All statuses</option>
         </select>
-        <input type="text" id="mrs-search" placeholder="🔍 Search matter or client…" oninput="_mrsSetSearch(this.value)"
-          style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:200px"/>
-        <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterReviewStatusCsv()">⬇ Download CSV</button>
+        <button class="btn btn-primary" style="font-size:0.8rem" onclick="loadMatterReviewStatus()">▶ Generate</button>
       </div>
-      <div id="mrs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
-      <div id="matter-review-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      <!-- Results step: search box, CSV download, and the table itself
+           only appear once a report has actually been generated at
+           least once (toggled in loadMatterReviewStatus()) -- filters
+           above are the "configure" step, this is the "results" step,
+           per instruction these stay separate rather than the table
+           rendering ahead of an explicit Generate. -->
+      <div id="mrs-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="mrs-search" placeholder="🔍 Search matter or client…" oninput="_mrsSetSearch(this.value)"
+            style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:200px"/>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterReviewStatusCsv()">⬇ Download CSV</button>
+        </div>
+        <div id="mrs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="matter-review-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
     </div>
 
-    <div class="card" style="margin-top:1rem">
+    <div class="card" id="report-panel-sms-usage" style="display:none;margin-top:1rem">
       <div class="card-title">📱 SMS Usage by Firm</div>
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
         OTP send count and cost per month — the Africa's Talking account is shared across firm deployments, so this attributes this firm's own share of that real cost, to check against actual AT billing over time.
       </p>
-      <div id="sms-usage-by-firm-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadSmsUsageByFirm()">▶ Generate</button>
+      </div>
+      <div id="sms-usage-by-firm-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)"></div>
+    </div>
+
+    <div class="card" style="margin-top:1rem">
+      <div class="card-title">🕘 Report History</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Every export generated, so the firm can show a record of regular reporting.</p>
+      <div id="report-history-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
     </div>
   </div>
 
@@ -3591,7 +3631,38 @@ function showTab(tab) {
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
-  if (tab === 'reports') { loadReportHistory(); loadPracticeAreaBreakdown(); loadMatterReviewStatusFilters().then(loadMatterReviewStatus); loadSmsUsageByFirm(); }
+  if (tab === 'reports') { loadReportHistory(); document.getElementById('reports-picker').value = ''; _selectReport(''); }
+}
+
+// ── Reports tab: pick-a-report, configure, then Generate ────────────────────
+// Restructured 2026-09-01 -- showTab('reports') used to fire all four
+// reports' loads unconditionally the moment the tab opened (practice-area
+// breakdown, the full Matter Review Status table, SMS usage), which is
+// exactly what made the page "dump every report's full data by default".
+// Report History is the one exception, kept always-visible: it's a short
+// audit log, not a rendered report table, and wasn't part of what made
+// the page busy.
+const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'sms-usage'];
+let _mrsFiltersLoaded = false;
+let _mrsHasGenerated = false;
+
+function _selectReport(key) {
+  REPORT_PANEL_KEYS.forEach(k => {
+    document.getElementById(`report-panel-${k}`).style.display = (k === key) ? 'block' : 'none';
+  });
+  if (key === 'matter-review-status' && !_mrsFiltersLoaded) {
+    _mrsFiltersLoaded = true;
+    loadMatterReviewStatusFilters();
+  }
+}
+
+// Once a report has been generated at least once, changing a filter
+// re-generates it automatically (a normal, low-friction refinement) --
+// but the very first render always waits for an explicit Generate click,
+// per instruction ("filters... as part of the configure-before-generating
+// step, not applied after a huge table is already rendered").
+function _mrsFilterChanged() {
+  if (_mrsHasGenerated) loadMatterReviewStatus();
 }
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -7538,6 +7609,7 @@ async function loadReportHistory() {
 
 async function loadPracticeAreaBreakdown() {
   const el = document.getElementById('practice-area-breakdown-list');
+  el.innerHTML = '<em>Loading…</em>';
   try {
     const res = await fetch(`${API}/api/reports/practice-area-breakdown`);
     if (!res.ok) { el.innerHTML = '<em>Could not load practice area breakdown.</em>'; return; }
@@ -7750,6 +7822,8 @@ function _mrsRenderTable() {
 }
 
 async function loadMatterReviewStatus() {
+  _mrsHasGenerated = true;
+  document.getElementById('mrs-results').style.display = 'block';
   const el = document.getElementById('matter-review-status-list');
   const statusEl = document.getElementById('mrs-status');
   try {
@@ -7798,6 +7872,7 @@ async function downloadMatterReviewStatusCsv() {
 
 async function loadSmsUsageByFirm() {
   const el = document.getElementById('sms-usage-by-firm-list');
+  el.innerHTML = '<em>Loading…</em>';
   try {
     const res = await fetch(`${API}/api/reports/sms-usage-by-firm`);
     if (!res.ok) { el.innerHTML = '<em>Could not load SMS usage.</em>'; return; }
