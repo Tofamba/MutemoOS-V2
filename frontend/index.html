@@ -2067,7 +2067,6 @@ select{cursor:pointer}
         <option value="rbz">⬇ RBZ Compliance Export</option>
         <option value="practice-area">📂 Matters by Practice Area</option>
         <option value="matter-review-status">🗂 Matter Review Status</option>
-        <option value="sms-usage">📱 SMS Usage by Firm</option>
       </select>
     </div>
 
@@ -2078,9 +2077,15 @@ select{cursor:pointer}
          page by default). Only one panel is visible at a time, toggled
          by _selectReport() below; each report's own Generate action is
          unchanged from before (generateComplianceExport(),
-         loadPracticeAreaBreakdown(), loadMatterReviewStatus(),
-         loadSmsUsageByFirm()) -- this is a visibility/sequencing
-         restructure, not new report logic. -->
+         loadPracticeAreaBreakdown(), loadMatterReviewStatus()) -- this
+         is a visibility/sequencing restructure, not new report logic.
+
+         SMS Usage by Firm was removed from this picker entirely
+         (2026-09-02) -- it's Tofamba's own Africa's Talking cost-
+         attribution view, not something a firm's own admin/partner has
+         a legitimate reason to see. Its endpoint is now operator-only
+         (require_admin_token(), backend/main.py), reachable directly,
+         same as an admin script -- no firm-facing UI for it at all. -->
 
     <div class="card" id="report-panel-rbz" style="display:none;margin-top:1rem">
       <div class="card-title">⬇ RBZ Compliance Export</div>
@@ -2135,17 +2140,6 @@ select{cursor:pointer}
         <div id="mrs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
         <div id="matter-review-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
       </div>
-    </div>
-
-    <div class="card" id="report-panel-sms-usage" style="display:none;margin-top:1rem">
-      <div class="card-title">📱 SMS Usage by Firm</div>
-      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
-        OTP send count and cost per month — the Africa's Talking account is shared across firm deployments, so this attributes this firm's own share of that real cost, to check against actual AT billing over time.
-      </p>
-      <div style="margin-top:0.5rem">
-        <button class="btn btn-primary" onclick="loadSmsUsageByFirm()">▶ Generate</button>
-      </div>
-      <div id="sms-usage-by-firm-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)"></div>
     </div>
 
     <div class="card" style="margin-top:1rem">
@@ -3642,7 +3636,12 @@ function showTab(tab) {
 // Report History is the one exception, kept always-visible: it's a short
 // audit log, not a rendered report table, and wasn't part of what made
 // the page busy.
-const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'sms-usage'];
+//
+// SMS Usage by Firm was removed from this picker entirely (2026-09-02) --
+// it was Tofamba's own AT cost-attribution view, not a firm-facing report;
+// see backend/main.py's sms_usage_by_firm_report() for where it now lives
+// (operator-only, require_admin_token()).
+const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status'];
 let _mrsFiltersLoaded = false;
 let _mrsHasGenerated = false;
 
@@ -7868,46 +7867,11 @@ async function downloadMatterReviewStatusCsv() {
   }
 }
 
-// ── Reports (SMS Usage by Firm) ─────────────────────────────────────────────
-
-async function loadSmsUsageByFirm() {
-  const el = document.getElementById('sms-usage-by-firm-list');
-  el.innerHTML = '<em>Loading…</em>';
-  try {
-    const res = await fetch(`${API}/api/reports/sms-usage-by-firm`);
-    if (!res.ok) { el.innerHTML = '<em>Could not load SMS usage.</em>'; return; }
-    const rows = await res.json();
-    if (!rows.length) { el.innerHTML = '<em>No SMS OTP sends logged yet.</em>'; return; }
-    el.innerHTML = `
-      <table style="width:100%;border-collapse:collapse">
-        <thead>
-          <tr style="text-align:left;border-bottom:1px solid var(--gold2)">
-            <th style="padding:6px 8px 6px 0">Month</th>
-            <th style="padding:6px 8px">Firm</th>
-            <th style="padding:6px 8px">Sends</th>
-            <th style="padding:6px 8px">Delivered</th>
-            <th style="padding:6px 8px">Failed</th>
-            <th style="padding:6px 8px">Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.map(r => `
-            <tr style="border-bottom:1px solid var(--border)">
-              <td style="padding:6px 8px 6px 0">${r.month.slice(0, 7)}</td>
-              <td style="padding:6px 8px">${escHtml(r.firm_name)}</td>
-              <td style="padding:6px 8px">${r.total_sends}</td>
-              <td style="padding:6px 8px;color:var(--green)">${r.delivered_count}</td>
-              <td style="padding:6px 8px${r.failed_count > 0 ? ';color:var(--red)' : ''}">${r.failed_count}</td>
-              <td style="padding:6px 8px">${r.cost_by_currency.length
-                ? r.cost_by_currency.map(c => `${c.currency} ${c.total_cost.toFixed(4)}`).join(', ')
-                : '<span style="color:var(--ink3)">—</span>'}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    `;
-  } catch(e) { el.innerHTML = '<em>Error loading SMS usage.</em>'; }
-}
+// SMS Usage by Firm's own render function (loadSmsUsageByFirm) was removed
+// 2026-09-02 along with its picker entry and panel above -- it's Tofamba's
+// own operator-only report now (backend/main.py's sms_usage_by_firm_report,
+// gated by require_admin_token()), not something this firm-facing frontend
+// calls at all.
 
 // ── My Portfolio ─────────────────────────────────────────────────────────────
 // Self-scoped caseload dashboard: GET /api/my-portfolio takes no lawyer_id

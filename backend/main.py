@@ -1152,7 +1152,9 @@ PERMISSIONS = {
     "reports:rbz_compliance": {"admin", "partner"},
     "reports:practice_area_breakdown": {"admin", "partner"},
     "reports:matter_review_status": {"admin", "partner"},
-    "reports:sms_usage": {"admin", "partner"},
+    # reports:sms_usage removed 2026-09-02 -- SMS Usage by Firm is Tofamba's
+    # own Africa's Talking cost-attribution view, not a firm-facing report;
+    # its endpoint is gated by require_admin_token() instead, see below.
 }
 
 def _check_permission(user: dict, permission: str):
@@ -7175,13 +7177,24 @@ async def my_portfolio_export_pdf(request: Request):
     )
 
 # ── Reports (SMS Usage by Firm) ─────────────────────────────────────────────
-# Partner-tier, own scoped key (reports:sms_usage), same convention as the
-# reports above. Aggregates sms_usage_log (see run_migrations() for why
-# firm_id matters here even under Option B's one-firm-per-deployment
-# model: the Africa's Talking account/credentials can be, and are, shared
-# across separate firm deployments -- this is how each firm's own share of
-# that real shared cost gets attributed back to it, to check against
-# actual AT billing over time).
+# Operator-tier, not firm-tier: gated by require_admin_token(), the same
+# shared-secret pattern used for this session's temporary backfill/verify
+# endpoints, NOT by _check_permission()/a firm role. This report shows real
+# Africa's Talking cost data -- the AT account/credentials are shared across
+# separate firm deployments, so this is how each firm's own share of that
+# real shared cost gets attributed back, to check against actual AT billing
+# over time -- but that's Tofamba's own operating-cost visibility, not
+# something a firm's own admin/partner has a legitimate reason to see, so it
+# was deliberately pulled out of the firm-facing Reports picker (2026-09-02)
+# and is reachable only via this endpoint directly, same as an admin script.
+#
+# Known gap, not being fixed here: require_admin_token() was designed for
+# temporary one-off scripts, not a permanent, periodically-checked report --
+# it has no identity attached beyond "holds the shared token". Fine for one
+# report; if a second Tofamba-operator-facing view shows up (cross-deployment
+# health, multi-firm billing reconciliation), that's the trigger to build a
+# real lightweight operator-identity mechanism instead of stacking more
+# permanent access behind this single bearer token.
 
 async def _fetch_sms_usage_by_firm(conn) -> list:
     """
@@ -7238,12 +7251,13 @@ async def _fetch_sms_usage_by_firm(conn) -> list:
 @app.get("/api/reports/sms-usage-by-firm")
 async def sms_usage_by_firm_report(request: Request):
     """
-    Send count and cost-by-currency per firm per month, so this firm's
-    share of the shared Africa's Talking account's real cost can be
-    checked periodically against actual AT billing.
+    Send count and cost-by-currency per firm per month, so Tofamba can
+    check this firm deployment's share of the shared Africa's Talking
+    account's real cost against actual AT billing. Operator-only -- see
+    the require_admin_token() note above this function's own comment
+    block; deliberately NOT a firm role, no firm user should reach this.
     """
-    user = await get_current_user(request)
-    _check_permission(user, "reports:sms_usage")
+    require_admin_token(request)
     async with _db_pool.acquire() as conn:
         rows = await _fetch_sms_usage_by_firm(conn)
     return rows

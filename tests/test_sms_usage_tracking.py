@@ -7,15 +7,17 @@ Unit tests for per-firm SMS usage tracking (backend/main.py, 2026-08-31):
   - request_otp(): wires _send_otp_code's collected AT attempt(s) into
     _log_sms_usage, regardless of the eventual channel/outcome.
   - GET /api/reports/sms-usage-by-firm: aggregates by firm + month.
+    Operator-only since 2026-09-02 (require_admin_token(), not a firm
+    role) -- this is Tofamba's own AT cost-attribution view, pulled out
+    of the firm-facing Reports picker.
 
 Called directly as plain async functions, same convention as
 tests/test_otp_and_reassignment_firm_scoping.py (request_otp) and
-tests/test_rbz_compliance_export.py (report permission gate / FakePool
-shape).
+tests/test_admin_backfill_chunk_hashes.py (require_admin_token()
+gate / FakeRequest shape).
 """
 
 import asyncio
-import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -49,14 +51,12 @@ class FakePool:
         return _FakeAcquireCtx(self.conn)
 
 
-def _as_current_user(monkeypatch, m, user_dict):
-    async def fake_get_current_user(request):
-        return user_dict
-    monkeypatch.setattr(m, "get_current_user", fake_get_current_user)
-
-
-def _fake_request():
-    return None
+class FakeRequest:
+    """Same shape as tests/test_admin_backfill_chunk_hashes.py's own
+    FakeRequest -- sms_usage_by_firm_report is operator-gated via
+    require_admin_token(), not a firm role, since 2026-09-02."""
+    def __init__(self, headers=None):
+        self.headers = headers or {}
 
 
 # ── _log_sms_usage: the INSERT itself ───────────────────────────────────────
@@ -225,19 +225,21 @@ def _usage_row(month, status, cost_amount=None, cost_currency=None, firm_id=FIRM
             "status": status, "cost_amount": cost_amount, "cost_currency": cost_currency}
 
 
-def test_associate_gets_403(monkeypatch):
+def test_rejects_without_a_valid_admin_token(monkeypatch):
+    """Operator-only report (2026-09-02): no firm role, admin or partner
+    included, gets in without the shared admin token."""
     import backend.main as m
-    associate = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "associate", "display_name": "Assoc"}
+    monkeypatch.setattr(m, "ADMIN_TOKEN", "real-admin-token")
     monkeypatch.setattr(m, "_db_pool", FakePool(_ReportConn([])))
-    _as_current_user(monkeypatch, m, associate)
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(sms_usage_by_firm_report(_fake_request()))
+        asyncio.run(sms_usage_by_firm_report(FakeRequest(headers={})))
     assert exc_info.value.status_code == 403
 
 
 def test_aggregates_counts_and_cost_for_one_month(monkeypatch):
     import backend.main as m
+    monkeypatch.setattr(m, "ADMIN_TOKEN", "real-admin-token")
     aug = datetime(2026, 8, 1, tzinfo=timezone.utc)
     rows = [
         _usage_row(aug, "delivered", 0.05, "USD"),
@@ -246,7 +248,7 @@ def test_aggregates_counts_and_cost_for_one_month(monkeypatch):
     ]
     monkeypatch.setattr(m, "_db_pool", FakePool(_ReportConn(rows)))
 
-    result = asyncio.run(sms_usage_by_firm_report(_fake_request()))
+    result = asyncio.run(sms_usage_by_firm_report(FakeRequest(headers={"X-Admin-Token": "real-admin-token"})))
 
     assert len(result) == 1
     entry = result[0]
@@ -259,12 +261,13 @@ def test_aggregates_counts_and_cost_for_one_month(monkeypatch):
 
 def test_separates_months(monkeypatch):
     import backend.main as m
+    monkeypatch.setattr(m, "ADMIN_TOKEN", "real-admin-token")
     aug = datetime(2026, 8, 1, tzinfo=timezone.utc)
     sep = datetime(2026, 9, 1, tzinfo=timezone.utc)
     rows = [_usage_row(aug, "delivered", 0.05, "USD"), _usage_row(sep, "delivered", 0.05, "USD")]
     monkeypatch.setattr(m, "_db_pool", FakePool(_ReportConn(rows)))
 
-    result = asyncio.run(sms_usage_by_firm_report(_fake_request()))
+    result = asyncio.run(sms_usage_by_firm_report(FakeRequest(headers={"X-Admin-Token": "real-admin-token"})))
 
     months = {r["month"] for r in result}
     assert months == {"2026-08-01", "2026-09-01"}
@@ -275,11 +278,12 @@ def test_separates_currencies_rather_than_blending_them(monkeypatch):
     """A real, deliberate correctness guard: summing different currencies
     into one number would be meaningless."""
     import backend.main as m
+    monkeypatch.setattr(m, "ADMIN_TOKEN", "real-admin-token")
     aug = datetime(2026, 8, 1, tzinfo=timezone.utc)
     rows = [_usage_row(aug, "delivered", 0.05, "USD"), _usage_row(aug, "delivered", 0.5, "ZWL")]
     monkeypatch.setattr(m, "_db_pool", FakePool(_ReportConn(rows)))
 
-    result = asyncio.run(sms_usage_by_firm_report(_fake_request()))
+    result = asyncio.run(sms_usage_by_firm_report(FakeRequest(headers={"X-Admin-Token": "real-admin-token"})))
 
     assert result[0]["cost_by_currency"] == [
         {"currency": "USD", "total_cost": 0.05},
@@ -289,6 +293,7 @@ def test_separates_currencies_rather_than_blending_them(monkeypatch):
 
 def test_no_usage_returns_empty_list(monkeypatch):
     import backend.main as m
+    monkeypatch.setattr(m, "ADMIN_TOKEN", "real-admin-token")
     monkeypatch.setattr(m, "_db_pool", FakePool(_ReportConn([])))
 
-    assert asyncio.run(sms_usage_by_firm_report(_fake_request())) == []
+    assert asyncio.run(sms_usage_by_firm_report(FakeRequest(headers={"X-Admin-Token": "real-admin-token"}))) == []
