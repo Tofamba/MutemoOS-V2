@@ -8179,6 +8179,87 @@ async def delete_legal_update(item_id: str, request: Request):
         await asyncio.to_thread(remove_chunks_from_chroma, chunk_ids, "legal")
     return {"deleted": True}
 
+# TEMP (2026-09-03) -- real cleanup of the known duplicate MLPCA
+# legal_updates row (see project memory: c4053564-... uploaded 2026-08-21
+# vs. 501eb0e7-... uploaded 2026-09-02, both status='complete',
+# chunk_count=121, confirmed by direct investigation to be an exact
+# duplicate upload of "Money Laundering and Proceeds of Crime Act.pdf").
+# X-Admin-Token gated, same pattern as every other one-off investigation/
+# fix endpoint this session -- removed once verified. Re-confirms current
+# state before deleting anything rather than trusting memory of a prior
+# investigation; refuses to act if reality doesn't match what's expected.
+@app.get("/api/admin/cleanup-mlpca-duplicate")
+async def _cleanup_mlpca_duplicate_TEMP(request: Request):
+    require_admin_token(request)
+    keep_id = _uuid_mod.UUID("c4053564-5e74-4a2e-8a56-7b96329a21db")
+    delete_id = _uuid_mod.UUID("501eb0e7-04be-4577-900c-2c58af0bad66")
+
+    async with _db_pool.acquire() as conn:
+        before_rows = await conn.fetch(
+            "SELECT id, title, status, chunk_count, uploaded_at FROM legal_updates "
+            "WHERE id = ANY($1) AND firm_id=$2",
+            [keep_id, delete_id], FIRM_ID
+        )
+        before_by_id = {str(r["id"]): dict(r) for r in before_rows}
+        before_chunk_counts = {}
+        for label, doc_id in (("keep", keep_id), ("delete", delete_id)):
+            n = await conn.fetchval(
+                "SELECT COUNT(*) FROM chunks WHERE document_id=$1 AND firm_id=$2", doc_id, FIRM_ID
+            )
+            before_chunk_counts[label] = n
+
+        # Safety check: only proceed if reality still matches the known
+        # investigation findings -- both rows present, both complete,
+        # both with real (non-zero) matching chunk_count/actual chunk rows.
+        expected_ok = (
+            str(keep_id) in before_by_id and str(delete_id) in before_by_id
+            and before_by_id[str(keep_id)]["status"] == "complete"
+            and before_by_id[str(delete_id)]["status"] == "complete"
+            and before_chunk_counts["keep"] > 0 and before_chunk_counts["delete"] > 0
+        )
+        if not expected_ok:
+            return {
+                "action": "REFUSED -- current state does not match expected investigation findings",
+                "before_rows": {k: {**v, "id": str(v["id"]), "uploaded_at": v["uploaded_at"].isoformat() if v.get("uploaded_at") else None} for k, v in before_by_id.items()},
+                "before_chunk_counts": before_chunk_counts,
+            }
+
+        chunk_rows = await conn.fetch(
+            "SELECT id FROM chunks WHERE document_id=$1 AND firm_id=$2", delete_id, FIRM_ID
+        )
+        chunk_ids = [r["id"] for r in chunk_rows]
+        result = await conn.execute(
+            "DELETE FROM legal_updates WHERE id=$1 AND firm_id=$2", delete_id, FIRM_ID
+        )
+        await conn.execute("DELETE FROM chunks WHERE document_id=$1 AND firm_id=$2", delete_id, FIRM_ID)
+
+        after_keep_row = await conn.fetchrow(
+            "SELECT id, title, status, chunk_count FROM legal_updates WHERE id=$1 AND firm_id=$2",
+            keep_id, FIRM_ID
+        )
+        after_keep_chunks = await conn.fetchval(
+            "SELECT COUNT(*) FROM chunks WHERE document_id=$1 AND firm_id=$2", keep_id, FIRM_ID
+        )
+        after_delete_chunks = await conn.fetchval(
+            "SELECT COUNT(*) FROM chunks WHERE document_id=$1 AND firm_id=$2", delete_id, FIRM_ID
+        )
+
+    if chunk_ids:
+        await asyncio.to_thread(remove_chunks_from_chroma, chunk_ids, "legal")
+
+    return {
+        "action": "DELETED" if result != "DELETE 0" else "NOT FOUND (already gone?)",
+        "deleted_id": str(delete_id),
+        "before_chunk_counts": before_chunk_counts,
+        "chroma_vectors_removed": len(chunk_ids),
+        "after_delete_row_chunks_remaining_in_postgres": after_delete_chunks,  # must be 0
+        "kept_row_untouched": {
+            "id": str(after_keep_row["id"]), "title": after_keep_row["title"],
+            "status": after_keep_row["status"], "chunk_count_field": after_keep_row["chunk_count"],
+            "actual_chunks_in_postgres": after_keep_chunks,
+        },
+    }
+
 @app.post("/api/legal-updates/search")
 async def search_legal_updates(req: LegalUpdateSearchRequest, request: Request):
     user = await get_current_user(request)
