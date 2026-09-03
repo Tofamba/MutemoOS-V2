@@ -4595,7 +4595,30 @@ async function updateMatterField(matterId, field, value) {
     if (updated && !updated.detail) Object.assign(m, updated);
     else m[field] = value;
   }
+  // renderMattersList() rebuilds every matter-item's HTML from scratch,
+  // including matter-docs-${id} -- and the "open" class that actually
+  // shows a panel (.matter-docs{display:none} / .open{display:block})
+  // is only ever added dynamically by toggleMatter(), never baked into
+  // that template. So without this, ANY field saved through this
+  // function -- not just the new AML Scope/Matter Risk fields, every one
+  // of them (status, internal_ref, external_ref, next_review_date, ...)
+  // -- silently collapses the matter's own open panel back to the
+  // matters list on every single save. Real bug found 2026-09-03 via the
+  // new AML fields specifically, because setting AML Scope + Reason +
+  // Matter Risk in one sitting is the first workflow that chains several
+  // quick edits on one open matter -- a single status change never made
+  // this annoying enough to notice before. Fixed at the root (here, not
+  // per-field): capture whether the panel was open before the rebuild,
+  // put it right back if so.
+  const wasOpen = document.getElementById(`matter-docs-${matterId}`)?.classList.contains('open');
   renderMattersList();
+  if (wasOpen) {
+    const docsEl = document.getElementById(`matter-docs-${matterId}`);
+    const icon = document.getElementById(`expand-icon-${matterId}`);
+    if (docsEl) docsEl.classList.add('open');
+    if (icon) icon.textContent = '▼';
+    await renderMatterPanel(matterId);
+  }
 }
 
 // Same as updateMatterField, but also re-renders the currently-open matter
