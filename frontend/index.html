@@ -1656,7 +1656,10 @@ select{cursor:pointer}
   <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(700px,94vw);max-height:92vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
       <div style="font-weight:700;font-size:1rem">🛡 AML/KYC Compliance</div>
-      <button onclick="closeComplianceModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="btn btn-outline btn-sm" onclick="openClientCddReportModal(_complianceClientId)">📄 View Full CDD Report</button>
+        <button onclick="closeComplianceModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+      </div>
     </div>
     <div id="compliance-badge-row" style="margin-bottom:1rem"></div>
 
@@ -1865,6 +1868,24 @@ select{cursor:pointer}
 
     <div id="compliance-modal-status" class="status" style="margin-bottom:0.5rem"></div>
     <button class="btn btn-primary" style="width:100%" onclick="submitComplianceForm()">Save Compliance Info</button>
+  </div>
+</div>
+
+<!-- ═══════════════ INDIVIDUAL CLIENT AML / CDD REPORT MODAL ═══════════════ -->
+<!-- 2026-09-03, partner design review, built from a sample report PDF
+     ("Sample 2") -- "show me everything relevant to this client's
+     compliance position." Reachable from the AML/Client Compliance
+     Register (clicking a client's name) and from this client's own
+     compliance modal ("View Full CDD Report" button, above) -- both
+     call the same openClientCddReportModal(clientId), one GET, one
+     render function; there is no second copy of this report's layout. -->
+<div id="cdd-report-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1001;align-items:center;justify-content:center;padding:2rem 0">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(920px,96vw);max-height:92vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+      <div style="font-weight:700;font-size:1rem">📄 Individual Client AML / CDD Report</div>
+      <button onclick="closeClientCddReportModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+    <div id="cdd-report-body" style="font-size:0.85rem">Loading…</div>
   </div>
 </div>
 
@@ -4297,6 +4318,44 @@ async function renderMatterPanel(id) {
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:90px">LAST REVIEWED</label>
             <span style="font-size:0.78rem;color:var(--ink2)">${matter.last_reviewed_date || '—'}</span>
           </div>
+        </div>
+      </div>
+
+      <!-- Matter-level AML (2026-09-03, Individual Client AML/CDD Report
+           Part B) — same honest "manual, pending firm policy" framing as
+           the client-level AML Scope field: not auto-derived from matter
+           type, no confirmed mapping to the Act's specified activities
+           exists yet. The same client can have differently-scoped
+           matters (a property acquisition vs. a divorce), which is why
+           this lives here rather than only on the client. -->
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">🛡 AML (this matter)</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:130px">AML SCOPE (manual, pending firm policy)</label>
+            <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+                    onchange="updateMatterField('${id}','aml_scope',this.value)">
+              ${[['NotAssessed','Not Assessed'],['InScope','In Scope'],['OutOfScope','Out of Scope']].map(([v,label]) =>
+                `<option value="${v}" ${(matter.aml_scope || 'NotAssessed')===v?'selected':''}>${label}</option>`
+              ).join('')}
+            </select>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:80px">MATTER RISK</label>
+            <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+                    onchange="updateMatterField('${id}','matter_risk',this.value)">
+              ${[['NotAssessed','Not Assessed'],['Low','Low'],['Medium','Medium'],['High','High']].map(([v,label]) =>
+                `<option value="${v}" ${(matter.matter_risk || 'NotAssessed')===v?'selected':''}>${label}</option>`
+              ).join('')}
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:130px">REASON FOR AML SCOPE</label>
+          <input type="text" value="${escHtml(matter.aml_scope_reason || '')}"
+            style="flex:1;min-width:220px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+            onchange="updateMatterField('${id}','aml_scope_reason',this.value)"
+            placeholder="e.g. Transaction involves acquisition of immovable property."/>
         </div>
       </div>
 
@@ -8076,7 +8135,11 @@ function _ccsRenderTable() {
             <tr style="border-bottom:1px solid var(--border);${needsExpand ? 'cursor:pointer' : ''}"
                 ${needsExpand ? `onclick="_ccsToggleExpand('${r.client_id}')" title="${expanded ? 'Click to collapse' : 'Click to see full outstanding list'}"` : ''}>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_number || '')}</td>
-              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name)}">${escHtml(r.client_name)}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                <a href="#" onclick="event.stopPropagation();event.preventDefault();openClientCddReportModal('${r.client_id}')"
+                   title="View Individual Client AML/CDD Report for ${escHtml(r.client_name)}"
+                   style="color:var(--blue);text-decoration:none">${escHtml(r.client_name)}</a>
+              </td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_type || '')}</td>
               <td style="padding:6px 8px"><span class="chip ${amlScopeChip}">${escHtml(_ccsLabel(r.aml_scope))}</span></td>
               <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.compliance_status)}</span></td>
@@ -8389,6 +8452,191 @@ async function downloadAmlExceptionsPdf() {
     statusEl.textContent = `Error: ${e.message}`;
     statusEl.style.color = 'var(--red)';
   }
+}
+
+// ── Individual Client AML / CDD Report modal ────────────────────────────────
+// 2026-09-03, partner design review, built from a sample report PDF --
+// "show me everything relevant to this client's compliance position,"
+// the second of the three management questions this report family
+// answers. One GET, one render function, reachable from both the
+// Register (clicking a client's name) and this client's own compliance
+// modal ("View Full CDD Report" button) -- see index.html's modal markup
+// comment for why there's only one copy of this.
+
+function _cddKV(rows) {
+  // Shared two-column "Item | Status" / "Field | Information" table --
+  // every section in the sample report is exactly this shape except the
+  // list-shaped ones (BO, reps, matters, documents), which get their own
+  // multi-column tables below.
+  return `
+    <table style="width:100%;border-collapse:collapse;margin-bottom:0.5rem">
+      ${rows.map(([label, value]) => `
+        <tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:5px 8px;font-weight:600;color:var(--ink2);width:38%;vertical-align:top">${escHtml(label)}</td>
+          <td style="padding:5px 8px;color:var(--ink)">${value}</td>
+        </tr>
+      `).join('')}
+    </table>
+  `;
+}
+
+function _cddSection(title, bodyHtml) {
+  return `
+    <div style="margin-bottom:1rem">
+      <div style="font-weight:700;font-size:0.82rem;margin-bottom:0.35rem;color:var(--ink2)">${title}</div>
+      ${bodyHtml}
+    </div>
+  `;
+}
+
+function _cddTable(headers, rows) {
+  if (!rows.length) return '<p style="color:var(--ink3);font-style:italic;margin:0 0 0.5rem">None recorded.</p>';
+  return `
+    <div style="overflow-x:auto;margin-bottom:0.5rem">
+    <table style="width:100%;border-collapse:collapse;font-size:0.82rem">
+      <thead><tr style="text-align:left;background:var(--paper2)">
+        ${headers.map(h => `<th style="padding:5px 8px;border-bottom:1px solid var(--gold2)">${escHtml(h)}</th>`).join('')}
+      </tr></thead>
+      <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border)">${r.map(c => `<td style="padding:5px 8px">${c}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table>
+    </div>
+  `;
+}
+
+const CDD_PEP_CHIP_TEXT = (v) => v === true ? '<span style="color:var(--red);font-weight:600">Yes</span>'
+  : v === false ? 'No' : '<span style="color:var(--ink3)">Not yet assessed</span>';
+
+async function openClientCddReportModal(clientId) {
+  document.getElementById('cdd-report-modal').style.display = 'flex';
+  const body = document.getElementById('cdd-report-body');
+  body.innerHTML = '<div style="padding:1rem 0;color:var(--ink3)">Loading…</div>';
+  try {
+    const res = await fetch(`${API}/api/clients/${clientId}/aml-cdd-report`);
+    if (!res.ok) { body.innerHTML = '<em>Could not load this client’s CDD report.</em>'; return; }
+    const r = await res.json();
+    body.innerHTML = _renderCddReport(r);
+  } catch(e) {
+    body.innerHTML = `<em>Error loading CDD report: ${escHtml(e.message)}</em>`;
+  }
+}
+
+function closeClientCddReportModal() {
+  document.getElementById('cdd-report-modal').style.display = 'none';
+}
+
+function _renderCddReport(r) {
+  const c = r.client;
+  const overall = r.overall;
+  const statusChip = overall.compliance_status === 'Cleared' ? 'chip-green' : 'chip-red';
+
+  const header = `
+    <div style="margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)">
+      <div style="font-size:0.95rem;font-weight:700">${escHtml(c.full_name)}</div>
+      <div style="font-size:0.8rem;color:var(--ink3)">
+        Client No. ${escHtml(c.client_number || '—')} &middot; ${escHtml(c.client_type || 'Type not recorded')}
+      </div>
+    </div>
+  `;
+
+  const overallSection = _cddSection('1. Overall Compliance Position', _cddKV([
+    ['Overall CDD Status', `<span class="chip ${statusChip}">${escHtml(overall.compliance_status)}</span>`],
+    ['AML Scope', escHtml(_ccsLabel(overall.aml_scope))],
+    ['Client Risk', escHtml(_ccsLabel(overall.risk_rating))],
+    ['PEP', CDD_PEP_CHIP_TEXT(overall.is_pep)],
+    ['Beneficial Ownership', escHtml(_ccsLabel(overall.bo_status))],
+    ['Person Acting for Client', escHtml(overall.person_acting_status)],
+    ['Conflict Check', escHtml(overall.conflict_check_status)],
+    ['Outstanding Actions', String(overall.outstanding_count)],
+  ]) + (overall.missing.length
+    ? `<p style="font-size:0.8rem;color:var(--red);margin-top:0.25rem"><strong>Outstanding:</strong> ${overall.missing.map(escHtml).join('; ')}</p>`
+    : ''));
+
+  const idSection = _cddSection('2. Client Identification', _cddKV([
+    ...(c.client_type === 'Individual' ? [
+      ['Date of Birth', escHtml(c.date_of_birth || '—')],
+      ['Place of Birth', escHtml(c.place_of_birth || '—')],
+      ['National ID Number', escHtml(c.national_id_number || '—')],
+      ['Passport Number', escHtml(c.passport_number || '—')],
+      ['Residential Address', escHtml(c.residential_address || '—')],
+      ['Occupation', escHtml(c.occupation || '—')],
+    ] : [
+      ['Registered Name', escHtml(c.registered_name || c.full_name)],
+      ['Trading Name', escHtml(c.trading_name || '—')],
+      ['Registration Number', escHtml(c.registration_number || '—')],
+      ['Date Incorporated', escHtml(c.date_incorporated || '—')],
+      ['Registered Office', escHtml(c.registered_office_address || '—')],
+      ['Principal Business', escHtml(c.principal_business_address || '—')],
+    ]),
+  ]));
+
+  const boRows = r.beneficial_owners.map(o => [
+    escHtml(o.owner_name), escHtml(o.nationality || '—'),
+    o.ownership_percentage != null ? `${o.ownership_percentage}%` : '—',
+    escHtml(o.ownership_or_control_basis || '—'),
+    `<span class="chip ${o.verification_status === 'Verified' ? 'chip-green' : o.verification_status === 'Pending' ? 'chip-gold' : 'chip-gray'}">${escHtml(o.verification_status)}</span>`,
+  ]);
+  const boSection = _cddSection('3. Beneficial Ownership',
+    _cddTable(['Name', 'Nationality', 'Ownership', 'Basis', 'Verification'], boRows));
+
+  const repRows = r.authorized_representatives.map(rep => [
+    escHtml(rep.full_name), escHtml(rep.position_or_relationship || '—'),
+    escHtml(rep.authority_basis || '—'),
+    `<span class="chip ${rep.verification_status === 'Verified' ? 'chip-green' : rep.verification_status === 'Pending' ? 'chip-gold' : 'chip-gray'}">${escHtml(rep.verification_status)}</span>`,
+  ]);
+  const repSection = _cddSection('4. Person Acting for Client',
+    _cddTable(['Name', 'Position', 'Authority Basis', 'Verification'], repRows));
+
+  const pep = r.pep_risk;
+  const pepSection = _cddSection('5. PEP / Risk Assessment', _cddKV([
+    ['PEP Identified', CDD_PEP_CHIP_TEXT(pep.is_pep)],
+    ...(pep.is_pep ? [
+      ['PEP Basis', escHtml(pep.pep_basis || '—')],
+      ['PEP Position', escHtml(pep.pep_position || '—')],
+      ['PEP Country', escHtml(pep.pep_country || '—')],
+      ['Senior Management Approval', pep.senior_management_approved_by_name
+        ? `${escHtml(pep.senior_management_approved_by_name)}${pep.senior_management_approved_date ? ' — ' + escHtml(pep.senior_management_approved_date) : ''}`
+        : '<span style="color:var(--red)">Not yet approved</span>'],
+    ] : []),
+    ['Client Risk Rating', escHtml(_ccsLabel(pep.risk_rating))],
+    ['Source of Wealth', escHtml(pep.source_of_wealth || 'Not recorded')],
+    ['Source of Funds', escHtml(pep.source_of_funds || 'Not recorded')],
+    ['Enhanced Monitoring', pep.enhanced_monitoring_required ? 'Required' : 'Not required'],
+  ]));
+
+  const cc = r.conflict_check;
+  const conflictSection = _cddSection('6. Conflict Check', _cddKV([
+    ['Conflict Check Completed', cc.reviewed ? '<span class="chip chip-green">Yes</span>' : '<span class="chip chip-red">Not Reviewed</span>'],
+    ['Reviewed By', escHtml(cc.reviewed_by_name || '—')],
+    ['Review Date', escHtml(cc.reviewed_date || '—')],
+  ]));
+
+  const matterRows = r.matters.map(mt => [
+    `${escHtml(mt.number || '(unnumbered)')} — ${escHtml(mt.name)}`,
+    escHtml(mt.status || '—'),
+    `<span class="chip ${CCS_AML_SCOPE_CHIP[mt.aml_scope] || 'chip-gray'}">${escHtml(_ccsLabel(mt.aml_scope))}</span>`,
+    mt.aml_scope_reason ? escHtml(mt.aml_scope_reason) : '<span style="color:var(--ink3)">—</span>',
+    `<span class="chip ${CCS_RISK_CHIP[mt.matter_risk] || 'chip-gray'}">${escHtml(_ccsLabel(mt.matter_risk))}</span>`,
+  ]);
+  const mattersSection = _cddSection('7. Matters for this Client',
+    _cddTable(['Matter', 'Status', 'AML Scope', 'Reason for AML Scope', 'Matter Risk'], matterRows) +
+    (r.matters.length > 1
+      ? '<p style="font-size:0.75rem;color:var(--ink3);margin-top:0.25rem">The same client can have differently-scoped matters — AML applicability depends on the actual work being done, not the client relationship as a whole.</p>'
+      : ''));
+
+  const docRows = r.documents.map(d => [
+    escHtml(d.label), escHtml(d.category), escHtml(d.document_status || '—'), escHtml(d.filename || '—'),
+  ]);
+  const docsSection = _cddSection('8. Supporting Document Index',
+    _cddTable(['Document', 'Category', 'Status', 'File'], docRows));
+
+  const history = r.compliance_history;
+  const historySection = _cddSection('9. Compliance History', history.enabled
+    ? _cddTable(['Date', 'Event', 'User', 'Result'], (history.events || []).map(ev =>
+        [escHtml(ev.date), escHtml(ev.event), escHtml(ev.user), escHtml(ev.result)]))
+    : `<p style="color:var(--ink3);font-style:italic">${escHtml(history.message)}</p>`);
+
+  return header + overallSection + idSection + boSection + repSection + pepSection
+    + conflictSection + mattersSection + docsSection + historySection;
 }
 
 // SMS Usage by Firm's own render function (loadSmsUsageByFirm) was removed

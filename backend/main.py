@@ -214,6 +214,32 @@ async def run_migrations():
         );
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_deadline DATE;
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_deadline_note TEXT;
+        -- Matter-level AML (2026-09-03, partner design review, Part B of
+        -- the Individual Client AML/CDD Report) -- same honest framing as
+        -- client_compliance.aml_scope: manually set by a lawyer for now,
+        -- NOT auto-derived from matter type (no confirmed mapping of
+        -- matter types to the Act's specified activities exists yet).
+        -- The same client can have differently-scoped matters (e.g. a
+        -- property acquisition vs. a divorce) -- that's the whole reason
+        -- this lives on the matter, not just the client.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS aml_scope TEXT DEFAULT 'NotAssessed';
+        ALTER TABLE matters DROP CONSTRAINT IF EXISTS matters_aml_scope_check;
+        ALTER TABLE matters ADD CONSTRAINT matters_aml_scope_check
+            CHECK (aml_scope IN ('NotAssessed', 'InScope', 'OutOfScope'));
+        -- Free-text -- "why" (e.g. "acquisition of immovable property"),
+        -- optional, no enum -- a lawyer's own words, not a fixed list.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS aml_scope_reason TEXT;
+        -- Matter-level risk -- a simple field, not a real overlap with
+        -- compute_matter_health() (backend/matter_health.py): that
+        -- function is entirely about operational health (deadlines/
+        -- review lapses), never AML risk, so there was nothing there to
+        -- reuse. Same RISK_RATINGS enum as client_compliance.risk_rating
+        -- for consistency, manually set (same as that field, no
+        -- auto-computation exists for either).
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS matter_risk TEXT DEFAULT 'NotAssessed';
+        ALTER TABLE matters DROP CONSTRAINT IF EXISTS matters_matter_risk_check;
+        ALTER TABLE matters ADD CONSTRAINT matters_matter_risk_check
+            CHECK (matter_risk IN ('Low', 'Medium', 'High', 'NotAssessed'));
 
         -- Matter review safety net (2026-08-30): every matter gets a soft
         -- "please look at this" nudge date, distinct from next_deadline
@@ -3334,6 +3360,12 @@ class MatterUpdate(BaseModel):
     # list here — which sequence applies depends on the matter's own
     # matter_type/practice_area.
     stage: Optional[str] = None
+    # Matter-level AML (2026-09-03, Part B) -- manual, pending firm
+    # policy, same as client_compliance.aml_scope; see AML_SCOPE_VALUES
+    # and the schema comment on matters.aml_scope above.
+    aml_scope: Optional[str] = None
+    aml_scope_reason: Optional[str] = None
+    matter_risk: Optional[str] = None
 
 class ClientCreate(BaseModel):
     full_name: str
@@ -5222,6 +5254,196 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
     status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
     return {**compliance, **status}
 
+def _compute_person_acting_status(reps: list) -> str:
+    """
+    Display-only summary across every authorized_representatives row for
+    this client (2026-09-03, Individual Client AML/CDD Report) -- "None
+    recorded" when nobody's been recorded as acting for this client (the
+    common case), otherwise the strongest single status found (Verified
+    beats Pending beats Unverified), matching the same summarizing
+    convention _compute_bo_status() uses. The full per-representative
+    detail (each one's own status/basis) is still shown in the report's
+    own Person Acting for Client section -- this is only the one-line
+    Overall Compliance Position summary.
+    """
+    if not reps:
+        return "None recorded"
+    statuses = {r.get("verification_status") for r in reps}
+    if "Verified" in statuses:
+        return "Verified"
+    if "Pending" in statuses:
+        return "Pending"
+    return "Unverified"
+
+async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
+    """
+    Individual Client AML/CDD Report (2026-09-03, partner design review,
+    built from a sample report PDF) -- composition of data that already
+    exists, not new logic: every status/badge here reuses the exact same
+    functions the client detail page and compliance modal already call
+    (_compute_compliance_status, _compute_bo_status), so this report can
+    never disagree with what a lawyer sees on the client's own page.
+
+    Part B (matter-level AML): each matter's own aml_scope/
+    aml_scope_reason/matter_risk, manually set on the matter panel,
+    listed here per-matter -- the same client can have differently-
+    scoped matters (see MatterUpdate.aml_scope's own docstring).
+
+    Part C (compliance history) is a deliberate placeholder --
+    audit_logs today only logs CLIENT_INTAKE and SEARCH events; real
+    compliance-event logging (BO verified, PEP flagged, conflict check
+    completed, etc.) is scoped-but-not-built pending confirmation this
+    is worth a dedicated pass. See the report's own "history" key.
+    """
+    client_row = await _get_client_or_404(conn, cid)
+
+    compliance_row = await conn.fetchrow(
+        "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+    )
+    compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
+
+    owner_rows = await conn.fetch(
+        "SELECT * FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2 ORDER BY created_at ASC", cid, FIRM_ID
+    )
+    owners = [_row_to_beneficial_owner(r) for r in owner_rows]
+
+    rep_rows = await conn.fetch(
+        "SELECT * FROM authorized_representatives WHERE client_id=$1 AND firm_id=$2 ORDER BY created_at ASC",
+        cid, FIRM_ID
+    )
+    reps = [_row_to_authorized_representative(r) for r in rep_rows]
+
+    matter_rows = await conn.fetch(
+        "SELECT * FROM matters WHERE client_id=$1 AND firm_id=$2 AND NOT is_sentinel "
+        "ORDER BY created_at ASC",
+        cid, FIRM_ID
+    )
+    matters = [_row_to_matter(r) for r in matter_rows]
+
+    # Resolve two kinds of user references to real names in one batched
+    # lookup (not two round trips): the conflict check reviewer, and
+    # whoever (if anyone) approved this client's PEP status.
+    user_ids = [u for u in (compliance.get("conflict_check_reviewed_by"), compliance.get("senior_management_approved_by")) if u]
+    names_by_user_id = {}
+    if user_ids:
+        user_rows = await conn.fetch(
+            "SELECT id, display_name FROM users WHERE id = ANY($1) AND firm_id=$2",
+            [_uuid_mod.UUID(u) for u in user_ids], FIRM_ID
+        )
+        names_by_user_id = {str(u["id"]): u["display_name"] for u in user_rows}
+
+    # Supporting Document Index -- every document this report can
+    # honestly point to: the client's own two identity documents, each
+    # representative's authority document, and every document uploaded
+    # against any of this client's matters. A dangling document_id
+    # (referenced but the row itself is gone) is silently skipped rather
+    # than raising -- this report degrades, it doesn't break, over a
+    # stale reference.
+    client_level_doc_ids = [
+        d for d in (client_row.get("proof_of_incorporation_document_id"), client_row.get("governing_document_id"))
+        if d
+    ]
+    rep_doc_ids = [r["authority_document_id"] for r in rep_rows if r.get("authority_document_id")]
+    lookup_doc_ids = list({*client_level_doc_ids, *rep_doc_ids})
+    docs_by_id = {}
+    if lookup_doc_ids:
+        doc_rows = await conn.fetch(
+            "SELECT * FROM documents WHERE id = ANY($1) AND firm_id=$2", lookup_doc_ids, FIRM_ID
+        )
+        docs_by_id = {d["id"]: _row_to_doc(d) for d in doc_rows}
+
+    matter_ids = [m["id"] for m in matter_rows]
+    matter_doc_rows = []
+    if matter_ids:
+        matter_doc_rows = await conn.fetch(
+            "SELECT * FROM documents WHERE matter_id = ANY($1) AND firm_id=$2 ORDER BY uploaded_at DESC",
+            matter_ids, FIRM_ID
+        )
+
+    document_index = []
+    if client_row.get("proof_of_incorporation_document_id"):
+        doc = docs_by_id.get(client_row["proof_of_incorporation_document_id"])
+        if doc:
+            document_index.append({"category": "Client Identification", "label": "Proof of Incorporation", **doc})
+    if client_row.get("governing_document_id"):
+        doc = docs_by_id.get(client_row["governing_document_id"])
+        if doc:
+            document_index.append({"category": "Client Identification", "label": "Governing Document", **doc})
+    for r in rep_rows:
+        if r.get("authority_document_id"):
+            doc = docs_by_id.get(r["authority_document_id"])
+            if doc:
+                document_index.append({"category": "Authority", "label": f"Authority — {r['full_name']}", **doc})
+    for d in matter_doc_rows:
+        document_index.append({"category": "Matter", "label": d["document_type"] or d["filename"], **_row_to_doc(d)})
+
+    status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
+    bo_status = _compute_bo_status(client_row, compliance, [dict(r) for r in owner_rows])
+
+    return {
+        "client": _row_to_client(client_row),
+        "overall": {
+            "compliance_status": status["compliance_status"],
+            "missing": status["missing"],
+            "outstanding_count": len(status["missing"]),
+            "aml_scope": compliance.get("aml_scope") or "NotAssessed",
+            "risk_rating": compliance.get("risk_rating") or "NotAssessed",
+            "is_pep": compliance.get("is_pep"),
+            "bo_status": bo_status,
+            "person_acting_status": _compute_person_acting_status(reps),
+            "conflict_check_status": "Completed" if compliance.get("conflict_check_reviewed") else "Not Reviewed",
+        },
+        "beneficial_owners": owners,
+        "authorized_representatives": reps,
+        "pep_risk": {
+            "is_pep": compliance.get("is_pep"),
+            "pep_basis": compliance.get("pep_basis"),
+            "pep_position": compliance.get("pep_position"),
+            "pep_country": compliance.get("pep_country"),
+            "risk_rating": compliance.get("risk_rating") or "NotAssessed",
+            "source_of_wealth": compliance.get("source_of_wealth"),
+            "source_of_funds": compliance.get("source_of_funds"),
+            "enhanced_monitoring_required": compliance.get("enhanced_monitoring_required", False),
+            "senior_management_approved_by_name": names_by_user_id.get(compliance.get("senior_management_approved_by")),
+            "senior_management_approved_date": compliance.get("senior_management_approved_date"),
+        },
+        "conflict_check": {
+            "reviewed": bool(compliance.get("conflict_check_reviewed")),
+            "reviewed_by_name": names_by_user_id.get(compliance.get("conflict_check_reviewed_by")),
+            "reviewed_date": compliance.get("conflict_check_reviewed_date"),
+        },
+        "matters": matters,
+        "documents": document_index,
+        # Part C -- deliberate placeholder, see this function's own
+        # docstring: not built this pass, pending confirmation it's
+        # worth a dedicated logging addition.
+        "compliance_history": {
+            "enabled": False,
+            "message": "Compliance history logging not yet enabled.",
+        },
+    }
+
+@app.get("/api/clients/{client_id}/aml-cdd-report")
+async def client_aml_cdd_report(client_id: str, request: Request):
+    """
+    Individual Client AML/CDD Report -- "show me everything relevant to
+    this client's compliance position," the second of the three
+    management questions this report family answers (alongside the
+    Register's "where do we stand?" and the Exceptions report's "what do
+    I need to deal with?"). Gated at client:read, same as every other
+    per-client compliance endpoint (get_client_compliance,
+    list_beneficial_owners, ...) -- NOT the stricter reports:*
+    permission the firm-wide Register/Exceptions reports use, since this
+    exposes nothing about this one client that client:read doesn't
+    already grant access to elsewhere; it's presentation composition,
+    not new exposure.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        return await _fetch_client_aml_cdd_report(conn, cid)
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
@@ -5247,6 +5469,10 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
         raise HTTPException(status_code=400, detail="No fields to update")
     if "practice_area" in fields and fields["practice_area"] not in PRACTICE_AREAS:
         raise HTTPException(status_code=422, detail=f"practice_area must be one of: {', '.join(PRACTICE_AREAS)}")
+    if "aml_scope" in fields and fields["aml_scope"] not in AML_SCOPE_VALUES:
+        raise HTTPException(status_code=422, detail=f"aml_scope must be one of: {', '.join(AML_SCOPE_VALUES)}")
+    if "matter_risk" in fields and fields["matter_risk"] not in RISK_RATINGS:
+        raise HTTPException(status_code=422, detail=f"matter_risk must be one of: {', '.join(RISK_RATINGS)}")
     if "next_deadline" in fields:
         # asyncpg is strict about type matching for DATE columns — a raw
         # Python str isn't reliably accepted the way it might be with a
