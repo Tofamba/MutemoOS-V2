@@ -8144,6 +8144,18 @@ async def upload_legal_update(
 
 @app.delete("/api/legal-updates/{item_id}")
 async def delete_legal_update(item_id: str, request: Request):
+    """
+    Also deletes the Postgres `chunks` rows for this document (2026-09-03
+    fix, found while cleaning up a duplicate MLPCA legal_updates row) --
+    chunks.document_id carries no FK/cascade to legal_updates, so before
+    this fix a deletion here left those chunk rows behind, orphaned but
+    still fully populated (including content_hash). The very next
+    reconcile_chroma_index() run -- every server boot -- would then see
+    them as "in Postgres, missing from Chroma" and silently re-index them
+    right back into Chroma, undoing the deletion on the next deploy or
+    restart. Any legal update deleted through this endpoint before this
+    fix may have been silently resurrected this way.
+    """
     user = await get_current_user(request)
     _check_permission(user, "legal:delete")
     async with _db_pool.acquire() as conn:
@@ -8156,6 +8168,11 @@ async def delete_legal_update(item_id: str, request: Request):
             "DELETE FROM legal_updates WHERE id=$1 AND firm_id=$2",
             _uuid_mod.UUID(item_id), FIRM_ID
         )
+        if result != "DELETE 0":
+            await conn.execute(
+                "DELETE FROM chunks WHERE document_id=$1 AND firm_id=$2",
+                _uuid_mod.UUID(item_id), FIRM_ID
+            )
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Not found")
     if chunk_ids:
