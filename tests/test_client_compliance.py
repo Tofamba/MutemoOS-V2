@@ -17,6 +17,7 @@ tests/test_clients_api.py -- see that file's docstring conventions for the
 column-list-read-from-the-query-text INSERT handling this mirrors.
 """
 import asyncio
+import json
 import re
 import uuid
 from datetime import date, datetime, timezone
@@ -76,6 +77,7 @@ class FakeConnection:
         self.beneficial_owners = []
         self.compliance = {}  # client_id -> dict
         self.matters = []
+        self.audit_logs = []  # captured INSERT INTO audit_logs calls -- see Part C tests below
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -96,6 +98,13 @@ class FakeConnection:
                     for col, val in zip(cols, values):
                         c[col] = val
                     return dict(c)
+            return None
+
+        if q.startswith("SELECT verification_status, owner_name FROM beneficial_owners WHERE id=$1"):
+            oid, cid, firm_id = args
+            for o in self.beneficial_owners:
+                if o["id"] == oid and o["client_id"] == cid and o["firm_id"] == firm_id:
+                    return {"verification_status": o["verification_status"], "owner_name": o["owner_name"]}
             return None
 
         if q.startswith("INSERT INTO beneficial_owners"):
@@ -174,6 +183,14 @@ class FakeConnection:
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO audit_logs"):
+            (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details) = args
+            self.audit_logs.append({
+                "firm_id": firm_id, "user_id": user_id, "actor_name": actor_name, "actor_role": actor_role,
+                "action": action, "target_type": target_type, "target_id": target_id,
+                "details": json.loads(details) if details else {},
+            })
         return "OK"
 
 
@@ -612,3 +629,193 @@ def test_aml_scope_does_not_affect_compliance_status(monkeypatch):
     result = asyncio.run(get_client_compliance(str(client["id"]), None))
     assert result["compliance_status"] == "Cleared"
     assert result["aml_scope"] == "OutOfScope"
+
+
+# ── Part C: compliance event logging (2026-09-03) ────────────────────────
+# _log_compliance_event() writes into audit_logs -- the same fully generic
+# table CLIENT_INTAKE/SEARCH already use, no schema change needed. These
+# tests confirm each call site logs on a REAL value change and logs
+# NOTHING on a no-op PATCH (the explicit requirement this was built to
+# meet) -- see tests/test_matter_aml_scope.py for update_matter's own
+# MATTER_AML_SCOPE_SET/MATTER_RISK_SET version of the same pattern.
+
+def test_create_beneficial_owner_logs_bo_added(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Company")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(create_beneficial_owner(str(client["id"]), BeneficialOwnerCreate(owner_name="Tendai Moyo"), None))
+
+    logs = pool.conn.audit_logs
+    assert len(logs) == 1
+    assert logs[0]["action"] == "BO_ADDED"
+    assert logs[0]["target_type"] == "CLIENT"
+    assert logs[0]["target_id"] == client["id"]
+    assert logs[0]["details"]["owner_name"] == "Tendai Moyo"
+
+
+def test_update_beneficial_owner_logs_bo_verified_on_real_transition(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Company")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    owner = asyncio.run(create_beneficial_owner(str(client["id"]), BeneficialOwnerCreate(owner_name="Tendai Moyo"), None))
+    pool.conn.audit_logs.clear()  # drop the BO_ADDED log from creation above
+
+    asyncio.run(update_beneficial_owner(
+        str(client["id"]), str(owner["id"]), BeneficialOwnerUpdate(verification_status="Verified"), None
+    ))
+
+    logs = pool.conn.audit_logs
+    assert len(logs) == 1
+    assert logs[0]["action"] == "BO_VERIFIED"
+    assert logs[0]["details"]["owner_name"] == "Tendai Moyo"
+
+
+def test_update_beneficial_owner_no_op_repatch_to_verified_logs_nothing(monkeypatch):
+    """The explicit no-op requirement: re-PATCHing an already-Verified
+    owner back to Verified must not log a second BO_VERIFIED event."""
+    client = _client_row(m.FIRM_ID, client_type="Company")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    owner = asyncio.run(create_beneficial_owner(str(client["id"]), BeneficialOwnerCreate(owner_name="Tendai Moyo"), None))
+    asyncio.run(update_beneficial_owner(
+        str(client["id"]), str(owner["id"]), BeneficialOwnerUpdate(verification_status="Verified"), None
+    ))
+    pool.conn.audit_logs.clear()
+
+    asyncio.run(update_beneficial_owner(
+        str(client["id"]), str(owner["id"]), BeneficialOwnerUpdate(verification_status="Verified"), None
+    ))
+
+    assert pool.conn.audit_logs == []
+
+
+def test_update_client_compliance_logs_pep_flagged_on_real_transition(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(is_pep=True), None))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "PEP_FLAGGED"]
+    assert len(logs) == 1
+    assert logs[0]["target_type"] == "CLIENT"
+
+
+def test_update_client_compliance_no_op_repatch_is_pep_true_logs_nothing_new(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(is_pep=True), None))
+    pool.conn.audit_logs.clear()
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(is_pep=True), None))
+
+    assert [l for l in pool.conn.audit_logs if l["action"] == "PEP_FLAGGED"] == []
+
+
+def test_update_client_compliance_logs_pep_approved_once(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    approver = uuid.uuid4()
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(
+        is_pep=True, senior_management_approved_by=str(approver),
+    ), None))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "PEP_APPROVED"]
+    assert len(logs) == 1
+
+
+def test_update_client_compliance_no_op_repatch_approval_logs_nothing_new(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    approver = uuid.uuid4()
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(
+        is_pep=True, senior_management_approved_by=str(approver),
+    ), None))
+    pool.conn.audit_logs.clear()
+
+    # Re-approving (even by a different approver) once already set must
+    # not log again -- "PEP approved" is a one-time event, not a running
+    # log of every approver who's ever touched it.
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(
+        senior_management_approved_by=str(uuid.uuid4()),
+    ), None))
+
+    assert [l for l in pool.conn.audit_logs if l["action"] == "PEP_APPROVED"] == []
+
+
+def test_update_client_compliance_logs_conflict_check_completed_on_real_transition(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(conflict_check_reviewed=True), None))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "CONFLICT_CHECK_COMPLETED"]
+    assert len(logs) == 1
+
+
+def test_update_client_compliance_no_op_repatch_conflict_check_logs_nothing_new(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(conflict_check_reviewed=True), None))
+    pool.conn.audit_logs.clear()
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(conflict_check_reviewed=True), None))
+
+    assert [l for l in pool.conn.audit_logs if l["action"] == "CONFLICT_CHECK_COMPLETED"] == []
+
+
+def test_update_client_compliance_logs_aml_scope_set_with_old_and_new(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(aml_scope="InScope"), None))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "AML_SCOPE_SET"]
+    assert len(logs) == 1
+    assert logs[0]["details"] == {"old": "NotAssessed", "new": "InScope"}
+
+
+def test_update_client_compliance_no_op_repatch_same_aml_scope_logs_nothing(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(aml_scope="InScope"), None))
+    pool.conn.audit_logs.clear()
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(aml_scope="InScope"), None))
+
+    assert [l for l in pool.conn.audit_logs if l["action"] == "AML_SCOPE_SET"] == []
+
+
+def test_update_client_compliance_logs_risk_rating_changed_with_old_and_new(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(risk_rating="High"), None))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "RISK_RATING_CHANGED"]
+    assert len(logs) == 1
+    assert logs[0]["details"] == {"old": "NotAssessed", "new": "High"}
+
+
+def test_update_client_compliance_unrelated_field_logs_nothing(monkeypatch):
+    """A PATCH that only touches a field with no compliance-history event
+    of its own (source_of_wealth) must not log anything at all."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(source_of_wealth="Salary"), None
+    ))
+
+    assert pool.conn.audit_logs == []

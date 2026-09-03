@@ -17,6 +17,7 @@ this file mirrors.
 """
 
 import asyncio
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -30,9 +31,17 @@ from backend.main import FIRM_ID, MatterUpdate, update_matter
 class FakeConnection:
     def __init__(self, matters):
         self.matters = matters
+        self.audit_logs = []  # captured INSERT INTO audit_logs calls -- see Part C tests below
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
+
+        if q.startswith("SELECT aml_scope, matter_risk FROM matters WHERE id=$1"):
+            matter_id, firm_id = args
+            for row in self.matters:
+                if row["id"] == matter_id and row["firm_id"] == firm_id:
+                    return {"aml_scope": row["aml_scope"], "matter_risk": row["matter_risk"]}
+            return None
 
         if q.startswith("UPDATE matters SET"):
             match = re.search(r"SET (.+) WHERE id=\$1", q)
@@ -55,6 +64,14 @@ class FakeConnection:
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO audit_logs"):
+            (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details) = args
+            self.audit_logs.append({
+                "firm_id": firm_id, "user_id": user_id, "actor_name": actor_name, "actor_role": actor_role,
+                "action": action, "target_type": target_type, "target_id": target_id,
+                "details": json.loads(details) if details else {},
+            })
         return "OK"
 
 
@@ -181,3 +198,64 @@ def test_two_matters_for_the_same_client_can_have_different_aml_scope(monkeypatc
     assert property_result["matter_risk"] == "High"
     assert divorce_result["aml_scope"] == "OutOfScope"
     assert divorce_result["matter_risk"] == "Low"
+
+
+# ── Part C: compliance event logging (2026-09-03) ────────────────────────
+# Same _log_compliance_event() call, MATTER-scoped side -- see
+# tests/test_client_compliance.py's own "Part C" section for the
+# CLIENT-scoped call sites (create_beneficial_owner/update_beneficial_
+# owner/update_client_compliance). Confirms a real value change logs
+# correctly with old/new values, and a no-op PATCH (same value re-set,
+# or a PATCH that never touches aml_scope/matter_risk at all) logs
+# nothing.
+
+def test_aml_scope_change_logs_matter_aml_scope_set_with_old_and_new(monkeypatch):
+    import backend.main as m
+    matter_id = uuid.uuid4()
+    pool = FakePool(matters=[_matter_row(matter_id)])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_matter(str(matter_id), MatterUpdate(aml_scope="InScope"), _fake_request()))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "MATTER_AML_SCOPE_SET"]
+    assert len(logs) == 1
+    assert logs[0]["target_type"] == "MATTER"
+    assert logs[0]["details"] == {"old": "NotAssessed", "new": "InScope"}
+
+
+def test_matter_risk_change_logs_matter_risk_set_with_old_and_new(monkeypatch):
+    import backend.main as m
+    matter_id = uuid.uuid4()
+    pool = FakePool(matters=[_matter_row(matter_id)])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_matter(str(matter_id), MatterUpdate(matter_risk="High"), _fake_request()))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "MATTER_RISK_SET"]
+    assert len(logs) == 1
+    assert logs[0]["details"] == {"old": "NotAssessed", "new": "High"}
+
+
+def test_no_op_repatch_same_aml_scope_logs_nothing(monkeypatch):
+    import backend.main as m
+    matter_id = uuid.uuid4()
+    pool = FakePool(matters=[_matter_row(matter_id, aml_scope="InScope")])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_matter(str(matter_id), MatterUpdate(aml_scope="InScope"), _fake_request()))
+
+    assert [l for l in pool.conn.audit_logs if l["action"] == "MATTER_AML_SCOPE_SET"] == []
+
+
+def test_patch_not_touching_aml_fields_logs_nothing(monkeypatch):
+    """The common case: an ordinary matter PATCH (e.g. custom_status)
+    that never mentions aml_scope/matter_risk at all must not even
+    attempt to log a compliance event."""
+    import backend.main as m
+    matter_id = uuid.uuid4()
+    pool = FakePool(matters=[_matter_row(matter_id)])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_matter(str(matter_id), MatterUpdate(custom_status="Awaiting docs"), _fake_request()))
+
+    assert pool.conn.audit_logs == []

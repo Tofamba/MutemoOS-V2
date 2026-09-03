@@ -47,7 +47,8 @@ from backend.main import FIRM_ID, client_aml_cdd_report
 
 
 class FakeConnection:
-    def __init__(self, clients, compliance=None, owners=None, reps=None, matters=None, documents=None, users=None):
+    def __init__(self, clients, compliance=None, owners=None, reps=None, matters=None, documents=None, users=None,
+                 audit_logs=None):
         self.clients = clients
         self.compliance = compliance if compliance is not None else {}  # client_id -> dict
         self.owners = owners if owners is not None else []
@@ -55,6 +56,7 @@ class FakeConnection:
         self.matters = matters if matters is not None else []
         self.documents = documents if documents is not None else []
         self.users = users if users is not None else []
+        self.audit_logs = audit_logs if audit_logs is not None else []
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -99,6 +101,16 @@ class FakeConnection:
         if q.startswith("SELECT * FROM documents WHERE matter_id = ANY($1) AND firm_id=$2"):
             matter_ids, firm_id = args
             return [dict(d) for d in self.documents if d.get("matter_id") in matter_ids and d["firm_id"] == firm_id]
+
+        if q.startswith("SELECT created_at, action, actor_name, details FROM audit_logs"):
+            firm_id, cid, matter_ids = args
+            rows = [
+                a for a in self.audit_logs
+                if a["firm_id"] == firm_id
+                and ((a["target_type"] == "CLIENT" and a["target_id"] == cid)
+                     or (a["target_type"] == "MATTER" and a["target_id"] in matter_ids))
+            ]
+            return sorted((dict(r) for r in rows), key=lambda r: r["created_at"])
 
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
@@ -610,9 +622,22 @@ def test_no_documents_at_all_gives_an_empty_index(monkeypatch):
     assert result["documents"] == []
 
 
-# ── Compliance History (Part C) -- deliberate placeholder ─────────────────
+# ── Compliance History (Part C, 2026-09-03) ────────────────────────────────
+# Real event log via audit_logs -- see tests/test_compliance_event_logging.py
+# for the logging-side tests (create_beneficial_owner/update_beneficial_
+# owner/update_client_compliance/update_matter each calling
+# _log_compliance_event() correctly). These tests cover only the reading
+# side: _fetch_compliance_history()'s composition into this report.
 
-def test_compliance_history_is_an_honest_placeholder(monkeypatch):
+def _audit_log(target_type, target_id, action, details=None, actor_name="J. Moyo", created_at=None):
+    return {
+        "firm_id": FIRM_ID, "target_type": target_type, "target_id": target_id,
+        "action": action, "actor_name": actor_name,
+        "details": details or {}, "created_at": created_at or datetime.now(timezone.utc),
+    }
+
+
+def test_compliance_history_enabled_with_no_events_yet(monkeypatch):
     import backend.main as m
     client_id = uuid.uuid4()
     client = _client_row(client_id)
@@ -621,5 +646,73 @@ def test_compliance_history_is_an_honest_placeholder(monkeypatch):
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
 
-    assert result["compliance_history"]["enabled"] is False
-    assert "not yet enabled" in result["compliance_history"]["message"].lower()
+    assert result["compliance_history"]["enabled"] is True
+    assert result["compliance_history"]["events"] == []
+
+
+def test_compliance_history_includes_client_level_events(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    log = _audit_log("CLIENT", client_id, "BO_VERIFIED", {"owner_name": "Tendai Moyo"})
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[log]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    events = result["compliance_history"]["events"]
+    assert len(events) == 1
+    assert events[0]["event"] == "Beneficial owner verified"
+    assert events[0]["user"] == "J. Moyo"
+    assert events[0]["result"] == "Tendai Moyo"
+
+
+def test_compliance_history_includes_matter_level_events_for_this_clients_matters(monkeypatch):
+    """Mirrors the sample report's own mixed timeline -- a matter-level
+    event ("Matter risk reviewed") appears alongside client-level events
+    for the same client."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    matter = _matter(client_id)
+    client = _client_row(client_id)
+    log = _audit_log("MATTER", matter["id"], "MATTER_RISK_SET", {"old": "NotAssessed", "new": "High"},
+                      actor_name="Compliance Officer")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], matters=[matter], audit_logs=[log]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    events = result["compliance_history"]["events"]
+    assert len(events) == 1
+    assert events[0]["event"] == "Matter risk set"
+    assert events[0]["user"] == "Compliance Officer"
+    assert events[0]["result"] == "Not Assessed → High"
+
+
+def test_compliance_history_excludes_another_clients_events(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    other_client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    log = _audit_log("CLIENT", other_client_id, "PEP_FLAGGED")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[log]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    assert result["compliance_history"]["events"] == []
+
+
+def test_compliance_history_sorted_chronologically(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    later = _audit_log("CLIENT", client_id, "CONFLICT_CHECK_COMPLETED", created_at=datetime(2026, 9, 2, tzinfo=timezone.utc))
+    earlier = _audit_log("CLIENT", client_id, "PEP_FLAGGED", created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[later, earlier]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    events = result["compliance_history"]["events"]
+    assert [e["event"] for e in events] == ["PEP flagged", "Conflict check completed"]

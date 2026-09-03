@@ -4220,6 +4220,93 @@ def _compute_bo_status(client: dict, compliance: dict, beneficial_owners: list) 
 # Medium. There's no Low bucket: every missing[] item is already
 # something that function treats as necessary for "Cleared", never
 # optional or cosmetic.
+async def _log_compliance_event(conn, user: dict, target_type: str, target_id, action: str, details: dict = None):
+    """
+    Shared insert for compliance-specific audit events (2026-09-03, Part
+    C of the Individual Client AML/CDD Report) -- same audit_logs table
+    CLIENT_INTAKE/SEARCH already use (main.py's run_migrations(): a
+    fully generic action/target_type/target_id/details-JSONB table, no
+    enum constraint on action, so this needed no schema change at all).
+    One shared call site rather than repeating this INSERT at every
+    compliance-event site.
+
+    Callers only call this when a value has ACTUALLY changed (each call
+    site does its own before/after comparison first) -- never on every
+    PATCH regardless of whether anything changed, so the history stays a
+    meaningful record of real events rather than noise.
+    """
+    await conn.execute(
+        """INSERT INTO audit_logs (firm_id, user_id, actor_name, actor_role, action,
+                                   target_type, target_id, details)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+        FIRM_ID,
+        _uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
+        user.get("display_name", "Unknown"), user.get("role", "unknown"),
+        action, target_type, target_id, json.dumps(details or {}),
+    )
+
+# Display label + a minimal "what actually happened" summary per action
+# code -- deliberately literal/explicit rather than a generic formatter,
+# same convention as this file's other small lookup tables (e.g.
+# CCS_STATUS_CHIP in the frontend). "AML_SCOPE_SET"/"RISK_RATING_CHANGED"/
+# "MATTER_AML_SCOPE_SET"/"MATTER_RISK_SET" all carry {"old", "new"} in
+# details; the rest carry only what's needed for a one-line result.
+_COMPLIANCE_EVENT_LABELS = {
+    "BO_ADDED": "Beneficial owner added",
+    "BO_VERIFIED": "Beneficial owner verified",
+    "PEP_FLAGGED": "PEP flagged",
+    "PEP_APPROVED": "PEP senior management approval recorded",
+    "CONFLICT_CHECK_COMPLETED": "Conflict check completed",
+    "AML_SCOPE_SET": "AML scope set",
+    "RISK_RATING_CHANGED": "Risk rating changed",
+    "MATTER_AML_SCOPE_SET": "Matter AML scope set",
+    "MATTER_RISK_SET": "Matter risk set",
+}
+
+def _row_to_compliance_event(row) -> dict:
+    d = dict(row)
+    details = d.get("details") or {}
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except (ValueError, TypeError):
+            details = {}
+    action = d.get("action")
+    if "new" in details:
+        old_label = _display_label(details.get("old")) if details.get("old") else None
+        new_label = _display_label(details["new"])
+        result = f"{old_label} → {new_label}" if old_label else new_label
+    elif "owner_name" in details:
+        result = details["owner_name"]
+    else:
+        result = "—"
+    return {
+        "date": d["created_at"].date().isoformat() if d.get("created_at") else None,
+        "event": _COMPLIANCE_EVENT_LABELS.get(action, action),
+        "user": d.get("actor_name") or "Unknown",
+        "result": result,
+    }
+
+async def _fetch_compliance_history(conn, cid, matter_ids: list) -> list:
+    """
+    Real compliance-event timeline for the Individual Client AML/CDD
+    Report's Compliance History section (2026-09-03, Part C -- built
+    after confirming with the user this was a small, contained addition:
+    audit_logs needed no schema change, only ~6 new inline INSERT call
+    sites). Combines this client's own events with every one of its
+    matters' events into one chronological timeline, matching the sample
+    report's own mixed client+matter event list (e.g. "Matter risk
+    reviewed" alongside "BO verification completed").
+    """
+    rows = await conn.fetch(
+        "SELECT created_at, action, actor_name, details FROM audit_logs "
+        "WHERE firm_id=$1 AND ((target_type='CLIENT' AND target_id=$2) "
+        "OR (target_type='MATTER' AND target_id = ANY($3))) "
+        "ORDER BY created_at ASC",
+        FIRM_ID, cid, matter_ids
+    )
+    return [_row_to_compliance_event(r) for r in rows]
+
 def _priority_for_missing_item(item: str) -> str:
     item_lower = item.lower()
     if "pep" in item_lower or "beneficial ownership" in item_lower:
@@ -4989,6 +5076,7 @@ async def create_beneficial_owner(client_id: str, owner: BeneficialOwnerCreate, 
         owner.nationality, owner.id_or_passport_number, owner.residential_address,
         owner.ownership_or_control_basis, owner.ownership_percentage,
         )
+        await _log_compliance_event(conn, user, "CLIENT", cid, "BO_ADDED", {"owner_name": owner.owner_name})
     return _row_to_beneficial_owner(row)
 
 @app.patch("/api/clients/{client_id}/beneficial-owners/{owner_id}")
@@ -5017,10 +5105,19 @@ async def update_beneficial_owner(client_id: str, owner_id: str, update: Benefic
     set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
     values = list(fields.values())
     async with _db_pool.acquire() as conn:
+        # Fetched before the UPDATE so BO_VERIFIED only logs on a real
+        # Unverified/Pending -> Verified transition, not on every PATCH
+        # that happens to already be Verified.
+        before = await conn.fetchrow(
+            "SELECT verification_status, owner_name FROM beneficial_owners WHERE id=$1 AND client_id=$2 AND firm_id=$3",
+            oid, cid, FIRM_ID
+        )
         row = await conn.fetchrow(
             f"UPDATE beneficial_owners SET {set_clauses} WHERE id=$1 AND client_id=$2 AND firm_id=${len(values)+3} RETURNING *",
             oid, cid, *values, FIRM_ID
         )
+        if row and fields.get("verification_status") == "Verified" and before and before["verification_status"] != "Verified":
+            await _log_compliance_event(conn, user, "CLIENT", cid, "BO_VERIFIED", {"owner_name": row["owner_name"]})
     if not row:
         raise HTTPException(status_code=404, detail="Beneficial owner not found")
     return _row_to_beneficial_owner(row)
@@ -5212,8 +5309,12 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
 
     async with _db_pool.acquire() as conn:
         await _get_client_or_404(conn, cid)
+        # Full row (not just id) -- needed below for real before/after
+        # comparison on is_pep/senior_management_approved_by/
+        # conflict_check_reviewed/aml_scope/risk_rating (Part C compliance
+        # history), not just to decide INSERT vs UPDATE.
         existing = await conn.fetchrow(
-            "SELECT id FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+            "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
         )
         try:
             if existing:
@@ -5250,6 +5351,26 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         owner_rows = await conn.fetch(
             "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
         )
+
+        # Part C compliance history -- log only on a real value change,
+        # comparing against the row as it stood before this PATCH (an
+        # empty dict when this is the first-ever write for this client,
+        # so a true-from-the-start PEP flag still logs correctly).
+        old = dict(existing) if existing else {}
+        if row.get("is_pep") is True and old.get("is_pep") is not True:
+            await _log_compliance_event(conn, user, "CLIENT", cid, "PEP_FLAGGED")
+        if row.get("senior_management_approved_by") and not old.get("senior_management_approved_by"):
+            await _log_compliance_event(conn, user, "CLIENT", cid, "PEP_APPROVED")
+        if row.get("conflict_check_reviewed") and not old.get("conflict_check_reviewed"):
+            await _log_compliance_event(conn, user, "CLIENT", cid, "CONFLICT_CHECK_COMPLETED")
+        new_scope = row.get("aml_scope") or "NotAssessed"
+        old_scope = old.get("aml_scope") or "NotAssessed"
+        if new_scope != old_scope:
+            await _log_compliance_event(conn, user, "CLIENT", cid, "AML_SCOPE_SET", {"old": old_scope, "new": new_scope})
+        new_risk = row.get("risk_rating") or "NotAssessed"
+        old_risk = old.get("risk_rating") or "NotAssessed"
+        if new_risk != old_risk:
+            await _log_compliance_event(conn, user, "CLIENT", cid, "RISK_RATING_CHANGED", {"old": old_risk, "new": new_risk})
     compliance = _row_to_client_compliance(row)
     status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
     return {**compliance, **status}
@@ -5289,11 +5410,12 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
     listed here per-matter -- the same client can have differently-
     scoped matters (see MatterUpdate.aml_scope's own docstring).
 
-    Part C (compliance history) is a deliberate placeholder --
-    audit_logs today only logs CLIENT_INTAKE and SEARCH events; real
-    compliance-event logging (BO verified, PEP flagged, conflict check
-    completed, etc.) is scoped-but-not-built pending confirmation this
-    is worth a dedicated pass. See the report's own "history" key.
+    Part C (compliance history, 2026-09-03): real event log via
+    audit_logs -- see _log_compliance_event()/_fetch_compliance_history()
+    for the logging/reading halves. Combines this client's own events
+    with every one of its matters' events into one chronological
+    timeline, matching the sample report's own mixed client+matter event
+    list.
     """
     client_row = await _get_client_or_404(conn, cid)
 
@@ -5414,12 +5536,15 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
         },
         "matters": matters,
         "documents": document_index,
-        # Part C -- deliberate placeholder, see this function's own
-        # docstring: not built this pass, pending confirmation it's
-        # worth a dedicated logging addition.
+        # Part C (2026-09-03) -- real event history via audit_logs, see
+        # _fetch_compliance_history()'s own docstring. "events" is
+        # legitimately empty for a client with no logged events yet
+        # (predates this feature, or genuinely nothing's happened) --
+        # the frontend already renders "None recorded." for an empty
+        # list, no separate placeholder needed now that this is real.
         "compliance_history": {
-            "enabled": False,
-            "message": "Compliance history logging not yet enabled.",
+            "enabled": True,
+            "events": await _fetch_compliance_history(conn, cid, matter_ids),
         },
     }
 
@@ -5551,12 +5676,38 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             if "client_name" not in fields:
                 fields["client_name"] = client_row["full_name"]
 
+        # Fetched before the UPDATE, only when relevant, so Part C
+        # compliance history logs the real old->new transition -- not
+        # fetched on every matter PATCH (this endpoint is touched far
+        # more often than aml_scope/matter_risk actually change).
+        aml_fields_touched = "aml_scope" in fields or "matter_risk" in fields
+        before = None
+        if aml_fields_touched:
+            before = await conn.fetchrow(
+                "SELECT aml_scope, matter_risk FROM matters WHERE id=$1 AND firm_id=$2",
+                _uuid_mod.UUID(matter_id), FIRM_ID
+            )
+
         set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
         values = list(fields.values())
         row = await conn.fetchrow(
             f"UPDATE matters SET {set_clauses} WHERE id=$1 AND firm_id=${len(values)+2} RETURNING *",
             _uuid_mod.UUID(matter_id), *values, FIRM_ID
         )
+
+        if row and aml_fields_touched and before:
+            new_scope = row.get("aml_scope") or "NotAssessed"
+            old_scope = before["aml_scope"] or "NotAssessed"
+            if new_scope != old_scope:
+                await _log_compliance_event(
+                    conn, user, "MATTER", row["id"], "MATTER_AML_SCOPE_SET", {"old": old_scope, "new": new_scope}
+                )
+            new_risk = row.get("matter_risk") or "NotAssessed"
+            old_risk = before["matter_risk"] or "NotAssessed"
+            if new_risk != old_risk:
+                await _log_compliance_event(
+                    conn, user, "MATTER", row["id"], "MATTER_RISK_SET", {"old": old_risk, "new": new_risk}
+                )
     if not row:
         raise HTTPException(status_code=404, detail="Matter not found")
     touched_date_fields = [k for k in conveyancing_date_fields if k in fields]
