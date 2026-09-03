@@ -6899,36 +6899,6 @@ async def client_compliance_status_report_export(request: Request):
     filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
 
-# TEMP (2026-09-03) -- real-data verification for the AML/Client Compliance
-# Register rename/extension, per instruction to verify against actual data
-# before production. X-Admin-Token gated, same pattern as every other
-# one-off investigation endpoint this session -- removed once verified.
-@app.get("/api/admin/verify-aml-register-extension")
-async def _verify_aml_register_extension_TEMP(request: Request):
-    require_admin_token(request)
-    async with _db_pool.acquire() as conn:
-        rows = await _fetch_client_compliance_roster_rows(conn)
-        client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
-    summary = _aggregate_compliance_counts(client_rows, compliance_by_client, owners_by_client)
-    hand_tally = {
-        "total_clients": len(rows),
-        "cleared_count": sum(1 for r in rows if r["compliance_status"] == "Cleared"),
-        "action_required_count": sum(1 for r in rows if r["compliance_status"] == "Action Required"),
-        "pep_count": sum(1 for r in rows if r["is_pep"] is True),
-        "pep_approval_outstanding_count": sum(
-            1 for c in client_rows
-            if (compliance_by_client.get(c["id"]) or {}).get("is_pep") is True
-            and not (compliance_by_client.get(c["id"]) or {}).get("senior_management_approved_by")
-        ),
-    }
-    return {
-        "summary_endpoint_result": summary,
-        "hand_tally_from_roster_rows": hand_tally,
-        "matches": all(summary[k] == hand_tally[k] for k in hand_tally),
-        "row_count": len(rows),
-        "sample_rows": rows[:8],
-    }
-
 # ── My Portfolio (self-scoped, every lawyer — NOT a reports:* endpoint) ────
 # Deliberately outside the reports:* permission family above: those are all
 # admin/partner-tier firm-wide views; this is the opposite shape, modeled on
