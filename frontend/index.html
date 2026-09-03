@@ -1883,8 +1883,13 @@ select{cursor:pointer}
   <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(920px,96vw);max-height:92vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
       <div style="font-weight:700;font-size:1rem">📄 Individual Client AML / CDD Report</div>
-      <button onclick="closeClientCddReportModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="btn btn-outline btn-sm" onclick="downloadClientCddReportCsv()">⬇ CSV</button>
+        <button class="btn btn-outline btn-sm" onclick="downloadClientCddReportPdf()">⬇ PDF</button>
+        <button onclick="closeClientCddReportModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+      </div>
     </div>
+    <div id="cdd-report-status" style="font-size:0.8rem;margin-bottom:0.5rem"></div>
     <div id="cdd-report-body" style="font-size:0.85rem">Loading…</div>
   </div>
 </div>
@@ -2099,6 +2104,7 @@ select{cursor:pointer}
         <option value="matter-review-status">🗂 Matter Review Status</option>
         <option value="client-compliance-status">🛡 AML / Client Compliance Register</option>
         <option value="aml-exceptions">⚠ AML Exceptions / Action Required</option>
+        <option value="matter-aml-status">🗂 Matter AML Status</option>
       </select>
     </div>
 
@@ -2224,6 +2230,26 @@ select{cursor:pointer}
         </div>
         <div id="ae-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
         <div id="aml-exceptions-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card" id="report-panel-matter-aml-status" style="display:none;margin-top:1rem">
+      <div class="card-title">🗂 Matter AML Status</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Every matter firm-wide, one row per matter — AML scope and risk are set per matter, so the same client can show up more than once with a different classification for each piece of work.
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadMatterAmlStatus()">▶ Generate</button>
+      </div>
+      <div id="ma-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="ma-search" placeholder="🔍 Search client or matter…" oninput="_maSetSearch(this.value)"
+            style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterAmlStatusCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterAmlStatusPdf()">⬇ Download PDF</button>
+        </div>
+        <div id="ma-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="matter-aml-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
       </div>
     </div>
 
@@ -3728,7 +3754,7 @@ function showTab(tab) {
 // it was Tofamba's own AT cost-attribution view, not a firm-facing report;
 // see backend/main.py's sms_usage_by_firm_report() for where it now lives
 // (operator-only, require_admin_token()).
-const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'client-compliance-status', 'aml-exceptions'];
+const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'client-compliance-status', 'aml-exceptions', 'matter-aml-status'];
 let _mrsFiltersLoaded = false;
 let _mrsHasGenerated = false;
 
@@ -8477,6 +8503,181 @@ async function downloadAmlExceptionsPdf() {
   }
 }
 
+// ── Matter AML Status report ────────────────────────────────────────────────
+// Sibling of the AML/Client Compliance Register at matter granularity --
+// backend/main.py, 2026-09-04. One row per matter, firm-wide, not one row
+// per client: aml_scope/matter_risk are per-MATTER fields, so the same
+// client can appear more than once with a different classification per
+// matter (Anchorflow's own two matters are the real example this was
+// built to show). Table styling mirrors the Exceptions/Register pattern
+// for visual consistency, same reasoning as those two reports' own
+// comments -- not because the data is shared.
+let _maRows = [];
+let _maSort = { key: 'client_name', dir: 1 };
+let _maSearch = '';
+
+const MA_COLUMNS = [
+  { key: 'client_name', label: 'Client', width: '18%' },
+  { key: 'matter_number', label: 'Matter', width: '24%' },
+  { key: 'aml_scope', label: 'AML Scope', width: '12%' },
+  { key: 'matter_risk', label: 'Matter Risk', width: '10%' },
+  { key: 'aml_scope_reason', label: 'Reason', width: '28%' },
+  { key: 'status', label: 'Matter Status', width: '8%' },
+];
+
+function _maSetSearch(value) {
+  _maSearch = (value || '').trim().toLowerCase();
+  _maRenderTable();
+}
+
+function _maSetSort(key) {
+  _maSort = _maSort.key === key ? { key, dir: _maSort.dir * -1 } : { key, dir: 1 };
+  _maRenderTable();
+}
+
+function _maRenderTable() {
+  const el = document.getElementById('matter-aml-status-list');
+  const statusEl = document.getElementById('ma-status');
+  if (!el) return;
+
+  let rows = _maRows;
+  if (_maSearch) {
+    rows = rows.filter(r =>
+      (r.client_name || '').toLowerCase().includes(_maSearch) ||
+      (r.matter_name || '').toLowerCase().includes(_maSearch) ||
+      (r.matter_number || '').toLowerCase().includes(_maSearch)
+    );
+  }
+  const { key, dir } = _maSort;
+  rows = [...rows].sort((a, b) => {
+    const av = a[key] ?? '';
+    const bv = b[key] ?? '';
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  if (!rows.length) {
+    el.innerHTML = _maRows.length ? '<em>No matters match this search.</em>' : '<em>No matters found.</em>';
+    statusEl.textContent = '';
+    return;
+  }
+
+  const sortArrow = (k) => _maSort.key === k ? (_maSort.dir === 1 ? ' ▲' : ' ▼') : '';
+
+  el.innerHTML = `
+    <div style="overflow:auto;max-height:65vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup>${MA_COLUMNS.map(c => `<col style="width:${c.width}">`).join('')}</colgroup>
+      <thead>
+        <tr style="text-align:left">
+          ${MA_COLUMNS.map(c => `
+            <th style="padding:6px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
+                       background:var(--paper2);border-bottom:1px solid var(--gold2);user-select:none;z-index:1"
+                onclick="_maSetSort('${c.key}')" title="Click to sort">${c.label}${sortArrow(c.key)}</th>
+          `).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => {
+          const amlScopeChip = CCS_AML_SCOPE_CHIP[r.aml_scope] || 'chip-gray';
+          const riskChip = CCS_RISK_CHIP[r.matter_risk] || 'chip-gray';
+          return `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name)}">${escHtml(r.client_name)}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_number)} — ${escHtml(r.matter_name)}</td>
+              <td style="padding:6px 8px"><span class="chip ${amlScopeChip}">${escHtml(_ccsLabel(r.aml_scope))}</span></td>
+              <td style="padding:6px 8px"><span class="chip ${riskChip}">${escHtml(_ccsLabel(r.matter_risk))}</span></td>
+              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.aml_scope_reason ? escHtml(r.aml_scope_reason) : '<span style="color:var(--ink3)">—</span>'}</td>
+              <td style="padding:6px 8px">${escHtml(r.status)}</td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+  statusEl.textContent = `${rows.length} matter${rows.length === 1 ? '' : 's'}${_maSearch ? ` (filtered from ${_maRows.length})` : ''}`;
+  statusEl.style.color = 'var(--ink3)';
+}
+
+async function loadMatterAmlStatus() {
+  document.getElementById('ma-results').style.display = 'block';
+  const el = document.getElementById('matter-aml-status-list');
+  const statusEl = document.getElementById('ma-status');
+  try {
+    const res = await fetch(`${API}/api/reports/matter-aml-status`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load matter AML status.</em>'; return; }
+    _maRows = await res.json();
+    if (!_maRows.length) { el.innerHTML = '<em>No matters found.</em>'; statusEl.textContent = ''; return; }
+    _maRenderTable();
+  } catch(e) { el.innerHTML = '<em>Error loading matter AML status.</em>'; }
+}
+
+async function downloadMatterAmlStatusCsv() {
+  const statusEl = document.getElementById('ma-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/matter-aml-status-export`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'matter_aml_status.csv';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ CSV downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+async function downloadMatterAmlStatusPdf() {
+  const statusEl = document.getElementById('ma-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/matter-aml-status-export-pdf`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'matter_aml_status.pdf';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ PDF downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
 // ── Individual Client AML / CDD Report modal ────────────────────────────────
 // 2026-09-03, partner design review, built from a sample report PDF --
 // "show me everything relevant to this client's compliance position,"
@@ -8529,8 +8730,12 @@ function _cddTable(headers, rows) {
 const CDD_PEP_CHIP_TEXT = (v) => v === true ? '<span style="color:var(--red);font-weight:600">Yes</span>'
   : v === false ? 'No' : '<span style="color:var(--ink3)">Not yet assessed</span>';
 
+let _cddReportClientId = null;
+
 async function openClientCddReportModal(clientId) {
+  _cddReportClientId = clientId;
   document.getElementById('cdd-report-modal').style.display = 'flex';
+  document.getElementById('cdd-report-status').textContent = '';
   const body = document.getElementById('cdd-report-body');
   body.innerHTML = '<div style="padding:1rem 0;color:var(--ink3)">Loading…</div>';
   try {
@@ -8546,6 +8751,47 @@ async function openClientCddReportModal(clientId) {
 function closeClientCddReportModal() {
   document.getElementById('cdd-report-modal').style.display = 'none';
 }
+
+// CSV/PDF export -- same download-trigger convention as the Register/
+// Exceptions reports (downloadClientComplianceStatusCsv/Pdf,
+// downloadAmlExceptionsCsv/Pdf): fetch, blob, revoke-after-click.
+async function _downloadCddReportFile(kind) {
+  const clientId = _cddReportClientId;
+  if (!clientId) return;
+  const statusEl = document.getElementById('cdd-report-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const endpoint = kind === 'pdf' ? 'aml-cdd-report-export-pdf' : 'aml-cdd-report-export';
+    const res = await fetch(`${API}/api/clients/${clientId}/${endpoint}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `client_aml_cdd_report.${kind === 'pdf' ? 'pdf' : 'csv'}`;
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = `✓ ${kind.toUpperCase()} downloaded.`;
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+function downloadClientCddReportCsv() { _downloadCddReportFile('csv'); }
+function downloadClientCddReportPdf() { _downloadCddReportFile('pdf'); }
 
 function _renderCddReport(r) {
   const c = r.client;

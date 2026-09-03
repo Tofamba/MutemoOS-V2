@@ -5569,6 +5569,217 @@ async def client_aml_cdd_report(client_id: str, request: Request):
     async with _db_pool.acquire() as conn:
         return await _fetch_client_aml_cdd_report(conn, cid)
 
+def _client_cdd_report_sections(report: dict) -> list:
+    """
+    Reduces the CDD report's 9 sections to one common shape --
+    {"title", "headers", "rows"} -- so the CSV/PDF exports below can
+    render every section (including the "kv" ones: Overall Position,
+    Client Identification, PEP/Risk, Conflict Check) through one shared
+    loop. A "kv" section is just a 2-column table; there's no real
+    reason to treat it differently from a genuine multi-row table like
+    Beneficial Ownership. Field order/labels/headers match
+    _renderCddReport() (frontend/index.html) exactly -- same sample
+    report layout on screen and on export, not two descriptions of the
+    same report that could drift apart.
+    """
+    c = report["client"]
+    overall = report["overall"]
+    pep = report["pep_risk"]
+    cc = report["conflict_check"]
+    history = report["compliance_history"]
+    pep_text = "Yes" if overall["is_pep"] is True else ("No" if overall["is_pep"] is False else "Not yet assessed")
+
+    sections = []
+
+    overall_rows = [
+        ["Overall CDD Status", overall["compliance_status"]],
+        ["AML Scope", _display_label(overall["aml_scope"])],
+        ["Client Risk", _display_label(overall["risk_rating"])],
+        ["PEP", pep_text],
+        ["Beneficial Ownership", _display_label(overall["bo_status"])],
+        ["Person Acting for Client", overall["person_acting_status"]],
+        ["Conflict Check", overall["conflict_check_status"]],
+        ["Outstanding Actions", str(overall["outstanding_count"])],
+    ]
+    if overall["missing"]:
+        overall_rows.append(["Outstanding", "; ".join(overall["missing"])])
+    sections.append({"title": "1. Overall Compliance Position", "headers": ["Item", "Status"], "rows": overall_rows})
+
+    if c.get("client_type") == "Individual":
+        id_rows = [
+            ["Date of Birth", c.get("date_of_birth") or "—"],
+            ["Place of Birth", c.get("place_of_birth") or "—"],
+            ["National ID Number", c.get("national_id_number") or "—"],
+            ["Passport Number", c.get("passport_number") or "—"],
+            ["Residential Address", c.get("residential_address") or "—"],
+            ["Occupation", c.get("occupation") or "—"],
+        ]
+    else:
+        id_rows = [
+            ["Registered Name", c.get("registered_name") or c.get("full_name") or "—"],
+            ["Trading Name", c.get("trading_name") or "—"],
+            ["Registration Number", c.get("registration_number") or "—"],
+            ["Date Incorporated", c.get("date_incorporated") or "—"],
+            ["Registered Office", c.get("registered_office_address") or "—"],
+            ["Principal Business", c.get("principal_business_address") or "—"],
+        ]
+    sections.append({"title": "2. Client Identification", "headers": ["Field", "Information"], "rows": id_rows})
+
+    sections.append({
+        "title": "3. Beneficial Ownership",
+        "headers": ["Name", "Nationality", "Ownership", "Basis", "Verification"],
+        "rows": [
+            [o["owner_name"], o.get("nationality") or "—",
+             f"{o['ownership_percentage']}%" if o.get("ownership_percentage") is not None else "—",
+             o.get("ownership_or_control_basis") or "—", o["verification_status"]]
+            for o in report["beneficial_owners"]
+        ],
+    })
+
+    sections.append({
+        "title": "4. Person Acting for Client",
+        "headers": ["Name", "Position", "Authority Basis", "Verification"],
+        "rows": [
+            [r["full_name"], r.get("position_or_relationship") or "—", r.get("authority_basis") or "—",
+             r["verification_status"]]
+            for r in report["authorized_representatives"]
+        ],
+    })
+
+    pep_rows = [["PEP Identified", pep_text]]
+    if pep["is_pep"]:
+        pep_rows.append(["PEP Basis", pep.get("pep_basis") or "—"])
+        pep_rows.append(["PEP Position", pep.get("pep_position") or "—"])
+        pep_rows.append(["PEP Country", pep.get("pep_country") or "—"])
+        pep_rows.append(["Senior Management Approval",
+                          f"{pep['senior_management_approved_by_name']} — {pep['senior_management_approved_date']}"
+                          if pep.get("senior_management_approved_by_name") else "Not yet approved"])
+    pep_rows.append(["Client Risk Rating", _display_label(pep["risk_rating"])])
+    pep_rows.append(["Source of Wealth", pep.get("source_of_wealth") or "Not recorded"])
+    pep_rows.append(["Source of Funds", pep.get("source_of_funds") or "Not recorded"])
+    pep_rows.append(["Enhanced Monitoring", "Required" if pep.get("enhanced_monitoring_required") else "Not required"])
+    sections.append({"title": "5. PEP / Risk Assessment", "headers": ["Item", "Status"], "rows": pep_rows})
+
+    sections.append({
+        "title": "6. Conflict Check",
+        "headers": ["Item", "Status"],
+        "rows": [
+            ["Conflict Check Completed", "Yes" if cc["reviewed"] else "Not Reviewed"],
+            ["Reviewed By", cc.get("reviewed_by_name") or "—"],
+            ["Review Date", cc.get("reviewed_date") or "—"],
+        ],
+    })
+
+    sections.append({
+        "title": "7. Matters for this Client",
+        "headers": ["Matter", "Status", "AML Scope", "Reason for AML Scope", "Matter Risk"],
+        "rows": [
+            [f"{mt.get('matter_number') or mt.get('number') or '(unnumbered)'} — {mt['name']}",
+             mt.get("status") or "—", _display_label(mt.get("aml_scope") or "NotAssessed"),
+             mt.get("aml_scope_reason") or "—", _display_label(mt.get("matter_risk") or "NotAssessed")]
+            for mt in report["matters"]
+        ],
+    })
+
+    sections.append({
+        "title": "8. Supporting Document Index",
+        "headers": ["Document", "Category", "Status", "File"],
+        "rows": [
+            [d["label"], d["category"], d.get("document_status") or "—", d.get("filename") or "—"]
+            for d in report["documents"]
+        ],
+    })
+
+    sections.append({
+        "title": "9. Compliance History",
+        "headers": ["Date", "Event", "User", "Result"],
+        "rows": [[ev["date"] or "—", ev["event"], ev["user"], ev["result"]] for ev in history.get("events", [])],
+    })
+
+    return sections
+
+def _client_cdd_report_csv(report: dict) -> str:
+    import csv, io as _io
+    c = report["client"]
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Individual Client AML / CDD Report"])
+    writer.writerow(["Client", c.get("full_name") or ""])
+    writer.writerow(["Client No.", c.get("client_number") or ""])
+    writer.writerow(["Client Type", c.get("client_type") or ""])
+    writer.writerow(["Generated", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")])
+    writer.writerow([])
+    for section in _client_cdd_report_sections(report):
+        writer.writerow([section["title"]])
+        writer.writerow(section["headers"])
+        if section["rows"]:
+            for row in section["rows"]:
+                writer.writerow(row)
+        else:
+            writer.writerow(["None recorded."])
+        writer.writerow([])
+    return buf.getvalue()
+
+def _build_client_cdd_pdf(report: dict) -> bytes:
+    """Reuses _mp_pdf_table() for every section -- same bordered-table
+    renderer every other AML report's PDF export already uses."""
+    from fpdf import FPDF
+    c = report["client"]
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Individual Client AML / CDD Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, _pdf_safe(f"Client: {c.get('full_name') or ''} ({c.get('client_number') or '—'})"),
+              new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+    for section in _client_cdd_report_sections(report):
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, _pdf_safe(section["title"]), new_x="LMARGIN", new_y="NEXT")
+        if section["rows"]:
+            col_widths = [usable_width / len(section["headers"])] * len(section["headers"])
+            _mp_pdf_table(pdf, section["headers"], col_widths, [[str(v) for v in row] for row in section["rows"]])
+        else:
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.cell(0, 6, "None recorded.", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+
+    return bytes(pdf.output())
+
+@app.get("/api/clients/{client_id}/aml-cdd-report-export")
+async def client_aml_cdd_report_export(client_id: str, request: Request):
+    """Same data/permission as the JSON report above -- CSV download,
+    same convention as every other AML report export."""
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        report = await _fetch_client_aml_cdd_report(conn, cid)
+    csv_text = _client_cdd_report_csv(report)
+    filename = f"client_aml_cdd_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(csv_text, filename)
+
+@app.get("/api/clients/{client_id}/aml-cdd-report-export-pdf")
+async def client_aml_cdd_report_export_pdf(client_id: str, request: Request):
+    """Same data/permission as the JSON report and CSV export above --
+    PDF download."""
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        report = await _fetch_client_aml_cdd_report(conn, cid)
+    pdf_bytes = _build_client_cdd_pdf(report)
+    filename = f"client_aml_cdd_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=pdf_bytes, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
@@ -7562,6 +7773,117 @@ async def aml_exceptions_report_export_pdf(request: Request):
         _mp_pdf_table(pdf, _AML_EXCEPTIONS_HEADERS, col_widths, table_rows)
 
     filename = f"aml_exceptions_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=bytes(pdf.output()),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+# ── Reports (Matter AML Status) ──────────────────────────────────────────────
+# New report (2026-09-04, sibling of the AML/Client Compliance Register at
+# matter granularity) -- one row per real matter, firm-wide, not one row
+# per client. Needed because aml_scope/matter_risk are per-MATTER fields
+# (Part B of the Individual Client AML/CDD Report, 2026-09-03): a client
+# can have two matters with genuinely different AML classification (a
+# property acquisition vs. a divorce -- confirmed with real multi-matter
+# clients on staging), and the client-level Register has no way to show
+# that since it only ever shows one aml_scope value per client. Same
+# permission tier as the Register/Exceptions reports
+# (reports:client_compliance_status), not client:read -- this is a
+# firm-wide roster, not one client's own data.
+
+async def _fetch_matter_aml_status_rows(conn) -> list:
+    rows = await conn.fetch(
+        "SELECT * FROM matters WHERE firm_id=$1 AND NOT is_sentinel "
+        "ORDER BY client_name ASC NULLS LAST, created_at ASC",
+        FIRM_ID
+    )
+    return [
+        {
+            "matter_id": str(m["id"]),
+            "client_id": str(m["client_id"]) if m["client_id"] else None,
+            "client_name": m["client_name"] or "Unlinked",
+            "matter_name": m["name"],
+            "matter_number": m["matter_number"] or m["number"] or "(unnumbered)",
+            "aml_scope": m["aml_scope"] or "NotAssessed",
+            "matter_risk": m["matter_risk"] or "NotAssessed",
+            "aml_scope_reason": m["aml_scope_reason"] or "",
+            "status": m["status"] or "Active",
+        }
+        for m in rows
+    ]
+
+@app.get("/api/reports/matter-aml-status")
+async def matter_aml_status_report(request: Request):
+    """
+    Firm-wide, one row per matter -- "where does every piece of work
+    stand on AML scope/risk?", the matter-granularity sibling of the
+    Register's client-granularity "where do we stand?".
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        return await _fetch_matter_aml_status_rows(conn)
+
+_MATTER_AML_HEADERS = ["Client", "Matter", "AML Scope", "Matter Risk", "Reason", "Matter Status"]
+
+def _matter_aml_export_row(r: dict) -> list:
+    return [
+        r["client_name"], f"{r['matter_number']} — {r['matter_name']}",
+        _display_label(r["aml_scope"]), _display_label(r["matter_risk"]),
+        r["aml_scope_reason"], r["status"],
+    ]
+
+@app.get("/api/reports/matter-aml-status-export")
+async def matter_aml_status_report_export(request: Request):
+    """Same data/permission as the JSON report above -- CSV download,
+    same convention as every other AML report export."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_matter_aml_status_rows(conn)
+
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_MATTER_AML_HEADERS)
+    for r in rows:
+        writer.writerow(_matter_aml_export_row(r))
+
+    filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(buf.getvalue(), filename)
+
+@app.get("/api/reports/matter-aml-status-export-pdf")
+async def matter_aml_status_report_export_pdf(request: Request):
+    """Same data/permission as the JSON report and CSV export above --
+    PDF download, reusing _mp_pdf_table()."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_matter_aml_status_rows(conn)
+
+    from fpdf import FPDF
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Matter AML Status", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    if not rows:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, "No matters on file.", new_x="LMARGIN", new_y="NEXT")
+    else:
+        usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+        col_pcts = (18, 27, 12, 12, 21, 10)
+        col_widths = [pct * usable_width / 100 for pct in col_pcts]
+        table_rows = [_matter_aml_export_row(r) for r in rows]
+        _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows)
+
+    filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(
         content=bytes(pdf.output()),
         media_type="application/pdf",

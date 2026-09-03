@@ -43,7 +43,12 @@ from datetime import date, datetime, timezone
 import pytest
 from fastapi import HTTPException
 
-from backend.main import FIRM_ID, client_aml_cdd_report
+from backend.main import (
+    FIRM_ID,
+    client_aml_cdd_report,
+    client_aml_cdd_report_export,
+    client_aml_cdd_report_export_pdf,
+)
 
 
 class FakeConnection:
@@ -716,3 +721,97 @@ def test_compliance_history_sorted_chronologically(monkeypatch):
 
     events = result["compliance_history"]["events"]
     assert [e["event"] for e in events] == ["PEP flagged", "Conflict check completed"]
+
+
+# ── CSV / PDF export (2026-09-04) ──────────────────────────────────────────
+# Reuses the exact same data _fetch_client_aml_cdd_report() already
+# produces -- these tests check the export wiring (all 9 sections
+# present, real content surfaces, valid file bytes), not a second
+# implementation of the report's own composition logic (already covered
+# above).
+
+def _csv_rows(response):
+    import csv, io
+    text = response.body.decode("utf-8-sig") if isinstance(response.body, bytes) else response.body.lstrip("﻿")
+    return list(csv.reader(io.StringIO(text)))
+
+
+def test_csv_export_includes_all_nine_sections(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export(str(client_id), _fake_request()))
+    rows = _csv_rows(response)
+    section_titles = {row[0] for row in rows if row}
+
+    for expected in [
+        "1. Overall Compliance Position", "2. Client Identification", "3. Beneficial Ownership",
+        "4. Person Acting for Client", "5. PEP / Risk Assessment", "6. Conflict Check",
+        "7. Matters for this Client", "8. Supporting Document Index", "9. Compliance History",
+    ]:
+        assert expected in section_titles
+
+
+def test_csv_export_reflects_real_data(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Company")
+    owner = _owner(client_id, owner_name="Tendai Moyo", ownership_percentage=60, verification_status="Verified")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], owners=[owner]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export(str(client_id), _fake_request()))
+    rows = _csv_rows(response)
+    flat = [cell for row in rows for cell in row]
+
+    assert "Blue Ridge Traders (Pvt) Ltd" in flat  # client name, header block
+    assert "Tendai Moyo" in flat  # real beneficial owner
+    assert "60.0%" in flat
+
+
+def test_pdf_export_associate_and_secretary_succeed(monkeypatch):
+    """client:read, not the stricter reports:* permission -- every role
+    (including associate/secretary) can export their own client's CDD
+    report, same as viewing it."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    for role in ("associate", "secretary"):
+        monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+        _as_current_user(monkeypatch, m, {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": role, "display_name": "X"})
+        response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+        assert response.media_type == "application/pdf"
+        assert response.body.startswith(b"%PDF")
+
+
+def test_pdf_export_produces_a_real_pdf(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+
+    assert response.media_type == "application/pdf"
+    assert "client_aml_cdd_report" in response.headers["content-disposition"]
+    assert response.body.startswith(b"%PDF")
+
+
+def test_pdf_export_handles_empty_sections_without_crashing(monkeypatch):
+    """A client with no owners/reps/matters/documents/history at all --
+    every table section is legitimately empty; the PDF must still render
+    a friendly "None recorded." rather than crash."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+
+    assert response.media_type == "application/pdf"
+    assert response.body.startswith(b"%PDF")
