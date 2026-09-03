@@ -8196,7 +8196,7 @@ async def _cleanup_mlpca_duplicate_TEMP(request: Request):
 
     async with _db_pool.acquire() as conn:
         before_rows = await conn.fetch(
-            "SELECT id, title, status, chunk_count, uploaded_at FROM legal_updates "
+            "SELECT id, filename, status, chunk_count, uploaded_at FROM legal_updates "
             "WHERE id = ANY($1) AND firm_id=$2",
             [keep_id, delete_id], FIRM_ID
         )
@@ -8234,7 +8234,7 @@ async def _cleanup_mlpca_duplicate_TEMP(request: Request):
         await conn.execute("DELETE FROM chunks WHERE document_id=$1 AND firm_id=$2", delete_id, FIRM_ID)
 
         after_keep_row = await conn.fetchrow(
-            "SELECT id, title, status, chunk_count FROM legal_updates WHERE id=$1 AND firm_id=$2",
+            "SELECT id, filename, status, chunk_count FROM legal_updates WHERE id=$1 AND firm_id=$2",
             keep_id, FIRM_ID
         )
         after_keep_chunks = await conn.fetchval(
@@ -8254,7 +8254,7 @@ async def _cleanup_mlpca_duplicate_TEMP(request: Request):
         "chroma_vectors_removed": len(chunk_ids),
         "after_delete_row_chunks_remaining_in_postgres": after_delete_chunks,  # must be 0
         "kept_row_untouched": {
-            "id": str(after_keep_row["id"]), "title": after_keep_row["title"],
+            "id": str(after_keep_row["id"]), "filename": after_keep_row["filename"],
             "status": after_keep_row["status"], "chunk_count_field": after_keep_row["chunk_count"],
             "actual_chunks_in_postgres": after_keep_chunks,
         },
