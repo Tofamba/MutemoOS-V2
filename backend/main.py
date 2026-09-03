@@ -5444,6 +5444,53 @@ async def client_aml_cdd_report(client_id: str, request: Request):
     async with _db_pool.acquire() as conn:
         return await _fetch_client_aml_cdd_report(conn, cid)
 
+# TEMP (2026-09-03) -- real-data verification for the Individual Client
+# AML/CDD Report (Parts A+B), per instruction to verify against a real
+# client with multiple matters showing different AML scope/risk before
+# production, mirroring the sample report's own Blue Ridge Traders
+# example. Finds a real client with 2+ real matters, sets two of them to
+# differing aml_scope/matter_risk (via direct SQL, same as the real
+# update_matter() would persist), then returns the full report. X-Admin-
+# Token gated. Removed once verified.
+@app.get("/api/admin/verify-client-cdd-report")
+async def _verify_client_cdd_report_TEMP(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        candidate = await conn.fetchrow("""
+            SELECT client_id, COUNT(*) AS matter_count FROM matters
+            WHERE firm_id=$1 AND NOT is_sentinel AND client_id IS NOT NULL
+            GROUP BY client_id HAVING COUNT(*) >= 2
+            ORDER BY COUNT(*) DESC LIMIT 1
+        """, FIRM_ID)
+        if not candidate:
+            return {"error": "No client with 2+ real matters found on this environment"}
+        cid = candidate["client_id"]
+
+        matter_rows = await conn.fetch(
+            "SELECT id, name, number FROM matters WHERE client_id=$1 AND firm_id=$2 "
+            "AND NOT is_sentinel ORDER BY created_at ASC LIMIT 2",
+            cid, FIRM_ID
+        )
+        m1, m2 = matter_rows[0], matter_rows[1]
+        await conn.execute(
+            "UPDATE matters SET aml_scope='InScope', aml_scope_reason=$2, matter_risk='High' WHERE id=$1",
+            m1["id"], "TEMP VERIFY: Transaction involves acquisition of immovable property."
+        )
+        await conn.execute(
+            "UPDATE matters SET aml_scope='OutOfScope', matter_risk='Low' WHERE id=$1", m2["id"]
+        )
+
+        report = await _fetch_client_aml_cdd_report(conn, cid)
+
+    return {
+        "client_id": str(cid),
+        "matters_set": [
+            {"id": str(m1["id"]), "name": m1["name"], "number": m1["number"], "set_to": "InScope/High"},
+            {"id": str(m2["id"]), "name": m2["name"], "number": m2["number"], "set_to": "OutOfScope/Low"},
+        ],
+        "report": report,
+    }
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
