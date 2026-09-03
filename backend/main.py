@@ -4121,6 +4121,46 @@ def _compute_compliance_status(client: dict, compliance: Optional[dict], benefic
         "missing": missing,
     }
 
+def _aggregate_compliance_counts(client_rows, compliance_by_client: dict, owners_by_client: dict) -> dict:
+    """
+    Shared counting pass over _compute_compliance_status(), extracted
+    2026-09-03 from what was previously My Portfolio's own inline
+    "Compliance/risk snapshot" loop (main.py ~6900-6933) so the
+    AML/Client Compliance Register's new firm-wide summary block can
+    reuse the exact same tallying rather than a second copy that could
+    drift -- there is one definition of "Cleared" (_compute_compliance_status
+    itself) and now one definition of how those statuses get counted up.
+
+    Callers batch-fetch client_rows/compliance_by_client/owners_by_client
+    themselves (firm-wide for the Register, created_by-scoped for My
+    Portfolio) -- this function only tallies, it does no fetching and
+    applies no scope of its own.
+    """
+    cleared_count = action_required_count = pep_count = pep_approval_outstanding_count = 0
+    risk_ratings = {r: 0 for r in RISK_RATINGS}
+    for c in client_rows:
+        compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
+        owners = owners_by_client.get(c["id"], [])
+        status = _compute_compliance_status(dict(c), compliance, owners)
+        if status["compliance_status"] == "Cleared":
+            cleared_count += 1
+        else:
+            action_required_count += 1
+        if compliance.get("is_pep") is True:
+            pep_count += 1
+            if not compliance.get("senior_management_approved_by"):
+                pep_approval_outstanding_count += 1
+        risk_key = compliance.get("risk_rating") or "NotAssessed"
+        risk_ratings[risk_key] = risk_ratings.get(risk_key, 0) + 1
+    return {
+        "total_clients": len(client_rows),
+        "cleared_count": cleared_count,
+        "action_required_count": action_required_count,
+        "pep_count": pep_count,
+        "pep_approval_outstanding_count": pep_approval_outstanding_count,
+        "risk_ratings": risk_ratings,
+    }
+
 def _row_to_doc(row) -> dict:
     d = dict(row)
     for k in ("id", "matter_id", "firm_id", "uploaded_by"):
@@ -6704,33 +6744,34 @@ async def matter_review_status_report_export(
     filename = f"matter_review_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
 
-# ── Reports (Client Compliance Status) ──────────────────────────────────────
+# ── Reports (AML / Client Compliance Register) ──────────────────────────────
 # Partner-tier, own scoped key (reports:client_compliance_status) -- see the
 # PERMISSIONS comment above for why this isn't folded into an existing key.
-# Firm-wide, unlike My Portfolio's own compliance snapshot (main.py ~6774,
-# "Compliance/risk snapshot" comment), which is scoped to one lawyer's own
-# clients and only ever emits aggregate counts (cleared_count,
-# action_required_count, pep_count, a risk_ratings histogram) -- this report
-# is the real per-client roster that snapshot was never meant to be: every
-# firm client's actual computed status, PEP flag, risk rating, and full
+# Firm-facing display name is "AML / Client Compliance Register" (renamed
+# 2026-09-03 per a partner design review; the endpoint path and permission
+# key are deliberately UNCHANGED -- this is a display rename plus a column/
+# summary extension, not a new report). Firm-wide, unlike My Portfolio's own
+# compliance snapshot (main.py ~6774, "Compliance/risk snapshot" comment),
+# which is scoped to one lawyer's own clients -- this report is the real
+# per-client roster that snapshot was never meant to be: every firm client's
+# actual computed status, PEP flag, risk rating, matter count, and full
 # outstanding-requirements list, for an actual remediation sweep rather than
 # a dashboard tile. No report_history logging -- same category as
 # practice_area_breakdown/matter_review_status above (an internal
 # operational view, not the RBZ export's regulatory audit-trail need).
+#
+# Deliberately NOT a client-level drill-down, matter-level AML scope, or a
+# compliance history/audit trail -- those are separate, larger work flagged
+# for later, pending input on matter-level AML scope.
 
-async def _fetch_client_compliance_roster_rows(conn) -> list:
+async def _fetch_clients_with_compliance(conn):
     """
-    One row per client, firm-wide. Reuses _compute_compliance_status()
-    completely unchanged -- the exact same function powering the client
-    detail page's own compliance badge (see get_client(), main.py
-    ~4721-4724) -- so this report can never drift from what a lawyer sees
-    on the client's own page; there is no second, parallel compliance
-    calculation to keep in sync.
-
-    Batched the same way My Portfolio's own compliance snapshot already
-    does it (client_compliance/beneficial_owners fetched once via
-    ANY($1), not N+1 per client) -- proven at real production scale
-    already, just kept per-client here instead of folded into counters.
+    Shared batched fetch of every firm client plus its client_compliance
+    and beneficial_owners rows -- used by both the roster rows and the
+    summary block below, so there is one query pattern for "every firm
+    client with its compliance data," not two copies that could drift.
+    ANY($1) batched, not N+1 per client -- proven at real production
+    scale already.
     """
     client_rows = await conn.fetch(
         "SELECT * FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
@@ -6750,6 +6791,32 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
         )
         for o in owner_rows:
             owners_by_client.setdefault(o["client_id"], []).append(dict(o))
+    return client_rows, compliance_by_client, owners_by_client
+
+async def _fetch_client_compliance_roster_rows(conn) -> list:
+    """
+    One row per client, firm-wide. Reuses _compute_compliance_status()
+    completely unchanged -- the exact same function powering the client
+    detail page's own compliance badge (see get_client(), main.py
+    ~4721-4724) -- so this report can never drift from what a lawyer sees
+    on the client's own page; there is no second, parallel compliance
+    calculation to keep in sync.
+
+    Matter count (2026-09-03, design review) is a simple per-client tally
+    of real matters -- NOT is_sentinel, same exclusion every other matter
+    count in this file uses -- batched the same ANY($1) way, not N+1.
+    """
+    client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
+    client_ids = [c["id"] for c in client_rows]
+    matter_counts = {}
+    if client_ids:
+        matter_rows = await conn.fetch(
+            "SELECT client_id, COUNT(*) AS matter_count FROM matters "
+            "WHERE firm_id=$1 AND client_id = ANY($2) AND NOT is_sentinel "
+            "GROUP BY client_id",
+            FIRM_ID, client_ids
+        )
+        matter_counts = {r["client_id"]: r["matter_count"] for r in matter_rows}
 
     result = []
     for c in client_rows:
@@ -6765,6 +6832,7 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
             "missing": status["missing"],
             "is_pep": compliance.get("is_pep"),
             "risk_rating": compliance.get("risk_rating") or "NotAssessed",
+            "matter_count": matter_counts.get(c["id"], 0),
         })
     return result
 
@@ -6772,15 +6840,39 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
 async def client_compliance_status_report(request: Request):
     """
     Firm-wide AML compliance roster: every client's real, computed
-    compliance status (never manually set), PEP flag, risk rating, and
-    full outstanding-requirements list -- built for an actual remediation
-    sweep, not a summary dashboard.
+    compliance status (never manually set), PEP flag, risk rating, matter
+    count, and full outstanding-requirements list -- built for an actual
+    remediation sweep, not a summary dashboard. Response shape (a bare
+    list of rows) is unchanged by the 2026-09-03 rename/extension --
+    see client_compliance_status_summary() below for the new firm-wide
+    summary block, deliberately a separate endpoint so this one's
+    contract stays exactly what every existing caller already expects.
     """
     user = await get_current_user(request)
     _check_permission(user, "reports:client_compliance_status")
     async with _db_pool.acquire() as conn:
         rows = await _fetch_client_compliance_roster_rows(conn)
     return rows
+
+@app.get("/api/reports/client-compliance-status-summary")
+async def client_compliance_status_summary(request: Request):
+    """
+    Firm-wide summary block for the AML/Client Compliance Register
+    (2026-09-03 partner design review): total clients, Cleared/Action
+    Required, a risk-rating breakdown, PEP count, and PEP-approval-
+    outstanding count. Reuses _aggregate_compliance_counts() -- the same
+    counting pass My Portfolio's own compliance snapshot uses -- over the
+    same batched fetch the roster rows above use, so these counts can
+    never drift from what the per-client rows on the same page show.
+    Same permission as the roster; a separate endpoint rather than
+    folding this into GET .../client-compliance-status so that endpoint's
+    existing bare-list response shape stays untouched.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
+    return _aggregate_compliance_counts(client_rows, compliance_by_client, owners_by_client)
 
 @app.get("/api/reports/client-compliance-status-export")
 async def client_compliance_status_report_export(request: Request):
@@ -6795,13 +6887,13 @@ async def client_compliance_status_report_export(request: Request):
     buf = _io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["Client Number", "Client Name", "Client Type", "Compliance Status",
-                      "Outstanding", "PEP", "Risk Rating"])
+                      "Outstanding", "PEP", "Risk Rating", "Matters"])
     for r in rows:
         writer.writerow([
             r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
             r["compliance_status"], "; ".join(r["missing"]),
             "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
-            r["risk_rating"],
+            r["risk_rating"], r["matter_count"],
         ])
 
     filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -6916,21 +7008,11 @@ async def _compute_my_portfolio(conn, user_id: "_uuid_mod.UUID", lawyer_name: Op
         for o in owner_rows:
             owners_by_client.setdefault(o["client_id"], []).append(dict(o))
 
-    cleared_count = action_required_count = pep_count = 0
-    risk_ratings = {r: 0 for r in RISK_RATINGS}
-    for c in client_rows:
-        compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
-        owners = owners_by_client.get(c["id"], [])
-        status = _compute_compliance_status(dict(c), compliance, owners)
-        if status["compliance_status"] == "Cleared":
-            cleared_count += 1
-        else:
-            action_required_count += 1
-        if compliance.get("is_pep") is True:
-            pep_count += 1
-        risk_ratings[compliance.get("risk_rating") or "NotAssessed"] = (
-            risk_ratings.get(compliance.get("risk_rating") or "NotAssessed", 0) + 1
-        )
+    compliance_counts = _aggregate_compliance_counts(client_rows, compliance_by_client, owners_by_client)
+    cleared_count = compliance_counts["cleared_count"]
+    action_required_count = compliance_counts["action_required_count"]
+    pep_count = compliance_counts["pep_count"]
+    risk_ratings = compliance_counts["risk_ratings"]
 
     # 4. Review status -- reuses the Matter Review Status report's own
     # data function directly, lawyer_id-scoped to this caller. No new

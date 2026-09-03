@@ -2067,7 +2067,7 @@ select{cursor:pointer}
         <option value="rbz">⬇ RBZ Compliance Export</option>
         <option value="practice-area">📂 Matters by Practice Area</option>
         <option value="matter-review-status">🗂 Matter Review Status</option>
-        <option value="client-compliance-status">🛡 Client Compliance Status</option>
+        <option value="client-compliance-status">🛡 AML / Client Compliance Register</option>
       </select>
     </div>
 
@@ -2144,13 +2144,21 @@ select{cursor:pointer}
     </div>
 
     <div class="card" id="report-panel-client-compliance-status" style="display:none;margin-top:1rem">
-      <div class="card-title">🛡 Client Compliance Status</div>
+      <div class="card-title">🛡 AML / Client Compliance Register</div>
       <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
-        Every firm client's real AML compliance status, PEP flag, risk rating, and full outstanding-requirements list — a remediation roster, not just a Cleared/Action Required count.
+        Money Laundering and Proceeds of Crime Act [Chapter 9:24].
+      </p>
+      <p style="font-size:0.8rem;color:var(--ink3);margin-top:0.4rem;font-style:italic;line-height:1.4">
+        This report is a compliance status and record index. Supporting identification, beneficial ownership, authority, and other documents are maintained in the client/matter file and are available for authorised review.
       </p>
       <div style="margin-top:0.5rem">
         <button class="btn btn-primary" onclick="loadClientComplianceStatus()">▶ Generate</button>
       </div>
+      <!-- Firm-wide summary block (2026-09-03 design review), populated
+           alongside the roster on the same Generate click -- see
+           _ccsRenderSummary()/loadClientComplianceStatus() below. Hidden
+           until first generated, same as the results step. -->
+      <div id="ccs-summary" style="display:none;margin-top:0.75rem"></div>
       <!-- Same results-step-after-Generate pattern as Matter Review Status
            above (search box + CSV download + table stay hidden until
            generated at least once). No filter step -- this report is
@@ -7892,10 +7900,15 @@ async function downloadMatterReviewStatusCsv() {
   }
 }
 
-// ── Client Compliance Status report ─────────────────────────────────────────
-// Firm-wide AML remediation roster (backend/main.py, 2026-09-02) -- every
-// client's real, computed compliance status, PEP flag, risk rating, and
-// full outstanding-requirements list. Table styling deliberately reuses the
+// ── AML / Client Compliance Register (was "Client Compliance Status") ──────
+// Firm-wide AML remediation roster (backend/main.py, 2026-09-02; renamed +
+// extended 2026-09-03 per a partner design review) -- every client's real,
+// computed compliance status, PEP flag, risk rating, matter count, and full
+// outstanding-requirements list, plus a firm-wide summary block above the
+// table. Endpoint paths, permission, and JS identifiers below are all
+// unchanged from the original "Client Compliance Status" report -- this is
+// a display rename + column/summary extension, not a new report. Table
+// styling deliberately reuses the
 // exact same pattern as Matter Review Status above (fixed <colgroup>
 // widths, sticky sortable header, search-filters-client-side-only,
 // truncate+expand for the one long free-text-shaped column) for visual
@@ -7944,7 +7957,8 @@ const CCS_COLUMNS = [
   { key: 'compliance_status', label: 'Status', width: '11%' },
   { key: 'is_pep', label: 'PEP', width: '6%' },
   { key: 'risk_rating', label: 'Risk', width: '9%' },
-  { key: 'missing', label: 'Outstanding', width: '38%' },
+  { key: 'matter_count', label: 'Matters', width: '6%' },
+  { key: 'missing', label: 'Outstanding', width: '32%' },
 ];
 
 function _ccsRenderTable() {
@@ -8013,6 +8027,7 @@ function _ccsRenderTable() {
               <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.compliance_status)}</span></td>
               <td style="padding:6px 8px">${pepText}</td>
               <td style="padding:6px 8px"><span class="chip ${riskChip}">${escHtml(r.risk_rating)}</span></td>
+              <td style="padding:6px 8px;text-align:center">${r.matter_count ?? 0}</td>
               <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.missing.length ? escHtml(outstandingText) : outstandingText}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
             </tr>
           `;
@@ -8025,15 +8040,55 @@ function _ccsRenderTable() {
   statusEl.style.color = 'var(--ink3)';
 }
 
+// Firm-wide summary block (2026-09-03 design review) -- Total clients,
+// Cleared/Action Required, a risk-rating breakdown, PEP count, and
+// PEP-approval-outstanding count. Fetched from its own endpoint (backend
+// keeps the roster's own response shape untouched) but rendered as one
+// unit with the table below, on the same Generate click.
+function _ccsRenderSummary(s) {
+  const el = document.getElementById('ccs-summary');
+  if (!el) return;
+  if (!s) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const risk = s.risk_ratings || {};
+  const tile = (label, value, color) => `
+    <div style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;min-width:120px;background:var(--paper2)">
+      <div style="font-size:0.68rem;color:var(--ink3);text-transform:uppercase;letter-spacing:0.02em">${label}</div>
+      <div style="font-size:1.15rem;font-weight:700;${color ? `color:${color}` : ''}">${value}</div>
+    </div>`;
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:0.5rem">
+      ${tile('Total Clients', s.total_clients ?? 0)}
+      ${tile('Cleared', s.cleared_count ?? 0, 'var(--green)')}
+      ${tile('Action Required', s.action_required_count ?? 0, (s.action_required_count ? 'var(--red)' : ''))}
+      ${tile('PEP Clients', s.pep_count ?? 0)}
+      ${tile('PEP Approval Outstanding', s.pep_approval_outstanding_count ?? 0, (s.pep_approval_outstanding_count ? 'var(--red)' : ''))}
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      ${tile('Risk: Low', risk.Low ?? 0, 'var(--green)')}
+      ${tile('Risk: Medium', risk.Medium ?? 0, 'var(--gold)')}
+      ${tile('Risk: High', risk.High ?? 0, (risk.High ? 'var(--red)' : ''))}
+      ${tile('Risk: Not Assessed', risk.NotAssessed ?? 0)}
+    </div>
+  `;
+}
+
 async function loadClientComplianceStatus() {
   document.getElementById('ccs-results').style.display = 'block';
   const el = document.getElementById('client-compliance-status-list');
   const statusEl = document.getElementById('ccs-status');
   try {
-    const res = await fetch(`${API}/api/reports/client-compliance-status`);
-    if (!res.ok) { el.innerHTML = '<em>Could not load client compliance status.</em>'; return; }
-    _ccsRows = await res.json();
+    const [rowsRes, summaryRes] = await Promise.all([
+      fetch(`${API}/api/reports/client-compliance-status`),
+      fetch(`${API}/api/reports/client-compliance-status-summary`),
+    ]);
+    if (!rowsRes.ok) { el.innerHTML = '<em>Could not load client compliance status.</em>'; return; }
+    _ccsRows = await rowsRes.json();
     _ccsExpanded = new Set();
+    // Summary is fetched alongside the roster but degrades independently --
+    // a summary-endpoint failure shouldn't block the roster table itself
+    // from rendering, since that's the report's primary content.
+    _ccsRenderSummary(summaryRes.ok ? await summaryRes.json() : null);
     if (!_ccsRows.length) { el.innerHTML = '<em>No clients found.</em>'; statusEl.textContent = ''; return; }
     _ccsRenderTable();
   } catch(e) { el.innerHTML = '<em>Error loading client compliance status.</em>'; }
