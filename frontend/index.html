@@ -1797,6 +1797,15 @@ select{cursor:pointer}
       </div>
     </div>
     <div class="form-group">
+      <label>AML Scope (manual, pending firm policy)</label>
+      <select id="cc-aml-scope">
+        <option value="NotAssessed">Not Assessed</option>
+        <option value="InScope">In Scope</option>
+        <option value="OutOfScope">Out of Scope</option>
+      </select>
+      <p style="font-size:0.72rem;color:var(--ink3);margin-top:4px">Set manually by a lawyer for now — MutemoOS doesn't yet auto-derive this from matter type against the Act's specified activities (s.15(1)(b1)); that mapping is a pending firm-policy decision.</p>
+    </div>
+    <div class="form-group">
       <label>Is this client a Politically Exposed Person (PEP)?</label>
       <select id="cc-is-pep" onchange="onComplianceIsPepChange()">
         <option value="">— Not yet assessed —</option>
@@ -2068,6 +2077,7 @@ select{cursor:pointer}
         <option value="practice-area">📂 Matters by Practice Area</option>
         <option value="matter-review-status">🗂 Matter Review Status</option>
         <option value="client-compliance-status">🛡 AML / Client Compliance Register</option>
+        <option value="aml-exceptions">⚠ AML Exceptions / Action Required</option>
       </select>
     </div>
 
@@ -2169,9 +2179,30 @@ select{cursor:pointer}
           <input type="text" id="ccs-search" placeholder="🔍 Search client name or number…" oninput="_ccsSetSearch(this.value)"
             style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
           <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadClientComplianceStatusCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadClientComplianceStatusPdf()">⬇ Download PDF</button>
         </div>
         <div id="ccs-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
         <div id="client-compliance-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card" id="report-panel-aml-exceptions" style="display:none;margin-top:1rem">
+      <div class="card-title">⚠ AML Exceptions / Action Required</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Every outstanding compliance item across every client, one row per item, prioritized — "what do I need to deal with?"
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadAmlExceptions()">▶ Generate</button>
+      </div>
+      <div id="ae-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="ae-search" placeholder="🔍 Search client or issue…" oninput="_aeSetSearch(this.value)"
+            style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadAmlExceptionsCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadAmlExceptionsPdf()">⬇ Download PDF</button>
+        </div>
+        <div id="ae-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="aml-exceptions-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
       </div>
     </div>
 
@@ -3335,6 +3366,7 @@ async function openComplianceModal(clientId) {
     document.getElementById('cc-is-beneficial-owner').value = _complianceData.client_is_beneficial_owner || '';
     document.getElementById('cc-identity-status').value = _complianceData.identity_verification_status || 'Unverified';
     document.getElementById('cc-risk-rating').value = _complianceData.risk_rating || 'NotAssessed';
+    document.getElementById('cc-aml-scope').value = _complianceData.aml_scope || 'NotAssessed';
     document.getElementById('cc-is-pep').value = _complianceData.is_pep === true ? 'true' : _complianceData.is_pep === false ? 'false' : '';
     document.getElementById('cc-pep-basis').value = _complianceData.pep_basis || '';
     document.getElementById('cc-pep-position').value = _complianceData.pep_position || '';
@@ -3602,6 +3634,7 @@ async function submitComplianceForm() {
   const compliancePayload = {
     identity_verification_status: document.getElementById('cc-identity-status').value,
     risk_rating: document.getElementById('cc-risk-rating').value,
+    aml_scope: document.getElementById('cc-aml-scope').value,
     source_of_wealth: document.getElementById('cc-source-of-wealth').value.trim() || null,
     source_of_funds: document.getElementById('cc-source-of-funds').value.trim() || null,
     enhanced_monitoring_required: document.getElementById('cc-enhanced-monitoring').checked,
@@ -3674,7 +3707,7 @@ function showTab(tab) {
 // it was Tofamba's own AT cost-attribution view, not a firm-facing report;
 // see backend/main.py's sms_usage_by_firm_report() for where it now lives
 // (operator-only, require_admin_token()).
-const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'client-compliance-status'];
+const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'client-compliance-status', 'aml-exceptions'];
 let _mrsFiltersLoaded = false;
 let _mrsHasGenerated = false;
 
@@ -7927,6 +7960,18 @@ let _ccsSearch = '';
 // whole set _compute_compliance_status() ever returns.
 const CCS_STATUS_CHIP = { 'Cleared': 'chip-green', 'Action Required': 'chip-red' };
 const CCS_RISK_CHIP = { 'Low': 'chip-green', 'Medium': 'chip-gold', 'High': 'chip-red', 'NotAssessed': 'chip-gray' };
+// AML Scope (2026-09-03 design review): In Scope gets an attention color
+// (it's the state that actually carries specified-activity obligations),
+// Out of Scope and Not Assessed both read as neutral/gray -- this isn't a
+// good/bad axis the way Risk or Status are.
+const CCS_AML_SCOPE_CHIP = { 'InScope': 'chip-gold', 'OutOfScope': 'chip-gray', 'NotAssessed': 'chip-gray' };
+const CCS_BO_STATUS_CHIP = { 'Verified': 'chip-green', 'Pending': 'chip-gold', 'N/A': 'chip-gray', 'NotAssessed': 'chip-gray' };
+// Shared display-label map, mirroring backend/main.py's _ENUM_DISPLAY_
+// LABELS / _display_label() -- a sample report this was built to match
+// spells these "Not Assessed"/"In Scope"/"Out of Scope", not the raw
+// PascalCase storage form. Values with no entry pass through unchanged.
+const CCS_ENUM_LABELS = { 'NotAssessed': 'Not Assessed', 'InScope': 'In Scope', 'OutOfScope': 'Out of Scope' };
+function _ccsLabel(v) { return CCS_ENUM_LABELS[v] || v; }
 
 // The Outstanding column is the one long, variable-length, list-shaped
 // field here (same role Last Activity plays in Matter Review Status) --
@@ -7950,15 +7995,22 @@ function _ccsToggleExpand(clientId) {
   _ccsRenderTable();
 }
 
+// Column order/labels (2026-09-03, partner design review) match a sample
+// report as closely as possible: Client No. | Client | Type | AML Scope |
+// CDD Status | Risk | PEP | BO Status | Matters | Outstanding. Mirrors
+// backend/main.py's _CCS_EXPORT_HEADERS -- same order, same wording,
+// there's no separate frontend-only convention for this report.
 const CCS_COLUMNS = [
-  { key: 'client_number', label: 'Client #', width: '9%' },
-  { key: 'client_name', label: 'Client', width: '18%' },
-  { key: 'client_type', label: 'Type', width: '9%' },
-  { key: 'compliance_status', label: 'Status', width: '11%' },
-  { key: 'is_pep', label: 'PEP', width: '6%' },
-  { key: 'risk_rating', label: 'Risk', width: '9%' },
-  { key: 'matter_count', label: 'Matters', width: '6%' },
-  { key: 'missing', label: 'Outstanding', width: '32%' },
+  { key: 'client_number', label: 'Client No.', width: '7%' },
+  { key: 'client_name', label: 'Client', width: '15%' },
+  { key: 'client_type', label: 'Type', width: '7%' },
+  { key: 'aml_scope', label: 'AML Scope', width: '8%' },
+  { key: 'compliance_status', label: 'CDD Status', width: '9%' },
+  { key: 'risk_rating', label: 'Risk', width: '6%' },
+  { key: 'is_pep', label: 'PEP', width: '5%' },
+  { key: 'bo_status', label: 'BO Status', width: '7%' },
+  { key: 'matter_count', label: 'Matters', width: '5%' },
+  { key: 'missing', label: 'Outstanding', width: '31%' },
 ];
 
 function _ccsRenderTable() {
@@ -8016,6 +8068,8 @@ function _ccsRenderTable() {
             : '<span style="color:var(--green)">None</span>';
           const statusChip = CCS_STATUS_CHIP[r.compliance_status] || 'chip-gray';
           const riskChip = CCS_RISK_CHIP[r.risk_rating] || 'chip-gray';
+          const amlScopeChip = CCS_AML_SCOPE_CHIP[r.aml_scope] || 'chip-gray';
+          const boStatusChip = CCS_BO_STATUS_CHIP[r.bo_status] || 'chip-gray';
           const pepText = r.is_pep === true ? '<span style="color:var(--red);font-weight:600">Yes</span>'
             : r.is_pep === false ? 'No' : '<span style="color:var(--ink3)">—</span>';
           return `
@@ -8024,9 +8078,11 @@ function _ccsRenderTable() {
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_number || '')}</td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name)}">${escHtml(r.client_name)}</td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_type || '')}</td>
+              <td style="padding:6px 8px"><span class="chip ${amlScopeChip}">${escHtml(_ccsLabel(r.aml_scope))}</span></td>
               <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.compliance_status)}</span></td>
+              <td style="padding:6px 8px"><span class="chip ${riskChip}">${escHtml(_ccsLabel(r.risk_rating))}</span></td>
               <td style="padding:6px 8px">${pepText}</td>
-              <td style="padding:6px 8px"><span class="chip ${riskChip}">${escHtml(r.risk_rating)}</span></td>
+              <td style="padding:6px 8px"><span class="chip ${boStatusChip}">${escHtml(_ccsLabel(r.bo_status))}</span></td>
               <td style="padding:6px 8px;text-align:center">${r.matter_count ?? 0}</td>
               <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.missing.length ? escHtml(outstandingText) : outstandingText}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
             </tr>
@@ -8119,6 +8175,215 @@ async function downloadClientComplianceStatusCsv() {
     URL.revokeObjectURL(url);
 
     statusEl.textContent = '✓ CSV downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+async function downloadClientComplianceStatusPdf() {
+  const statusEl = document.getElementById('ccs-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/client-compliance-status-export-pdf`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'client_compliance_status.pdf';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ PDF downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+// ── AML Exceptions / Action Required report ─────────────────────────────────
+// Flat, firm-wide, prioritized list of every outstanding compliance ITEM
+// (not per client) -- backend/main.py, 2026-09-03, partner design review,
+// Part B. Reuses the exact same _compute_compliance_status() missing[]
+// list the Register's own Outstanding column shows (via a dedicated
+// endpoint, not client-side re-derivation) so this can never disagree
+// with the Register about what's outstanding. Table styling mirrors the
+// Register/Matter Review Status pattern (search-filters-client-side,
+// sortable sticky header) for visual consistency, same reasoning as
+// those two reports' own comments -- not because the data is shared.
+let _aeRows = [];
+let _aeSort = { key: 'priority', dir: 1 };
+let _aeSearch = '';
+
+const AE_PRIORITY_ORDER = { 'High': 0, 'Medium': 1, 'Low': 2 };
+const AE_PRIORITY_CHIP = { 'High': 'chip-red', 'Medium': 'chip-gold', 'Low': 'chip-gray' };
+
+const AE_COLUMNS = [
+  { key: 'priority', label: 'Priority', width: '10%' },
+  { key: 'client_name', label: 'Client', width: '20%' },
+  { key: 'matter', label: 'Matter', width: '12%' },
+  { key: 'issue', label: 'Issue', width: '30%' },
+  { key: 'responsible_person', label: 'Responsible Person', width: '18%' },
+  { key: 'status', label: 'Status', width: '10%' },
+];
+
+function _aeSetSearch(value) {
+  _aeSearch = (value || '').trim().toLowerCase();
+  _aeRenderTable();
+}
+
+function _aeSetSort(key) {
+  _aeSort = _aeSort.key === key ? { key, dir: _aeSort.dir * -1 } : { key, dir: 1 };
+  _aeRenderTable();
+}
+
+function _aeRenderTable() {
+  const el = document.getElementById('aml-exceptions-list');
+  const statusEl = document.getElementById('ae-status');
+  if (!el) return;
+
+  let rows = _aeRows;
+  if (_aeSearch) {
+    rows = rows.filter(r =>
+      (r.client_name || '').toLowerCase().includes(_aeSearch) ||
+      (r.issue || '').toLowerCase().includes(_aeSearch)
+    );
+  }
+  const { key, dir } = _aeSort;
+  rows = [...rows].sort((a, b) => {
+    const av = key === 'priority' ? AE_PRIORITY_ORDER[a.priority] ?? 9 : (a[key] ?? '');
+    const bv = key === 'priority' ? AE_PRIORITY_ORDER[b.priority] ?? 9 : (b[key] ?? '');
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    return 0;
+  });
+
+  if (!rows.length) {
+    el.innerHTML = _aeRows.length ? '<em>No exceptions match this search.</em>'
+      : '<em style="color:var(--green)">No outstanding items — every client is Cleared.</em>';
+    statusEl.textContent = '';
+    return;
+  }
+
+  const sortArrow = (k) => _aeSort.key === k ? (_aeSort.dir === 1 ? ' ▲' : ' ▼') : '';
+
+  el.innerHTML = `
+    <div style="overflow:auto;max-height:65vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup>${AE_COLUMNS.map(c => `<col style="width:${c.width}">`).join('')}</colgroup>
+      <thead>
+        <tr style="text-align:left">
+          ${AE_COLUMNS.map(c => `
+            <th style="padding:6px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
+                       background:var(--paper2);border-bottom:1px solid var(--gold2);user-select:none;z-index:1"
+                onclick="_aeSetSort('${c.key}')" title="Click to sort">${c.label}${sortArrow(c.key)}</th>
+          `).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => {
+          const priorityChip = AE_PRIORITY_CHIP[r.priority] || 'chip-gray';
+          return `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px"><span class="chip ${priorityChip}">${escHtml(r.priority)}</span></td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name)}">${escHtml(r.client_name)}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.matter || '—')}</td>
+              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(r.issue)}</td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.responsible_person)}</td>
+              <td style="padding:6px 8px">${escHtml(r.status)}</td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+  statusEl.textContent = `${rows.length} exception${rows.length === 1 ? '' : 's'}${_aeSearch ? ` (filtered from ${_aeRows.length})` : ''}`;
+  statusEl.style.color = 'var(--ink3)';
+}
+
+async function loadAmlExceptions() {
+  document.getElementById('ae-results').style.display = 'block';
+  const el = document.getElementById('aml-exceptions-list');
+  const statusEl = document.getElementById('ae-status');
+  try {
+    const res = await fetch(`${API}/api/reports/aml-exceptions`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load AML exceptions.</em>'; return; }
+    _aeRows = await res.json();
+    _aeRenderTable();
+  } catch(e) { el.innerHTML = '<em>Error loading AML exceptions.</em>'; }
+}
+
+async function downloadAmlExceptionsCsv() {
+  const statusEl = document.getElementById('ae-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/aml-exceptions-export`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'aml_exceptions.csv';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ CSV downloaded.';
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+async function downloadAmlExceptionsPdf() {
+  const statusEl = document.getElementById('ae-status');
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}/api/reports/aml-exceptions-export-pdf`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : 'aml_exceptions.pdf';
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = '✓ PDF downloaded.';
     statusEl.style.color = 'var(--green)';
   } catch(e) {
     statusEl.textContent = `Error: ${e.message}`;

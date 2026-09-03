@@ -628,6 +628,16 @@ async def run_migrations():
             updated_at                               TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_client_compliance_client ON client_compliance(client_id);
+        -- AML Scope (2026-09-03, partner design review) -- manually set by a
+        -- lawyer for now, NOT auto-derived from matter type: there is no
+        -- confirmed mapping yet of matter types to the Act's specified
+        -- activities (s.15(1)(b1)), so this deliberately doesn't guess at
+        -- one. See the "AML Scope (manual, pending firm policy)" label on
+        -- the compliance modal itself.
+        ALTER TABLE client_compliance ADD COLUMN IF NOT EXISTS aml_scope TEXT DEFAULT 'NotAssessed';
+        ALTER TABLE client_compliance DROP CONSTRAINT IF EXISTS client_compliance_aml_scope_check;
+        ALTER TABLE client_compliance ADD CONSTRAINT client_compliance_aml_scope_check
+            CHECK (aml_scope IN ('NotAssessed', 'InScope', 'OutOfScope'));
 
         CREATE TABLE IF NOT EXISTS legal_updates (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3241,6 +3251,30 @@ AUTHORITY_BASIS_TYPES = [
 PEP_BASIS_TYPES = ["Self", "BeneficialOwner", "CloseAssociate", "NotApplicable"]
 RISK_RATINGS = ["Low", "Medium", "High", "NotAssessed"]
 CLIENT_IS_BENEFICIAL_OWNER_VALUES = ["Yes", "No", "Unknown"]
+# Manually set by a lawyer for now (2026-09-03, partner design review) --
+# NOT auto-derived from matter type against the Act's specified activities
+# (s.15(1)(b1)); that mapping is a pending firm-policy decision, so this
+# deliberately doesn't guess at one. See ClientComplianceUpdate.aml_scope
+# and the "AML Scope (manual, pending firm policy)" label in the compliance
+# modal (frontend/index.html).
+AML_SCOPE_VALUES = ["NotAssessed", "InScope", "OutOfScope"]
+# Shared display-label map for enum-shaped values that read awkwardly as
+# their raw PascalCase storage form (used by the AML/Client Compliance
+# Register's table/CSV/PDF -- 2026-09-03 partner design review asked to
+# match a sample report's exact wording, e.g. "Not Assessed" not
+# "NotAssessed", "In Scope" not "InScope"). Values with no entry here
+# (Low/Medium/High/Verified/Pending/N/A/Cleared/Action Required/...) are
+# already display-ready and pass through unchanged.
+_ENUM_DISPLAY_LABELS = {
+    "NotAssessed": "Not Assessed",
+    "InScope": "In Scope",
+    "OutOfScope": "Out of Scope",
+}
+
+def _display_label(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return _ENUM_DISPLAY_LABELS.get(value, value)
 
 class MatterCreate(BaseModel):
     name: str
@@ -3406,6 +3440,9 @@ class ClientComplianceUpdate(BaseModel):
     source_of_funds: Optional[str] = None
     enhanced_monitoring_required: Optional[bool] = None
     risk_rating: Optional[str] = None
+    # Manual, pending firm policy on a matter-type-to-Act-activity mapping --
+    # see AML_SCOPE_VALUES above. Not auto-computed.
+    aml_scope: Optional[str] = None
     retained_until: Optional[str] = None
     # Reuses the real, existing GET /api/matters/check-conflict —
     # conflict_check_reviewed is set true by the frontend once a lawyer
@@ -4050,6 +4087,7 @@ _DEFAULT_CLIENT_COMPLIANCE = {
     "source_of_funds": None,
     "enhanced_monitoring_required": False,
     "risk_rating": "NotAssessed",
+    "aml_scope": "NotAssessed",
     "relationship_ended_date": None,
     "retained_until": None,
     "conflict_check_reviewed": False,
@@ -4120,6 +4158,41 @@ def _compute_compliance_status(client: dict, compliance: Optional[dict], benefic
         "compliance_status": "Cleared" if not missing else "Action Required",
         "missing": missing,
     }
+
+def _compute_bo_status(client: dict, compliance: dict, beneficial_owners: list) -> str:
+    """
+    Display-only projection for the AML/Client Compliance Register's BO
+    Status column (2026-09-03, partner design review) -- NOT a new
+    compliance rule of its own. Reads exactly the same fields
+    _compute_compliance_status() already gates "Cleared" on for
+    beneficial ownership, so this can never show a status that disagrees
+    with that function's own missing[] list (e.g. showing "Verified"
+    here while missing[] still says "Beneficial ownership not verified").
+    """
+    client_type = client.get("client_type")
+    if not client_type or client_type not in LEGAL_PERSON_CLIENT_TYPES:
+        return "N/A"  # beneficial ownership doesn't apply to an Individual
+    is_bo = compliance.get("client_is_beneficial_owner")
+    if is_bo == "Yes":
+        return "Verified"  # the client itself is the beneficial owner -- satisfied
+    if is_bo == "No":
+        return "Verified" if any(o.get("verification_status") == "Verified" for o in beneficial_owners) else "Pending"
+    return "NotAssessed"  # is_bo is None or "Unknown"
+
+# Priority rule for the AML Exceptions / Action Required report
+# (2026-09-03, judgment call reported to the user before shipping): PEP
+# and beneficial-ownership items go to the heart of who the firm is
+# actually dealing with -- the Act's core CDD purpose -- so they're High;
+# everything else _compute_compliance_status() can put in missing[]
+# (identity verification, conflict check, an unset client type) is
+# Medium. There's no Low bucket: every missing[] item is already
+# something that function treats as necessary for "Cleared", never
+# optional or cosmetic.
+def _priority_for_missing_item(item: str) -> str:
+    item_lower = item.lower()
+    if "pep" in item_lower or "beneficial ownership" in item_lower:
+        return "High"
+    return "Medium"
 
 def _aggregate_compliance_counts(client_rows, compliance_by_client: dict, owners_by_client: dict) -> dict:
     """
@@ -5069,6 +5142,8 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         raise HTTPException(status_code=422, detail=f"pep_basis must be one of: {', '.join(PEP_BASIS_TYPES)}")
     if "risk_rating" in fields and fields["risk_rating"] not in RISK_RATINGS:
         raise HTTPException(status_code=422, detail=f"risk_rating must be one of: {', '.join(RISK_RATINGS)}")
+    if "aml_scope" in fields and fields["aml_scope"] not in AML_SCOPE_VALUES:
+        raise HTTPException(status_code=422, detail=f"aml_scope must be one of: {', '.join(AML_SCOPE_VALUES)}")
     if "identity_verification_status" in fields and fields["identity_verification_status"] not in VERIFICATION_STATUSES:
         raise HTTPException(status_code=422, detail=f"identity_verification_status must be one of: {', '.join(VERIFICATION_STATUSES)}")
     if "client_is_beneficial_owner" in fields and fields["client_is_beneficial_owner"] not in CLIENT_IS_BENEFICIAL_OWNER_VALUES:
@@ -6840,16 +6915,19 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
     for c in client_rows:
         compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
         owners = owners_by_client.get(c["id"], [])
-        status = _compute_compliance_status(dict(c), compliance, owners)
+        client_dict = dict(c)
+        status = _compute_compliance_status(client_dict, compliance, owners)
         result.append({
             "client_id": str(c["id"]),
             "client_number": c["client_number"],
             "client_name": c["full_name"],
             "client_type": c["client_type"],
+            "aml_scope": compliance.get("aml_scope") or "NotAssessed",
             "compliance_status": status["compliance_status"],
             "missing": status["missing"],
             "is_pep": compliance.get("is_pep"),
             "risk_rating": compliance.get("risk_rating") or "NotAssessed",
+            "bo_status": _compute_bo_status(client_dict, compliance, owners),
             "matter_count": matter_counts.get(c["id"], 0),
         })
     return result
@@ -6892,6 +6970,23 @@ async def client_compliance_status_summary(request: Request):
         client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
     return _aggregate_compliance_counts(client_rows, compliance_by_client, owners_by_client)
 
+
+# Column order/labels below (2026-09-03, partner design review) match a
+# sample report PDF as closely as possible: Client No. | Client | Type |
+# AML Scope | CDD Status | Risk | PEP | BO Status | Matters | Outstanding.
+# Shared by the CSV and PDF exports and the frontend table so there's one
+# place this order/wording lives, not three that could drift apart.
+_CCS_EXPORT_HEADERS = ["Client No.", "Client", "Type", "AML Scope", "CDD Status",
+                       "Risk", "PEP", "BO Status", "Matters", "Outstanding"]
+
+def _ccs_export_row(r: dict) -> list:
+    return [
+        r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
+        _display_label(r["aml_scope"]), r["compliance_status"], _display_label(r["risk_rating"]),
+        "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
+        _display_label(r["bo_status"]), r["matter_count"], "; ".join(r["missing"]),
+    ]
+
 @app.get("/api/reports/client-compliance-status-export")
 async def client_compliance_status_report_export(request: Request):
     """Same data/permission as the JSON report above -- CSV download,
@@ -6904,18 +6999,197 @@ async def client_compliance_status_report_export(request: Request):
     import csv, io as _io
     buf = _io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Client Number", "Client Name", "Client Type", "Compliance Status",
-                      "Outstanding", "PEP", "Risk Rating", "Matters"])
+    writer.writerow(_CCS_EXPORT_HEADERS)
     for r in rows:
-        writer.writerow([
-            r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
-            r["compliance_status"], "; ".join(r["missing"]),
-            "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
-            r["risk_rating"], r["matter_count"],
-        ])
+        writer.writerow(_ccs_export_row(r))
 
     filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
+
+@app.get("/api/reports/client-compliance-status-export-pdf")
+async def client_compliance_status_report_export_pdf(request: Request):
+    """Same data/permission as the JSON report and CSV export above --
+    PDF download (2026-09-03, partner design review asked to match a
+    sample report's layout). Reuses _mp_pdf_table(), the same bordered-
+    table renderer My Portfolio's PDF export already uses for its own
+    per-client listings -- not a second table-drawing implementation."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_client_compliance_roster_rows(conn)
+
+    from fpdf import FPDF
+    pdf = FPDF(orientation="L", unit="mm", format="A4")  # landscape -- 10 columns
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "AML / Client Compliance Register", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 5, "Money Laundering and Proceeds of Crime Act [Chapter 9:24]", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    if not rows:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, "No clients on file.", new_x="LMARGIN", new_y="NEXT")
+    else:
+        usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+        # Percentages of usable_width, summing to 100 -- Outstanding gets
+        # the largest share since it's the one free-text, variable-length
+        # column.
+        col_pcts = (7, 15, 7, 8, 9, 6, 5, 7, 5, 31)
+        col_widths = [pct * usable_width / 100 for pct in col_pcts]
+        table_rows = [_ccs_export_row(r) for r in rows]
+        _mp_pdf_table(pdf, _CCS_EXPORT_HEADERS, col_widths, table_rows)
+
+    filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=bytes(pdf.output()),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+# ── Reports (AML Exceptions / Action Required) ──────────────────────────────
+# New report (2026-09-03, partner design review), same permission tier as
+# the Register (reports:client_compliance_status) -- deliberately not a
+# new permission key, same reasoning as the Register's own key: this is
+# another view over the exact same underlying compliance data, not a
+# separately-scoped feature. Flat, one row per outstanding ITEM (not per
+# client) -- reuses _compute_compliance_status()'s missing[] list
+# completely unchanged (the exact same list the Register's own Outstanding
+# column shows), so this report can never detect a different set of
+# exceptions than the Register does.
+#
+# Matter is always blank: matter-level AML tracking doesn't exist yet
+# (flagged in project memory, pending a decision on matter-type-to-Act-
+# activity mapping) -- every outstanding item today is client-level.
+# Status is always "Open": there's no resolution-tracking workflow yet
+# (a separate, larger future build, not this pass).
+
+async def _fetch_aml_exceptions_rows(conn) -> list:
+    """
+    One row per outstanding compliance item, firm-wide, sorted High
+    priority first (then by client name for a stable order within a
+    priority tier). Responsible Person defaults to the client's own
+    created_by lawyer (resolved via a batched users lookup, not N+1);
+    "Compliance Officer" when that lawyer can't be resolved (no
+    created_by recorded, or the user row is gone) -- a real name to
+    action against wherever one exists, a role to fall back to
+    otherwise.
+    """
+    client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
+
+    creator_ids = [c["created_by"] for c in client_rows if c.get("created_by")]
+    names_by_user_id = {}
+    if creator_ids:
+        user_rows = await conn.fetch(
+            "SELECT id, display_name FROM users WHERE id = ANY($1) AND firm_id=$2",
+            creator_ids, FIRM_ID
+        )
+        names_by_user_id = {u["id"]: u["display_name"] for u in user_rows}
+
+    rows = []
+    for c in client_rows:
+        compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
+        owners = owners_by_client.get(c["id"], [])
+        status = _compute_compliance_status(dict(c), compliance, owners)
+        if not status["missing"]:
+            continue
+        responsible = names_by_user_id.get(c.get("created_by")) or "Compliance Officer"
+        for item in status["missing"]:
+            rows.append({
+                "priority": _priority_for_missing_item(item),
+                "client_id": str(c["id"]),
+                "client_name": c["full_name"],
+                "client_number": c["client_number"],
+                "matter": "",  # client-level only -- see section header comment
+                "issue": item,
+                "responsible_person": responsible,
+                "status": "Open",
+            })
+
+    priority_order = {"High": 0, "Medium": 1, "Low": 2}
+    rows.sort(key=lambda r: (priority_order.get(r["priority"], 9), r["client_name"] or ""))
+    return rows
+
+@app.get("/api/reports/aml-exceptions")
+async def aml_exceptions_report(request: Request):
+    """
+    Firm-wide AML exceptions list: every outstanding compliance item
+    across every client, prioritized -- "what do I need to deal with?",
+    the third of the three management questions this report family
+    answers (alongside the Register's "where do we stand?" and the
+    not-yet-built individual client drill-down's "show me everything for
+    this client").
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_aml_exceptions_rows(conn)
+    return rows
+
+_AML_EXCEPTIONS_HEADERS = ["Priority", "Client", "Matter", "Issue", "Responsible Person", "Status"]
+
+def _aml_exceptions_export_row(r: dict) -> list:
+    return [r["priority"], r["client_name"] or "", r["matter"], r["issue"], r["responsible_person"], r["status"]]
+
+@app.get("/api/reports/aml-exceptions-export")
+async def aml_exceptions_report_export(request: Request):
+    """Same data/permission as the JSON report above -- CSV download,
+    same convention as every other report export."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_aml_exceptions_rows(conn)
+
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_AML_EXCEPTIONS_HEADERS)
+    for r in rows:
+        writer.writerow(_aml_exceptions_export_row(r))
+
+    filename = f"aml_exceptions_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(buf.getvalue(), filename)
+
+@app.get("/api/reports/aml-exceptions-export-pdf")
+async def aml_exceptions_report_export_pdf(request: Request):
+    """Same data/permission as the JSON report and CSV export above --
+    PDF download, reusing _mp_pdf_table() same as the Register's own PDF
+    export just above."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_aml_exceptions_rows(conn)
+
+    from fpdf import FPDF
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "AML Exceptions / Action Required", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    if not rows:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, "No outstanding items -- every client is Cleared.", new_x="LMARGIN", new_y="NEXT")
+    else:
+        usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+        col_pcts = (10, 20, 15, 30, 15, 10)
+        col_widths = [pct * usable_width / 100 for pct in col_pcts]
+        table_rows = [_aml_exceptions_export_row(r) for r in rows]
+        _mp_pdf_table(pdf, _AML_EXCEPTIONS_HEADERS, col_widths, table_rows)
+
+    filename = f"aml_exceptions_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=bytes(pdf.output()),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 # ── My Portfolio (self-scoped, every lawyer — NOT a reports:* endpoint) ────
 # Deliberately outside the reports:* permission family above: those are all

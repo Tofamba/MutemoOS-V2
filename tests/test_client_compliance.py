@@ -549,3 +549,66 @@ def test_get_client_includes_compliance_status_badge(monkeypatch):
 
     assert result["compliance_status"] == "Action Required"
     assert "Identity not verified" in result["compliance_missing"]
+
+
+# ── AML Scope (2026-09-03, partner design review) ────────────────────────
+# Manual field only -- NOT auto-computed from matter type (no confirmed
+# mapping of matter types to the Act's specified activities, s.15(1)(b1),
+# exists yet). These tests cover the PATCH validation/persistence wiring;
+# the field plays no role in _compute_compliance_status()'s own "Cleared"
+# logic (unlike risk_rating for a PEP) -- it is purely informational on
+# the Register report for now.
+
+def test_aml_scope_rejects_invalid_value(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Company")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(update_client_compliance(
+            str(client["id"]), ClientComplianceUpdate(aml_scope="SomethingElse"), None
+        ))
+    assert exc_info.value.status_code == 422
+
+
+def test_aml_scope_accepts_every_valid_value(monkeypatch):
+    for value in m.AML_SCOPE_VALUES:
+        client = _client_row(m.FIRM_ID, client_type="Company")
+        pool = FakePool(clients=[client])
+        monkeypatch.setattr(m, "_db_pool", pool)
+
+        result = asyncio.run(update_client_compliance(
+            str(client["id"]), ClientComplianceUpdate(aml_scope=value), None
+        ))
+        assert result["aml_scope"] == value
+
+
+def test_aml_scope_defaults_to_not_assessed_when_never_set(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Company")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(get_client_compliance(str(client["id"]), None))
+
+    assert result["aml_scope"] == "NotAssessed"
+
+
+def test_aml_scope_does_not_affect_compliance_status(monkeypatch):
+    """Deliberately not part of _compute_compliance_status()'s "Cleared"
+    gating -- a fully-cleared client stays Cleared regardless of what
+    aml_scope is set to, since this is a manual, pending-policy field,
+    not one of the Act's discrete CDD steps."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(
+        identity_verification_status="Verified", is_pep=False, conflict_check_reviewed=True,
+    ), None))
+    asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(aml_scope="OutOfScope"), None
+    ))
+
+    result = asyncio.run(get_client_compliance(str(client["id"]), None))
+    assert result["compliance_status"] == "Cleared"
+    assert result["aml_scope"] == "OutOfScope"

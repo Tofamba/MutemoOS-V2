@@ -45,6 +45,7 @@ from backend.main import (
     FIRM_ID,
     client_compliance_status_report,
     client_compliance_status_report_export,
+    client_compliance_status_report_export_pdf,
     client_compliance_status_summary,
 )
 
@@ -222,6 +223,8 @@ def test_cleared_individual_client_reports_cleared_with_no_outstanding(monkeypat
     assert row["is_pep"] is False
     assert row["risk_rating"] == "Low"
     assert row["matter_count"] == 0  # no matters fixture supplied
+    assert row["aml_scope"] == "NotAssessed"  # never set -> default
+    assert row["bo_status"] == "N/A"  # Individual -- BO doesn't apply
 
 
 def test_matter_count_reflects_real_matters_and_excludes_sentinels(monkeypatch):
@@ -244,6 +247,104 @@ def test_matter_count_reflects_real_matters_and_excludes_sentinels(monkeypatch):
     by_name = {r["client_name"]: r for r in rows}
     assert by_name["Mould Enterprises (Pvt) Ltd"]["matter_count"] == 2
     assert by_name["Other Client"]["matter_count"] == 0
+
+
+# ── AML Scope column (2026-09-03 design review) ──────────────────────────
+
+def test_aml_scope_reflects_the_manually_set_value(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Blue Ridge Traders (Pvt) Ltd", client_type="Company")
+    compliance = _compliance(client["id"], aml_scope="InScope")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["aml_scope"] == "InScope"
+
+
+def test_aml_scope_defaults_to_not_assessed_with_no_compliance_row(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("No Compliance Row Yet")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["aml_scope"] == "NotAssessed"
+
+
+# ── BO Status column (2026-09-03 design review) ──────────────────────────
+# Display-only projection of the exact same fields _compute_compliance_
+# status() already gates "Cleared" on for beneficial ownership -- these
+# tests confirm it can never show something that disagrees with that
+# function's own missing[] list.
+
+def test_bo_status_is_na_for_individual(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tendai Moyo", client_type="Individual")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["bo_status"] == "N/A"
+
+
+def test_bo_status_verified_when_client_itself_is_the_beneficial_owner(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Anchorflow Holdings", client_type="Company")
+    compliance = _compliance(client["id"], client_is_beneficial_owner="Yes")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["bo_status"] == "Verified"
+
+
+def test_bo_status_pending_when_owner_recorded_but_not_verified(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Mafuta Family Trust", client_type="Trust")
+    compliance = _compliance(client["id"], client_is_beneficial_owner="No")
+    owner = _owner(client["id"], "Unverified")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance], owners=[owner]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["bo_status"] == "Pending"
+
+
+def test_bo_status_verified_when_a_real_owner_is_verified(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Sunshine Properties (Pvt) Ltd", client_type="Company")
+    compliance = _compliance(client["id"], client_is_beneficial_owner="No")
+    owner = _owner(client["id"], "Verified")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance], owners=[owner]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["bo_status"] == "Verified"
+
+
+def test_bo_status_not_assessed_when_never_set_for_a_legal_person(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tobacco Sellers Zimbabwe (Pvt) Ltd", client_type="Company")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["bo_status"] == "NotAssessed"
 
 
 def test_never_assessed_client_reports_action_required_with_full_outstanding_list(monkeypatch):
@@ -378,7 +479,10 @@ def test_no_clients_returns_empty_list(monkeypatch):
 def test_csv_export_includes_full_outstanding_list_not_just_a_count(monkeypatch):
     """The whole point of this report is a real remediation sweep -- the
     CSV's Outstanding column must carry every missing item, semicolon-
-    joined, not a bare count."""
+    joined, not a bare count. Column order/labels (2026-09-03, partner
+    design review) match a sample report as closely as possible: Client
+    No. | Client | Type | AML Scope | CDD Status | Risk | PEP |
+    BO Status | Matters | Outstanding."""
     import backend.main as m
     partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
     client = _client("Estate Late Bvumbe", client_type="Estate", client_number="EB-004")
@@ -388,16 +492,19 @@ def test_csv_export_includes_full_outstanding_list_not_just_a_count(monkeypatch)
     response = asyncio.run(client_compliance_status_report_export(_fake_request()))
     rows = _csv_rows(response)
 
-    assert rows[0] == ["Client Number", "Client Name", "Client Type", "Compliance Status",
-                        "Outstanding", "PEP", "Risk Rating", "Matters"]
+    assert rows[0] == ["Client No.", "Client", "Type", "AML Scope", "CDD Status",
+                        "Risk", "PEP", "BO Status", "Matters", "Outstanding"]
     assert rows[1][0] == "EB-004"
     assert rows[1][1] == "Estate Late Bvumbe"
-    assert rows[1][3] == "Action Required"
-    assert "Identity not verified" in rows[1][4]
-    assert "Beneficial ownership not assessed" in rows[1][4]
-    assert rows[1][5] == "Not assessed"
-    assert rows[1][6] == "NotAssessed"
-    assert rows[1][7] == "0"
+    assert rows[1][2] == "Estate"
+    assert rows[1][3] == "Not Assessed"  # aml_scope, never set -> default, display-labeled
+    assert rows[1][4] == "Action Required"
+    assert rows[1][5] == "Not Assessed"  # risk_rating, display-labeled (was raw "NotAssessed")
+    assert rows[1][6] == "Not assessed"  # PEP column keeps its own existing wording
+    assert rows[1][7] == "Not Assessed"  # bo_status -- legal-person type, is_bo never set
+    assert rows[1][8] == "0"
+    assert "Identity not verified" in rows[1][9]
+    assert "Beneficial ownership not assessed" in rows[1][9]
 
 
 def test_csv_export_pep_column_reflects_true_false_and_unassessed(monkeypatch):
@@ -419,9 +526,54 @@ def test_csv_export_pep_column_reflects_true_false_and_unassessed(monkeypatch):
     response = asyncio.run(client_compliance_status_report_export(_fake_request()))
     rows = {r[1]: r for r in _csv_rows(response)[1:]}
 
-    assert rows["PEP Client"][5] == "Yes"
-    assert rows["Clear Client"][5] == "No"
-    assert rows["Unassessed Client"][5] == "Not assessed"
+    assert rows["PEP Client"][6] == "Yes"
+    assert rows["Clear Client"][6] == "No"
+    assert rows["Unassessed Client"][6] == "Not assessed"
+
+
+# ── PDF export (2026-09-03 design review) ────────────────────────────────
+# Deliberately light coverage -- fpdf2's own output is exercised
+# thoroughly by tests/test_my_portfolio.py already (which this reuses
+# _mp_pdf_table() from); these just confirm the endpoint wires up
+# correctly (permission gate, valid PDF bytes, non-crashing on empty
+# data) rather than re-verifying fpdf2 itself.
+
+def test_pdf_export_associate_gets_403(monkeypatch):
+    import backend.main as m
+    associate = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "associate", "display_name": "Assoc"}
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    _as_current_user(monkeypatch, m, associate)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(client_compliance_status_report_export_pdf(_fake_request()))
+    assert exc_info.value.status_code == 403
+
+
+def test_pdf_export_produces_a_real_pdf_with_data(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Blue Ridge Traders (Pvt) Ltd", client_type="Company", client_number="BN-001")
+    compliance = _compliance(client["id"], aml_scope="InScope", risk_rating="Medium")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance]))
+    _as_current_user(monkeypatch, m, partner)
+
+    response = asyncio.run(client_compliance_status_report_export_pdf(_fake_request()))
+
+    assert response.media_type == "application/pdf"
+    assert "client_compliance_status" in response.headers["content-disposition"]
+    assert response.body.startswith(b"%PDF")
+
+
+def test_pdf_export_handles_no_clients_without_crashing(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    _as_current_user(monkeypatch, m, partner)
+
+    response = asyncio.run(client_compliance_status_report_export_pdf(_fake_request()))
+
+    assert response.media_type == "application/pdf"
+    assert response.body.startswith(b"%PDF")
 
 
 # ── Summary endpoint (2026-09-03 design review) ──────────────────────────
