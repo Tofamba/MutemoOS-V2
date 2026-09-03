@@ -7191,6 +7191,29 @@ async def aml_exceptions_report_export_pdf(request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+# TEMP (2026-09-03) -- real-data verification for the AML Scope column +
+# AML Exceptions report, per instruction to verify against actual data
+# and report the Priority/Responsible-Person judgment calls before
+# production. Read-only, X-Admin-Token gated. Removed once verified.
+@app.get("/api/admin/verify-aml-scope-exceptions")
+async def _verify_aml_scope_exceptions_TEMP(request: Request):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        roster_rows = await _fetch_client_compliance_roster_rows(conn)
+        exception_rows = await _fetch_aml_exceptions_rows(conn)
+    return {
+        "roster_count": len(roster_rows),
+        "roster_sample": roster_rows[:8],
+        "aml_scope_values_seen": sorted({r["aml_scope"] for r in roster_rows}),
+        "bo_status_values_seen": sorted({r["bo_status"] for r in roster_rows}),
+        "exceptions_count": len(exception_rows),
+        "exceptions_sample": exception_rows[:15],
+        "priority_breakdown": {
+            p: sum(1 for r in exception_rows if r["priority"] == p) for p in ("High", "Medium", "Low")
+        },
+        "responsible_person_values_seen": sorted({r["responsible_person"] for r in exception_rows}),
+    }
+
 # ── My Portfolio (self-scoped, every lawyer — NOT a reports:* endpoint) ────
 # Deliberately outside the reports:* permission family above: those are all
 # admin/partner-tier firm-wide views; this is the opposite shape, modeled on
