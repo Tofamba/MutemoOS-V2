@@ -8063,6 +8063,10 @@ function _mrsRenderTable() {
 
   const sortArrow = (k) => _mrsSort.key === k ? (_mrsSort.dir === 1 ? ' ▲' : ' ▼') : '';
 
+  // Row density (2026-09-04, partner request) -- same tightened padding
+  // and new zebra striping as the Register's own _ccsRenderTable() above;
+  // see that function's own comment for why. This table has no numeric
+  // count column, so nothing here needs right-aligning.
   el.innerHTML = `
     <div style="overflow:auto;max-height:65vh;border:1px solid var(--border);border-radius:8px">
     <table style="width:100%;border-collapse:collapse;table-layout:fixed">
@@ -8070,29 +8074,30 @@ function _mrsRenderTable() {
       <thead>
         <tr style="text-align:left">
           ${MRS_COLUMNS.map(c => `
-            <th style="padding:6px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
+            <th style="padding:3px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
                        background:var(--paper2);border-bottom:1px solid var(--gold2);user-select:none;z-index:1"
                 onclick="_mrsSetSort('${c.key}')" title="Click to sort">${c.label}${sortArrow(c.key)}</th>
           `).join('')}
         </tr>
       </thead>
       <tbody>
-        ${rows.map(r => {
+        ${rows.map((r, i) => {
           const expanded = _mrsExpanded.has(r.matter_id);
           const needsExpand = (r.last_activity_text || '').length > MRS_ACTIVITY_TRUNCATE_LEN;
           const activityText = expanded ? (r.last_activity_text || '') : _mrsTruncate(r.last_activity_text);
           const activityDate = r.last_activity_date ? ` (${r.last_activity_date.slice(0, 10)})` : '';
           const statusChip = MRS_STATUS_CHIP[r.status] || 'chip-gray';
+          const rowBg = i % 2 === 1 ? 'var(--paper)' : 'var(--white)';
           return `
-            <tr style="border-bottom:1px solid var(--border);${needsExpand ? 'cursor:pointer' : ''}"
+            <tr style="border-bottom:1px solid var(--border);background:${rowBg};${needsExpand ? 'cursor:pointer' : ''}"
                 ${needsExpand ? `onclick="_mrsToggleExpand('${r.matter_id}')" title="${expanded ? 'Click to collapse' : 'Click to see full activity'}"` : ''}>
-              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
-              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name || '')}">${escHtml(r.client_name || '')}</td>
-              <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.status || '')}</span></td>
-              <td style="padding:6px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
-              <td style="padding:6px 8px;white-space:nowrap">${r.last_reviewed_date || '<span style="color:var(--ink3)">Never reviewed</span>'}</td>
-              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
-              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.created_by_name || '')}</td>
+              <td style="padding:3px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_name)}${r.matter_number ? ` <span style="color:var(--ink3);font-size:0.75rem">(${escHtml(r.matter_number)})</span>` : ''}</td>
+              <td style="padding:3px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name || '')}">${escHtml(r.client_name || '')}</td>
+              <td style="padding:3px 8px"><span class="chip ${statusChip}">${escHtml(r.status || '')}</span></td>
+              <td style="padding:3px 8px;white-space:nowrap">${r.next_review_date || '<span style="color:var(--ink3)">None set</span>'}</td>
+              <td style="padding:3px 8px;white-space:nowrap">${r.last_reviewed_date || '<span style="color:var(--ink3)">Never reviewed</span>'}</td>
+              <td style="padding:3px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(activityText)}${escHtml(activityDate)}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
+              <td style="padding:3px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.created_by_name || '')}</td>
             </tr>
           `;
         }).join('')}
@@ -8264,6 +8269,18 @@ function _ccsRenderTable() {
 
   const sortArrow = (k) => _ccsSort.key === k ? (_ccsSort.dir === 1 ? ' ▲' : ' ▼') : '';
 
+  // Row density (2026-09-04, partner request): this report and Matter
+  // Review Status are the two a partner actually scans 20-176 rows of at
+  // once, so their padding is tightened from the shared 6px/8px table
+  // convention every other report table in this file still uses -- a
+  // targeted change to these two tables specifically, not a shared class,
+  // so nothing else in the app is affected by touching this one function.
+  // Zebra striping is new alongside it (there wasn't any before, on any
+  // table in this file) -- added because tighter rows need it more, not
+  // less, to stay scannable; var(--paper) against the card's white
+  // background is deliberately subtle, not var(--paper2) (already used
+  // for the sticky header -- reusing it here would make every other row
+  // look like a second header).
   el.innerHTML = `
     <div style="overflow:auto;max-height:65vh;border:1px solid var(--border);border-radius:8px">
     <table style="width:100%;border-collapse:collapse;table-layout:fixed">
@@ -8271,14 +8288,15 @@ function _ccsRenderTable() {
       <thead>
         <tr style="text-align:left">
           ${CCS_COLUMNS.map(c => `
-            <th style="padding:6px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
-                       background:var(--paper2);border-bottom:1px solid var(--gold2);user-select:none;z-index:1"
+            <th style="padding:3px 8px;white-space:nowrap;cursor:pointer;position:sticky;top:0;
+                       background:var(--paper2);border-bottom:1px solid var(--gold2);user-select:none;z-index:1;
+                       ${c.key === 'matter_count' ? 'text-align:right' : ''}"
                 onclick="_ccsSetSort('${c.key}')" title="Click to sort">${c.label}${sortArrow(c.key)}</th>
           `).join('')}
         </tr>
       </thead>
       <tbody>
-        ${rows.map(r => {
+        ${rows.map((r, i) => {
           const expanded = _ccsExpanded.has(r.client_id);
           const outstandingFull = (r.missing || []).join('; ');
           const needsExpand = outstandingFull.length > CCS_OUTSTANDING_TRUNCATE_LEN;
@@ -8291,24 +8309,25 @@ function _ccsRenderTable() {
           const boStatusChip = CCS_BO_STATUS_CHIP[r.bo_status] || 'chip-gray';
           const pepText = r.is_pep === true ? '<span style="color:var(--red);font-weight:600">Yes</span>'
             : r.is_pep === false ? 'No' : '<span style="color:var(--ink3)">—</span>';
+          const rowBg = i % 2 === 1 ? 'var(--paper)' : 'var(--white)';
           return `
-            <tr style="border-bottom:1px solid var(--border);${needsExpand ? 'cursor:pointer' : ''}"
+            <tr style="border-bottom:1px solid var(--border);background:${rowBg};${needsExpand ? 'cursor:pointer' : ''}"
                 ${needsExpand ? `onclick="_ccsToggleExpand('${r.client_id}')" title="${expanded ? 'Click to collapse' : 'Click to see full outstanding list'}"` : ''}>
-              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_number || '')}</td>
-              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              <td style="padding:3px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_number || '')}</td>
+              <td style="padding:3px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                 <a href="#" onclick="event.stopPropagation();event.preventDefault();openClientCddReportModal('${r.client_id}')"
                    title="View Individual Client AML/CDD Report for ${escHtml(r.client_name)}"
                    style="color:var(--blue);text-decoration:none">${escHtml(r.client_name)}</a>
               </td>
-              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_type || '')}</td>
-              <td style="padding:6px 8px"><span class="chip ${amlScopeChip}">${escHtml(_ccsLabel(r.aml_scope))}</span></td>
-              <td style="padding:6px 8px"><span class="chip ${statusChip}">${escHtml(r.compliance_status)}</span></td>
-              <td style="padding:6px 8px"><span class="chip ${riskChip}">${escHtml(_ccsLabel(r.risk_rating))}</span></td>
-              <td style="padding:6px 8px">${pepText}</td>
-              <td style="padding:6px 8px"><span class="chip ${boStatusChip}">${escHtml(_ccsLabel(r.bo_status))}</span></td>
-              <td style="padding:6px 8px;text-align:center">${r.matter_count ?? 0}</td>
-              <td style="padding:6px 8px;white-space:nowrap">${r.last_cdd_review_date || '<span style="color:var(--ink3)">Never</span>'}</td>
-              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.missing.length ? escHtml(outstandingText) : outstandingText}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
+              <td style="padding:3px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_type || '')}</td>
+              <td style="padding:3px 8px"><span class="chip ${amlScopeChip}">${escHtml(_ccsLabel(r.aml_scope))}</span></td>
+              <td style="padding:3px 8px"><span class="chip ${statusChip}">${escHtml(r.compliance_status)}</span></td>
+              <td style="padding:3px 8px"><span class="chip ${riskChip}">${escHtml(_ccsLabel(r.risk_rating))}</span></td>
+              <td style="padding:3px 8px">${pepText}</td>
+              <td style="padding:3px 8px"><span class="chip ${boStatusChip}">${escHtml(_ccsLabel(r.bo_status))}</span></td>
+              <td style="padding:3px 8px;text-align:right">${r.matter_count ?? 0}</td>
+              <td style="padding:3px 8px;white-space:nowrap">${r.last_cdd_review_date || '<span style="color:var(--ink3)">Never</span>'}</td>
+              <td style="padding:3px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.missing.length ? escHtml(outstandingText) : outstandingText}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
             </tr>
           `;
         }).join('')}
