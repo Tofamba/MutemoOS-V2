@@ -53,7 +53,7 @@ from backend.main import (
 
 class FakeConnection:
     def __init__(self, clients, compliance=None, owners=None, reps=None, matters=None, documents=None, users=None,
-                 audit_logs=None):
+                 audit_logs=None, cdd_reviews=None):
         self.clients = clients
         self.compliance = compliance if compliance is not None else {}  # client_id -> dict
         self.owners = owners if owners is not None else []
@@ -62,6 +62,7 @@ class FakeConnection:
         self.documents = documents if documents is not None else []
         self.users = users if users is not None else []
         self.audit_logs = audit_logs if audit_logs is not None else []
+        self.cdd_reviews = cdd_reviews if cdd_reviews is not None else []
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -117,7 +118,24 @@ class FakeConnection:
             ]
             return sorted((dict(r) for r in rows), key=lambda r: r["created_at"])
 
+        if q.startswith("SELECT cr.review_date, cr.status, cr.risk_rating, cr.changes_identified"):
+            firm_id, cid = args
+            users_by_id = {u["id"]: u["display_name"] for u in self.users}
+            rows = [
+                {**r, "reviewer_name": users_by_id.get(r.get("reviewed_by"))}
+                for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid
+            ]
+            return sorted(rows, key=lambda r: r["review_date"])
+
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
+
+    async def fetchval(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("SELECT MAX(review_date) FROM cdd_reviews WHERE firm_id=$1 AND client_id=$2"):
+            firm_id, cid = args
+            dates = [r["review_date"] for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid]
+            return max(dates) if dates else None
+        raise NotImplementedError(f"FakeConnection.fetchval: unhandled query: {q}")
 
 
 class _FakeAcquireCtx:
@@ -721,6 +739,86 @@ def test_compliance_history_sorted_chronologically(monkeypatch):
 
     events = result["compliance_history"]["events"]
     assert [e["event"] for e in events] == ["PEP flagged", "Conflict check completed"]
+
+
+# ── CDD Review events merged into the same timeline (2026-09-04) ──────────
+# Per the user's own instruction: CDD Review events join this ONE
+# timeline, not a separate section -- see _row_to_cdd_review_event() and
+# _fetch_compliance_history()'s own merge.
+
+def _cdd_review_row(client_id, **overrides):
+    row = {
+        "client_id": client_id, "firm_id": FIRM_ID, "review_date": date(2026, 9, 4),
+        "status": "Complete", "risk_rating": "Medium", "changes_identified": None,
+        "reviewed_by": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_cdd_review_event_appears_in_compliance_history(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    reviewer_id = uuid.uuid4()
+    reviewer = _user("P. Chademana", user_id=reviewer_id)
+    review = _cdd_review_row(client_id, reviewed_by=reviewer_id, risk_rating="High",
+                              changes_identified="Client relocated")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], users=[reviewer], cdd_reviews=[review]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    events = result["compliance_history"]["events"]
+    assert len(events) == 1
+    assert events[0]["event"] == "CDD Review"
+    assert events[0]["date"] == "2026-09-04"
+    assert events[0]["user"] == "P. Chademana"
+    assert "High" in events[0]["result"]
+    assert "Client relocated" in events[0]["result"]
+
+
+def test_cdd_review_events_interleave_chronologically_with_audit_log_events(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    review = _cdd_review_row(client_id, review_date=date(2026, 9, 2))
+    log = _audit_log("CLIENT", client_id, "PEP_FLAGGED", created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[log], cdd_reviews=[review]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    events = result["compliance_history"]["events"]
+    assert [e["event"] for e in events] == ["PEP flagged", "CDD Review"]
+
+
+# ── Last CDD Review (2026-09-04) ────────────────────────────────────────────
+
+def test_overall_last_cdd_review_date_none_when_never_reviewed(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    assert result["overall"]["last_cdd_review_date"] is None
+
+
+def test_overall_last_cdd_review_date_reflects_most_recent_review(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    older = _cdd_review_row(client_id, review_date=date(2026, 1, 1))
+    newer = _cdd_review_row(client_id, review_date=date(2026, 9, 4))
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], cdd_reviews=[older, newer]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    assert result["overall"]["last_cdd_review_date"] == "2026-09-04"
 
 
 # ── CSV / PDF export (2026-09-04) ──────────────────────────────────────────

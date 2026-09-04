@@ -665,6 +665,48 @@ async def run_migrations():
         ALTER TABLE client_compliance ADD CONSTRAINT client_compliance_aml_scope_check
             CHECK (aml_scope IN ('NotAssessed', 'InScope', 'OutOfScope'));
 
+        -- CDD Review (2026-09-04) -- a loggable EVENT, not a field: each row
+        -- is one lawyer actually sitting down and re-checking a client's
+        -- file, distinct from client_compliance's own current-state fields
+        -- above and from matters.last_reviewed_date (that's the 30-day
+        -- operational "someone touched this file" safety net -- this is
+        -- "someone actually did a real compliance review"). Manual only in
+        -- this phase: a lawyer opens the compliance modal, clicks "Record
+        -- CDD Review", and fills this in themselves -- nothing here is
+        -- inferred or auto-triggered.
+        --
+        -- risk_rating is captured AT THE TIME OF REVIEW (a snapshot, not a
+        -- reference to client_compliance.risk_rating) -- deliberately so a
+        -- later rating change doesn't rewrite what a past review actually
+        -- found, matching how compliance_history's own AML_SCOPE_SET/
+        -- RISK_RATING_CHANGED entries already capture old/new as a
+        -- point-in-time fact rather than a live pointer.
+        --
+        -- status: 'Complete' is the default -- a review with nothing to
+        -- flag closes itself out immediately, no separate confirmation
+        -- step. 'Outstanding' only applies when changes_identified is set
+        -- AND further_action hasn't been resolved yet -- see
+        -- _cdd_review_status() below for the one place this rule lives.
+        CREATE TABLE IF NOT EXISTS cdd_reviews (
+            id                              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            client_id                       UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            firm_id                         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            reviewed_by                     UUID REFERENCES users(id),
+            review_date                     DATE NOT NULL,
+            info_current                    BOOLEAN NOT NULL,
+            bo_current                      BOOLEAN NOT NULL,
+            matter_activity_consistent      BOOLEAN NOT NULL,
+            risk_rating                     TEXT NOT NULL DEFAULT 'NotAssessed'
+                CHECK (risk_rating IN ('Low', 'Medium', 'High', 'NotAssessed')),
+            changes_identified              TEXT,
+            further_action                  TEXT,
+            further_action_resolved         BOOLEAN NOT NULL DEFAULT FALSE,
+            status                          TEXT NOT NULL DEFAULT 'Complete'
+                CHECK (status IN ('Complete', 'Outstanding')),
+            created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_cdd_reviews_client ON cdd_reviews(client_id, review_date DESC);
+
         CREATE TABLE IF NOT EXISTS legal_updates (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
@@ -4297,6 +4339,15 @@ async def _fetch_compliance_history(conn, cid, matter_ids: list) -> list:
     matters' events into one chronological timeline, matching the sample
     report's own mixed client+matter event list (e.g. "Matter risk
     reviewed" alongside "BO verification completed").
+
+    2026-09-04: also merges in cdd_reviews rows (via
+    _row_to_cdd_review_event(), same {"date","event","user","result"}
+    shape as the audit_logs-derived events above) -- per the user's own
+    instruction, CDD Review events join this ONE timeline rather than
+    getting a second section of their own. cdd_reviews isn't in
+    audit_logs at all (it's its own real record, not a generic audit
+    entry -- see that table's migration comment), so this is a second
+    fetch merged in-process, not a UNION query.
     """
     rows = await conn.fetch(
         "SELECT created_at, action, actor_name, details FROM audit_logs "
@@ -4305,7 +4356,32 @@ async def _fetch_compliance_history(conn, cid, matter_ids: list) -> list:
         "ORDER BY created_at ASC",
         FIRM_ID, cid, matter_ids
     )
-    return [_row_to_compliance_event(r) for r in rows]
+    events = [_row_to_compliance_event(r) for r in rows]
+
+    review_rows = await conn.fetch(
+        "SELECT cr.review_date, cr.status, cr.risk_rating, cr.changes_identified, "
+        "u.display_name AS reviewer_name "
+        "FROM cdd_reviews cr LEFT JOIN users u ON u.id = cr.reviewed_by "
+        "WHERE cr.firm_id=$1 AND cr.client_id=$2 ORDER BY cr.review_date ASC",
+        FIRM_ID, cid
+    )
+    events.extend(_row_to_cdd_review_event(r) for r in review_rows)
+
+    events.sort(key=lambda e: e["date"] or "")
+    return events
+
+async def _fetch_last_cdd_review_date(conn, cid) -> Optional[str]:
+    """
+    "Last CDD Review" -- deliberately NOT matters.last_reviewed_date
+    (that's the 30-day operational "someone touched this file" safety
+    net, unrelated to an actual compliance re-check) -- the most recent
+    real cdd_reviews row for this client, or None if no review has ever
+    been recorded.
+    """
+    d = await conn.fetchval(
+        "SELECT MAX(review_date) FROM cdd_reviews WHERE firm_id=$1 AND client_id=$2", FIRM_ID, cid
+    )
+    return str(d) if d else None
 
 def _priority_for_missing_item(item: str) -> str:
     item_lower = item.lower()
@@ -5247,9 +5323,10 @@ async def get_client_compliance(client_id: str, request: Request):
         owner_rows = await conn.fetch(
             "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
         )
+        last_cdd_review_date = await _fetch_last_cdd_review_date(conn, cid)
     compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
     status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
-    return {**compliance, **status}
+    return {**compliance, **status, "last_cdd_review_date": last_cdd_review_date}
 
 @app.patch("/api/clients/{client_id}/compliance")
 async def update_client_compliance(client_id: str, update: ClientComplianceUpdate, request: Request):
@@ -5371,9 +5448,109 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         old_risk = old.get("risk_rating") or "NotAssessed"
         if new_risk != old_risk:
             await _log_compliance_event(conn, user, "CLIENT", cid, "RISK_RATING_CHANGED", {"old": old_risk, "new": new_risk})
+        last_cdd_review_date = await _fetch_last_cdd_review_date(conn, cid)
     compliance = _row_to_client_compliance(row)
     status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
-    return {**compliance, **status}
+    return {**compliance, **status, "last_cdd_review_date": last_cdd_review_date}
+
+# ── CDD Review (2026-09-04) ──────────────────────────────────────────────────
+# "CDD Review" is an EVENT a lawyer performs, not a field that gets
+# overwritten -- see cdd_reviews' own migration comment (run_migrations()).
+# Deliberately not the same thing as matters.last_reviewed_date (that's the
+# 30-day "someone touched this file" operational safety net) or
+# client_compliance.risk_rating (the client's current, live rating) -- this
+# is a real, dated, retained record of an actual compliance re-check, with
+# its own point-in-time risk_rating snapshot alongside it.
+
+def _cdd_review_status(changes_identified: Optional[str], further_action: Optional[str]) -> str:
+    """
+    Outstanding only when a real problem was found (changes_identified is
+    set) AND nothing has been recorded yet about what's being done about
+    it (further_action still blank). A review that both finds something
+    AND already records the action taken closes itself out as Complete
+    immediately -- there's no separate "resolve" step in this phase,
+    since cdd_reviews rows are never edited after creation (an audit
+    record, not a mutable field): a later review recording the issue as
+    handled is what shows up as Complete, not an edit to this one.
+    """
+    return "Outstanding" if (changes_identified and not further_action) else "Complete"
+
+def _row_to_cdd_review(row) -> dict:
+    d = dict(row)
+    for k in ("id", "client_id", "firm_id", "reviewed_by"):
+        if d.get(k):
+            d[k] = str(d[k])
+    if d.get("review_date"):
+        d["review_date"] = str(d["review_date"])
+    if d.get("created_at"):
+        d["created_at"] = d["created_at"].isoformat()
+    return d
+
+def _row_to_cdd_review_event(row) -> dict:
+    """Same {"date","event","user","result"} shape _row_to_compliance_event()
+    produces from audit_logs, so _fetch_compliance_history() can merge both
+    into one chronological timeline -- one history, not two."""
+    d = dict(row)
+    result = f"{d['status']} — risk {_display_label(d['risk_rating'] or 'NotAssessed')}"
+    if d.get("changes_identified"):
+        result += f"; {d['changes_identified']}"
+    return {
+        "date": str(d["review_date"]) if d.get("review_date") else None,
+        "event": "CDD Review",
+        "user": d.get("reviewer_name") or "Unknown",
+        "result": result,
+    }
+
+class CDDReviewCreate(BaseModel):
+    review_date: Optional[str] = None  # defaults to today when omitted
+    info_current: bool
+    bo_current: bool
+    matter_activity_consistent: bool
+    risk_rating: str
+    changes_identified: Optional[str] = None
+    further_action: Optional[str] = None
+
+@app.post("/api/clients/{client_id}/cdd-review")
+async def create_cdd_review(client_id: str, review: CDDReviewCreate, request: Request):
+    """
+    Records one CDD review event. Manual only in this phase -- a lawyer
+    opens the client's compliance modal, clicks "Record CDD Review", and
+    fills this form in themselves; nothing here is inferred or
+    auto-triggered. `status` is server-computed (see _cdd_review_status()),
+    never client-supplied, same convention as every other computed status
+    in this codebase (compliance_status, matter_health, ...).
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+
+    if review.risk_rating not in RISK_RATINGS:
+        raise HTTPException(status_code=422, detail=f"risk_rating must be one of: {', '.join(RISK_RATINGS)}")
+    if review.review_date:
+        try:
+            review_date = date.fromisoformat(review.review_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="review_date must be in YYYY-MM-DD format")
+    else:
+        review_date = date.today()
+
+    changes_identified = (review.changes_identified or "").strip() or None
+    further_action = (review.further_action or "").strip() or None
+    status = _cdd_review_status(changes_identified, further_action)
+
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        row = await conn.fetchrow(
+            """INSERT INTO cdd_reviews
+                   (client_id, firm_id, reviewed_by, review_date, info_current, bo_current,
+                    matter_activity_consistent, risk_rating, changes_identified, further_action, status)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+               RETURNING *""",
+            cid, FIRM_ID, _uuid_mod.UUID(str(user["id"])) if user.get("id") else None, review_date,
+            review.info_current, review.bo_current, review.matter_activity_consistent,
+            review.risk_rating, changes_identified, further_action, status,
+        )
+    return _row_to_cdd_review(row)
 
 def _compute_person_acting_status(reps: list) -> str:
     """
@@ -5501,6 +5678,7 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
 
     status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
     bo_status = _compute_bo_status(client_row, compliance, [dict(r) for r in owner_rows])
+    last_cdd_review_date = await _fetch_last_cdd_review_date(conn, cid)
 
     return {
         "client": _row_to_client(client_row),
@@ -5514,6 +5692,11 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
             "bo_status": bo_status,
             "person_acting_status": _compute_person_acting_status(reps),
             "conflict_check_status": "Completed" if compliance.get("conflict_check_reviewed") else "Not Reviewed",
+            # 2026-09-04: the most recent REAL cdd_reviews row, not
+            # matters.last_reviewed_date (that's the unrelated 30-day
+            # operational safety net) -- None when no review has ever
+            # been recorded for this client.
+            "last_cdd_review_date": last_cdd_review_date,
         },
         "beneficial_owners": owners,
         "authorized_representatives": reps,
@@ -5599,6 +5782,7 @@ def _client_cdd_report_sections(report: dict) -> list:
         ["Beneficial Ownership", _display_label(overall["bo_status"])],
         ["Person Acting for Client", overall["person_acting_status"]],
         ["Conflict Check", overall["conflict_check_status"]],
+        ["Last CDD Review", overall.get("last_cdd_review_date") or "Never recorded"],
         ["Outstanding Actions", str(overall["outstanding_count"])],
     ]
     if overall["missing"]:
@@ -7494,6 +7678,7 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
     client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
     client_ids = [c["id"] for c in client_rows]
     matter_counts = {}
+    last_cdd_review_by_client = {}
     if client_ids:
         matter_rows = await conn.fetch(
             "SELECT client_id, COUNT(*) AS matter_count FROM matters "
@@ -7502,6 +7687,16 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
             FIRM_ID, client_ids
         )
         matter_counts = {r["client_id"]: r["matter_count"] for r in matter_rows}
+        # Batched, same convention as matter_counts above -- one query for
+        # every client's most recent review, not N+1 (reuses cdd_reviews,
+        # the same table/shape Phase 1's _fetch_last_cdd_review_date()
+        # already reads per-client; this is the firm-wide equivalent).
+        review_rows = await conn.fetch(
+            "SELECT client_id, MAX(review_date) AS last_review_date FROM cdd_reviews "
+            "WHERE firm_id=$1 AND client_id = ANY($2) GROUP BY client_id",
+            FIRM_ID, client_ids
+        )
+        last_cdd_review_by_client = {r["client_id"]: r["last_review_date"] for r in review_rows}
 
     result = []
     for c in client_rows:
@@ -7509,6 +7704,7 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
         owners = owners_by_client.get(c["id"], [])
         client_dict = dict(c)
         status = _compute_compliance_status(client_dict, compliance, owners)
+        last_review = last_cdd_review_by_client.get(c["id"])
         result.append({
             "client_id": str(c["id"]),
             "client_number": c["client_number"],
@@ -7521,6 +7717,7 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
             "risk_rating": compliance.get("risk_rating") or "NotAssessed",
             "bo_status": _compute_bo_status(client_dict, compliance, owners),
             "matter_count": matter_counts.get(c["id"], 0),
+            "last_cdd_review_date": str(last_review) if last_review else None,
         })
     return result
 
@@ -7569,14 +7766,15 @@ async def client_compliance_status_summary(request: Request):
 # Shared by the CSV and PDF exports and the frontend table so there's one
 # place this order/wording lives, not three that could drift apart.
 _CCS_EXPORT_HEADERS = ["Client No.", "Client", "Type", "AML Scope", "CDD Status",
-                       "Risk", "PEP", "BO Status", "Matters", "Outstanding"]
+                       "Risk", "PEP", "BO Status", "Matters", "Last CDD Review", "Outstanding"]
 
 def _ccs_export_row(r: dict) -> list:
     return [
         r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
         _display_label(r["aml_scope"]), r["compliance_status"], _display_label(r["risk_rating"]),
         "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
-        _display_label(r["bo_status"]), r["matter_count"], "; ".join(r["missing"]),
+        _display_label(r["bo_status"]), r["matter_count"], r.get("last_cdd_review_date") or "Never",
+        "; ".join(r["missing"]),
     ]
 
 @app.get("/api/reports/client-compliance-status-export")
@@ -7629,8 +7827,11 @@ async def client_compliance_status_report_export_pdf(request: Request):
         usable_width = pdf.w - pdf.l_margin - pdf.r_margin
         # Percentages of usable_width, summing to 100 -- Outstanding gets
         # the largest share since it's the one free-text, variable-length
+        # column. Last CDD Review (2026-09-04) is a fixed-width date-or-
+        # "Never" column, same 8% as AML Scope -- Outstanding's own share
+        # trimmed from 31 to 23 to make room without shrinking any other
         # column.
-        col_pcts = (7, 15, 7, 8, 9, 6, 5, 7, 5, 31)
+        col_pcts = (7, 15, 7, 8, 9, 6, 5, 7, 5, 8, 23)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_ccs_export_row(r) for r in rows]
         _mp_pdf_table(pdf, _CCS_EXPORT_HEADERS, col_widths, table_rows)
@@ -7650,14 +7851,31 @@ async def client_compliance_status_report_export_pdf(request: Request):
 # separately-scoped feature. Flat, one row per outstanding ITEM (not per
 # client) -- reuses _compute_compliance_status()'s missing[] list
 # completely unchanged (the exact same list the Register's own Outstanding
-# column shows), so this report can never detect a different set of
-# exceptions than the Register does.
+# column shows) for the identity/BO/PEP/conflict-check items, so this
+# report can never detect a different set of THOSE exceptions than the
+# Register does.
+#
+# CDD Review Outstanding (2026-09-04) is a second, independent exception
+# source -- NOT derived from missing[] (a client can be fully "Cleared" by
+# _compute_compliance_status() and still have an unresolved CDD Review
+# finding; the two are unrelated dimensions) -- surfaced whenever a
+# client's MOST RECENT cdd_reviews row has status='Outstanding'. Priority
+# tier confirmed with the user (2026-09-04): Medium, same as every
+# non-PEP/BO item -- a review already happened and a lawyer is aware of
+# the issue, so this is a follow-up action item, not a foundational
+# "we don't know who this client is" gap. Reuses _priority_for_missing_item()
+# unchanged (called with the fixed base label, not the free-text
+# changes_identified suffix, so a lawyer's own wording can never
+# accidentally bump this to High by happening to contain "PEP" or
+# "beneficial ownership") rather than inventing a second priority rule.
 #
 # Matter is always blank: matter-level AML tracking doesn't exist yet
 # (flagged in project memory, pending a decision on matter-type-to-Act-
 # activity mapping) -- every outstanding item today is client-level.
 # Status is always "Open": there's no resolution-tracking workflow yet
 # (a separate, larger future build, not this pass).
+
+_CDD_REVIEW_OUTSTANDING_LABEL = "CDD Review Outstanding"
 
 async def _fetch_aml_exceptions_rows(conn) -> list:
     """
@@ -7671,6 +7889,7 @@ async def _fetch_aml_exceptions_rows(conn) -> list:
     otherwise.
     """
     client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
+    client_ids = [c["id"] for c in client_rows]
 
     creator_ids = [c["created_by"] for c in client_rows if c.get("created_by")]
     names_by_user_id = {}
@@ -7681,14 +7900,30 @@ async def _fetch_aml_exceptions_rows(conn) -> list:
         )
         names_by_user_id = {u["id"]: u["display_name"] for u in user_rows}
 
+    # Reuses the exact same cdd_reviews query/join shape Phase 1 already
+    # established (_fetch_compliance_history()) -- one batched fetch, not
+    # a second way of reading review data. "First per client_id wins ==
+    # most recent" on a DESC-ordered fetch is the same idiom
+    # _fetch_matter_review_status_rows() already uses for its own
+    # most-recent-note/document lookups.
+    latest_review_by_client = {}
+    if client_ids:
+        review_rows = await conn.fetch(
+            "SELECT client_id, review_date, status, changes_identified FROM cdd_reviews "
+            "WHERE firm_id=$1 AND client_id = ANY($2) "
+            "ORDER BY client_id, review_date DESC, created_at DESC",
+            FIRM_ID, client_ids
+        )
+        for r in review_rows:
+            latest_review_by_client.setdefault(r["client_id"], r)
+
     rows = []
     for c in client_rows:
         compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
         owners = owners_by_client.get(c["id"], [])
         status = _compute_compliance_status(dict(c), compliance, owners)
-        if not status["missing"]:
-            continue
         responsible = names_by_user_id.get(c.get("created_by")) or "Compliance Officer"
+
         for item in status["missing"]:
             rows.append({
                 "priority": _priority_for_missing_item(item),
@@ -7697,6 +7932,22 @@ async def _fetch_aml_exceptions_rows(conn) -> list:
                 "client_number": c["client_number"],
                 "matter": "",  # client-level only -- see section header comment
                 "issue": item,
+                "responsible_person": responsible,
+                "status": "Open",
+            })
+
+        latest_review = latest_review_by_client.get(c["id"])
+        if latest_review and latest_review["status"] == "Outstanding":
+            issue = _CDD_REVIEW_OUTSTANDING_LABEL
+            if latest_review.get("changes_identified"):
+                issue += f": {latest_review['changes_identified']}"
+            rows.append({
+                "priority": _priority_for_missing_item(_CDD_REVIEW_OUTSTANDING_LABEL),
+                "client_id": str(c["id"]),
+                "client_name": c["full_name"],
+                "client_number": c["client_number"],
+                "matter": "",
+                "issue": issue,
                 "responsible_person": responsible,
                 "status": "Open",
             })

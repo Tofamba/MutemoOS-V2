@@ -1854,6 +1854,38 @@ select{cursor:pointer}
       <span id="cc-conflict-reviewed-note" style="font-size:0.75rem;color:var(--ink3)"></span>
     </div>
 
+    <div class="form-section-label">CDD REVIEW <span style="font-weight:400;text-transform:none;color:var(--ink3)">(manual — a real, dated re-check, not the 30-day activity nudge)</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem;flex-wrap:wrap;gap:6px">
+      <span style="font-size:0.8rem" id="cc-last-cdd-review">Last CDD Review: —</span>
+      <button class="btn btn-outline btn-sm" style="width:auto" onclick="toggleCddReviewForm()" id="cc-cdd-review-toggle-btn">+ Record CDD Review</button>
+    </div>
+    <div id="cc-cdd-review-form" style="display:none;background:var(--paper2);border-radius:8px;padding:0.75rem;margin-bottom:1rem">
+      <div class="form-row">
+        <div class="form-group"><label>Review Date</label><input type="date" id="cr-review-date"/></div>
+        <div class="form-group">
+          <label>Risk Rating (at time of review)</label>
+          <select id="cr-risk-rating">
+            <option value="NotAssessed">Not Assessed</option>
+            <option value="Low">Low</option>
+            <option value="Medium">Medium</option>
+            <option value="High">High</option>
+          </select>
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-bottom:0.4rem">
+        <input type="checkbox" id="cr-info-current" checked style="width:auto"/> Client information still current
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-bottom:0.4rem">
+        <input type="checkbox" id="cr-bo-current" checked style="width:auto"/> Beneficial ownership still current
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-bottom:0.6rem">
+        <input type="checkbox" id="cr-matter-activity-consistent" checked style="width:auto"/> Matter activity consistent with known client profile
+      </label>
+      <div class="form-group"><label>Changes Identified <span style="font-weight:400;color:var(--ink3)">(optional — leave blank if none)</span></label><textarea id="cr-changes-identified" rows="2"></textarea></div>
+      <div class="form-group"><label>Further Action <span style="font-weight:400;color:var(--ink3)">(optional)</span></label><textarea id="cr-further-action" rows="2" placeholder="Leave blank if changes were identified but not yet actioned — the review will show Outstanding until a further action is recorded."></textarea></div>
+      <button class="btn btn-outline btn-sm" onclick="submitCddReview()">Save CDD Review</button>
+    </div>
+
     <div class="form-section-label">RETENTION — s24 <span style="font-weight:400;text-transform:none;color:var(--ink3)">(flag only, no automatic deletion)</span></div>
     <div class="form-row">
       <div class="form-group">
@@ -3425,6 +3457,21 @@ async function openComplianceModal(clientId) {
     document.getElementById('cc-retained-until').value = _complianceData.retained_until || '';
     document.getElementById('cc-has-representative').checked = _complianceReps.length > 0;
 
+    // Last CDD Review -- deliberately from cdd_reviews (last_cdd_review_date,
+    // returned by GET .../compliance), NOT last_reviewed_date -- see this
+    // field's own backend docstring (_fetch_last_cdd_review_date).
+    document.getElementById('cc-last-cdd-review').textContent =
+      `Last CDD Review: ${_complianceData.last_cdd_review_date || 'Never recorded'}`;
+    document.getElementById('cc-cdd-review-form').style.display = 'none';
+    document.getElementById('cc-cdd-review-toggle-btn').textContent = '+ Record CDD Review';
+    document.getElementById('cr-review-date').value = new Date().toISOString().slice(0, 10);
+    document.getElementById('cr-risk-rating').value = _complianceData.risk_rating || 'NotAssessed';
+    document.getElementById('cr-info-current').checked = true;
+    document.getElementById('cr-bo-current').checked = true;
+    document.getElementById('cr-matter-activity-consistent').checked = true;
+    document.getElementById('cr-changes-identified').value = '';
+    document.getElementById('cr-further-action').value = '';
+
     onComplianceClientTypeChange();
     onComplianceIsBoChange();
     onComplianceHasRepChange();
@@ -3441,6 +3488,52 @@ async function openComplianceModal(clientId) {
 function closeComplianceModal() {
   document.getElementById('compliance-modal').style.display = 'none';
   _complianceClientId = null;
+}
+
+function toggleCddReviewForm() {
+  const form = document.getElementById('cc-cdd-review-form');
+  const isOpen = form.style.display !== 'none';
+  form.style.display = isOpen ? 'none' : 'block';
+  document.getElementById('cc-cdd-review-toggle-btn').textContent = isOpen ? '+ Record CDD Review' : 'Cancel';
+}
+
+// Records one CDD review event (POST /api/clients/{id}/cdd-review) --
+// separate from submitComplianceForm(): a review is an append-only record,
+// not a field on the same PATCH-and-overwrite form the rest of this modal
+// uses. `status` (Complete/Outstanding) is entirely server-computed --
+// this never sends one.
+async function submitCddReview() {
+  const payload = {
+    review_date: document.getElementById('cr-review-date').value || null,
+    info_current: document.getElementById('cr-info-current').checked,
+    bo_current: document.getElementById('cr-bo-current').checked,
+    matter_activity_consistent: document.getElementById('cr-matter-activity-consistent').checked,
+    risk_rating: document.getElementById('cr-risk-rating').value,
+    changes_identified: document.getElementById('cr-changes-identified').value.trim() || null,
+    further_action: document.getElementById('cr-further-action').value.trim() || null,
+  };
+  const btn = document.querySelector('#cc-cdd-review-form button.btn-outline');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const res = await fetch(`${API}/api/clients/${_complianceClientId}/cdd-review`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.detail || 'Failed to save CDD review');
+    }
+    const review = await res.json();
+    document.getElementById('cc-last-cdd-review').textContent = `Last CDD Review: ${review.review_date}`;
+    toggleCddReviewForm();
+    document.getElementById('compliance-modal-status').className = 'status show success';
+    document.getElementById('compliance-modal-status').textContent =
+      `CDD review recorded (${review.status}).`;
+  } catch(e) {
+    document.getElementById('compliance-modal-status').className = 'status show error';
+    document.getElementById('compliance-modal-status').textContent = e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save CDD Review'; }
+  }
 }
 
 function _trustPartyListToText(list) {
@@ -8135,7 +8228,8 @@ const CCS_COLUMNS = [
   { key: 'is_pep', label: 'PEP', width: '5%' },
   { key: 'bo_status', label: 'BO Status', width: '7%' },
   { key: 'matter_count', label: 'Matters', width: '5%' },
-  { key: 'missing', label: 'Outstanding', width: '31%' },
+  { key: 'last_cdd_review_date', label: 'Last CDD Review', width: '8%' },
+  { key: 'missing', label: 'Outstanding', width: '23%' },
 ];
 
 function _ccsRenderTable() {
@@ -8213,6 +8307,7 @@ function _ccsRenderTable() {
               <td style="padding:6px 8px">${pepText}</td>
               <td style="padding:6px 8px"><span class="chip ${boStatusChip}">${escHtml(_ccsLabel(r.bo_status))}</span></td>
               <td style="padding:6px 8px;text-align:center">${r.matter_count ?? 0}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${r.last_cdd_review_date || '<span style="color:var(--ink3)">Never</span>'}</td>
               <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.missing.length ? escHtml(outstandingText) : outstandingText}${needsExpand ? ` <span style="color:var(--ink3);font-size:0.72rem;white-space:nowrap">${expanded ? '▲ less' : '▼ more'}</span>` : ''}</td>
             </tr>
           `;
@@ -8832,6 +8927,7 @@ function _renderCddReport(r) {
     ['Beneficial Ownership', escHtml(_ccsLabel(overall.bo_status))],
     ['Person Acting for Client', escHtml(overall.person_acting_status)],
     ['Conflict Check', escHtml(overall.conflict_check_status)],
+    ['Last CDD Review', escHtml(overall.last_cdd_review_date || 'Never recorded')],
     ['Outstanding Actions', String(overall.outstanding_count)],
   ]) + (overall.missing.length
     ? `<p style="font-size:0.8rem;color:var(--red);margin-top:0.25rem"><strong>Outstanding:</strong> ${overall.missing.map(escHtml).join('; ')}</p>`

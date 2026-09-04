@@ -37,6 +37,7 @@ import csv
 import io
 import uuid
 from collections import Counter
+from datetime import date
 
 import pytest
 from fastapi import HTTPException
@@ -51,11 +52,12 @@ from backend.main import (
 
 
 class FakeConnection:
-    def __init__(self, clients=None, compliance=None, owners=None, matters=None):
+    def __init__(self, clients=None, compliance=None, owners=None, matters=None, cdd_reviews=None):
         self.clients = clients if clients is not None else []
         self.compliance = compliance if compliance is not None else []
         self.owners = owners if owners is not None else []
         self.matters = matters if matters is not None else []
+        self.cdd_reviews = cdd_reviews if cdd_reviews is not None else []
 
     async def fetch(self, query, *args):
         q = " ".join(query.split())
@@ -81,6 +83,14 @@ class FakeConnection:
                 and not mt.get("is_sentinel", False)
             )
             return [{"client_id": cid, "matter_count": n} for cid, n in counts.items()]
+
+        if q.startswith("SELECT client_id, MAX(review_date) AS last_review_date FROM cdd_reviews"):
+            firm_id, client_ids = args
+            by_client = {}
+            for r in self.cdd_reviews:
+                if r["firm_id"] == firm_id and r["client_id"] in client_ids:
+                    by_client[r["client_id"]] = max(by_client.get(r["client_id"], r["review_date"]), r["review_date"])
+            return [{"client_id": cid, "last_review_date": d} for cid, d in by_client.items()]
 
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
@@ -129,6 +139,10 @@ def _owner(client_id, verification_status):
 
 def _matter(client_id, *, is_sentinel=False):
     return {"client_id": client_id, "firm_id": FIRM_ID, "is_sentinel": is_sentinel}
+
+
+def _cdd_review(client_id, review_date):
+    return {"client_id": client_id, "firm_id": FIRM_ID, "review_date": review_date}
 
 
 def _as_current_user(monkeypatch, m, user_dict):
@@ -480,9 +494,10 @@ def test_csv_export_includes_full_outstanding_list_not_just_a_count(monkeypatch)
     """The whole point of this report is a real remediation sweep -- the
     CSV's Outstanding column must carry every missing item, semicolon-
     joined, not a bare count. Column order/labels (2026-09-03, partner
-    design review) match a sample report as closely as possible: Client
-    No. | Client | Type | AML Scope | CDD Status | Risk | PEP |
-    BO Status | Matters | Outstanding."""
+    design review; Last CDD Review added 2026-09-04) match a sample
+    report as closely as possible: Client No. | Client | Type |
+    AML Scope | CDD Status | Risk | PEP | BO Status | Matters |
+    Last CDD Review | Outstanding."""
     import backend.main as m
     partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
     client = _client("Estate Late Bvumbe", client_type="Estate", client_number="EB-004")
@@ -493,7 +508,7 @@ def test_csv_export_includes_full_outstanding_list_not_just_a_count(monkeypatch)
     rows = _csv_rows(response)
 
     assert rows[0] == ["Client No.", "Client", "Type", "AML Scope", "CDD Status",
-                        "Risk", "PEP", "BO Status", "Matters", "Outstanding"]
+                        "Risk", "PEP", "BO Status", "Matters", "Last CDD Review", "Outstanding"]
     assert rows[1][0] == "EB-004"
     assert rows[1][1] == "Estate Late Bvumbe"
     assert rows[1][2] == "Estate"
@@ -503,8 +518,53 @@ def test_csv_export_includes_full_outstanding_list_not_just_a_count(monkeypatch)
     assert rows[1][6] == "Not assessed"  # PEP column keeps its own existing wording
     assert rows[1][7] == "Not Assessed"  # bo_status -- legal-person type, is_bo never set
     assert rows[1][8] == "0"
-    assert "Identity not verified" in rows[1][9]
-    assert "Beneficial ownership not assessed" in rows[1][9]
+    assert rows[1][9] == "Never"  # last_cdd_review_date -- no cdd_reviews fixture supplied
+    assert "Identity not verified" in rows[1][10]
+    assert "Beneficial ownership not assessed" in rows[1][10]
+
+
+# ── Last CDD Review column (2026-09-04) ────────────────────────────────────
+
+def test_last_cdd_review_date_reflects_most_recent_real_review(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Anchorflow Holdings", client_type="Company")
+    reviews = [_cdd_review(client["id"], date(2026, 1, 1)), _cdd_review(client["id"], date(2026, 9, 4))]
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], cdd_reviews=reviews))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["last_cdd_review_date"] == "2026-09-04"
+
+
+def test_last_cdd_review_date_none_when_never_reviewed(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Never Reviewed Co")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    assert rows[0]["last_cdd_review_date"] is None
+
+
+def test_last_cdd_review_date_does_not_leak_across_clients(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    reviewed = _client("Reviewed Co")
+    unreviewed = _client("Unreviewed Co")
+    monkeypatch.setattr(m, "_db_pool", FakePool(
+        clients=[reviewed, unreviewed], cdd_reviews=[_cdd_review(reviewed["id"], date(2026, 9, 1))],
+    ))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(client_compliance_status_report(_fake_request()))
+
+    by_name = {r["client_name"]: r for r in rows}
+    assert by_name["Reviewed Co"]["last_cdd_review_date"] == "2026-09-01"
+    assert by_name["Unreviewed Co"]["last_cdd_review_date"] is None
 
 
 def test_csv_export_pep_column_reflects_true_false_and_unassessed(monkeypatch):

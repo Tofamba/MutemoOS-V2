@@ -78,6 +78,7 @@ class FakeConnection:
         self.compliance = {}  # client_id -> dict
         self.matters = []
         self.audit_logs = []  # captured INSERT INTO audit_logs calls -- see Part C tests below
+        self.cdd_reviews = []  # client_id -> [review dict, ...] -- see CDD Review tests below
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -181,6 +182,14 @@ class FakeConnection:
             return []
 
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
+
+    async def fetchval(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("SELECT MAX(review_date) FROM cdd_reviews WHERE firm_id=$1 AND client_id=$2"):
+            firm_id, cid = args
+            dates = [r["review_date"] for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid]
+            return max(dates) if dates else None
+        raise NotImplementedError(f"FakeConnection.fetchval: unhandled query: {q}")
 
     async def execute(self, query, *args):
         q = " ".join(query.split())

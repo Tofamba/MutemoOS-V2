@@ -30,6 +30,7 @@ AND firm_id=$2).
 
 import asyncio
 import uuid
+from datetime import date, datetime, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -43,11 +44,12 @@ from backend.main import (
 
 
 class FakeConnection:
-    def __init__(self, clients=None, compliance=None, owners=None, users=None):
+    def __init__(self, clients=None, compliance=None, owners=None, users=None, cdd_reviews=None):
         self.clients = clients if clients is not None else []
         self.compliance = compliance if compliance is not None else []
         self.owners = owners if owners is not None else []
         self.users = users if users is not None else []
+        self.cdd_reviews = cdd_reviews if cdd_reviews is not None else []
 
     async def fetch(self, query, *args):
         q = " ".join(query.split())
@@ -68,6 +70,11 @@ class FakeConnection:
         if q.startswith("SELECT id, display_name FROM users WHERE id = ANY($1) AND firm_id=$2"):
             user_ids, firm_id = args
             return [u for u in self.users if u["id"] in user_ids and u["firm_id"] == firm_id]
+
+        if q.startswith("SELECT client_id, review_date, status, changes_identified FROM cdd_reviews"):
+            firm_id, client_ids = args
+            rows = [r for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] in client_ids]
+            return sorted(rows, key=lambda r: (r["client_id"], r["review_date"], r.get("created_at")), reverse=True)
 
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
@@ -117,6 +124,14 @@ def _owner(client_id, verification_status):
 
 def _user(display_name, user_id=None):
     return {"id": user_id or uuid.uuid4(), "firm_id": FIRM_ID, "display_name": display_name}
+
+
+def _cdd_review(client_id, *, status="Complete", review_date=None, changes_identified=None, created_at=None):
+    return {
+        "client_id": client_id, "firm_id": FIRM_ID, "status": status,
+        "review_date": review_date or date(2026, 9, 4), "changes_identified": changes_identified,
+        "created_at": created_at or datetime.now(timezone.utc),
+    }
 
 
 def _as_current_user(monkeypatch, m, user_dict):
@@ -389,6 +404,161 @@ def test_high_priority_items_sort_before_medium(monkeypatch):
     rows = asyncio.run(aml_exceptions_report(_fake_request()))
 
     assert [r["priority"] for r in rows] == ["High", "Medium"]
+
+
+# ── CDD Review Outstanding (2026-09-04) ────────────────────────────────────
+# An independent exception source -- NOT derived from _compute_compliance_
+# status()'s missing[] list -- surfaced whenever a client's MOST RECENT
+# cdd_reviews row has status='Outstanding'. Priority confirmed with the
+# user: Medium, via the same _priority_for_missing_item() every other
+# item already uses (called with the fixed base label, not the lawyer's
+# own free-text changes_identified suffix).
+
+def test_client_with_outstanding_review_surfaces_the_new_exception(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Anchorflow Holdings", client_type="Company")
+    compliance = _compliance(
+        client["id"], identity_verification_status="Verified",
+        client_is_beneficial_owner="Yes", is_pep=False, conflict_check_reviewed=True,
+    )
+    review = _cdd_review(client["id"], status="Outstanding", changes_identified="Client relocated")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance], cdd_reviews=[review]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert len(rows) == 1
+    assert rows[0]["issue"] == "CDD Review Outstanding: Client relocated"
+    assert rows[0]["priority"] == "Medium"
+    assert rows[0]["client_name"] == "Anchorflow Holdings"
+    assert rows[0]["matter"] == ""
+    assert rows[0]["status"] == "Open"
+
+
+def test_fully_cleared_client_with_a_complete_review_produces_zero_rows(monkeypatch):
+    """A Complete review is not an exception -- confirms the new category
+    only fires on Outstanding, not on every recorded review."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tendai Moyo", client_type="Individual")
+    compliance = _compliance(
+        client["id"], identity_verification_status="Verified",
+        is_pep=False, conflict_check_reviewed=True,
+    )
+    review = _cdd_review(client["id"], status="Complete")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance], cdd_reviews=[review]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert rows == []
+
+
+def test_only_the_most_recent_review_is_considered(monkeypatch):
+    """An older Outstanding review followed by a newer Complete one must
+    NOT still flag -- only the latest review's status counts."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tendai Moyo", client_type="Individual")
+    compliance = _compliance(
+        client["id"], identity_verification_status="Verified",
+        is_pep=False, conflict_check_reviewed=True,
+    )
+    older_outstanding = _cdd_review(client["id"], status="Outstanding", review_date=date(2026, 1, 1))
+    newer_complete = _cdd_review(client["id"], status="Complete", review_date=date(2026, 9, 4))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(clients=[client], compliance=[compliance], cdd_reviews=[older_outstanding, newer_complete]),
+    )
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert rows == []
+
+
+def test_conversely_a_newer_outstanding_review_does_flag_despite_an_older_complete_one(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tendai Moyo", client_type="Individual")
+    compliance = _compliance(
+        client["id"], identity_verification_status="Verified",
+        is_pep=False, conflict_check_reviewed=True,
+    )
+    older_complete = _cdd_review(client["id"], status="Complete", review_date=date(2026, 1, 1))
+    newer_outstanding = _cdd_review(client["id"], status="Outstanding", review_date=date(2026, 9, 4))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(clients=[client], compliance=[compliance], cdd_reviews=[older_complete, newer_outstanding]),
+    )
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert len(rows) == 1
+    assert rows[0]["issue"] == "CDD Review Outstanding"  # no changes_identified text on this fixture row
+
+
+def test_outstanding_review_adds_to_existing_missing_items_not_instead_of(monkeypatch):
+    """A client can have BOTH real missing[] items AND an Outstanding
+    review at once -- the two are independent exception sources."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Munyaradzi Gwenzi", client_type="Individual")
+    compliance = _compliance(client["id"], is_pep=False, conflict_check_reviewed=True)  # identity still missing
+    review = _cdd_review(client["id"], status="Outstanding")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance], cdd_reviews=[review]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    issues = {r["issue"] for r in rows}
+    assert "Identity not verified" in issues
+    assert "CDD Review Outstanding" in issues
+
+
+def test_outstanding_review_priority_is_not_bumped_by_free_text_mentioning_pep(monkeypatch):
+    """A lawyer's own changes_identified wording happening to contain
+    "PEP" must never accidentally bump this category to High -- priority
+    is derived from the fixed base label, not the free-text suffix."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tendai Moyo", client_type="Individual")
+    compliance = _compliance(
+        client["id"], identity_verification_status="Verified",
+        is_pep=False, conflict_check_reviewed=True,
+    )
+    review = _cdd_review(client["id"], status="Outstanding", changes_identified="Client is now a PEP")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance=[compliance], cdd_reviews=[review]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert len(rows) == 1
+    assert rows[0]["priority"] == "Medium"
+
+
+def test_outstanding_review_uses_the_same_responsible_person_logic(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    lawyer_id = uuid.uuid4()
+    client = _client("Tendai Moyo", client_type="Individual", created_by=lawyer_id)
+    lawyer = _user("J. Moyo", user_id=lawyer_id)
+    compliance = _compliance(
+        client["id"], identity_verification_status="Verified",
+        is_pep=False, conflict_check_reviewed=True,
+    )
+    review = _cdd_review(client["id"], status="Outstanding")
+    monkeypatch.setattr(
+        m, "_db_pool", FakePool(clients=[client], compliance=[compliance], users=[lawyer], cdd_reviews=[review]),
+    )
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert len(rows) == 1
+    assert rows[0]["responsible_person"] == "J. Moyo"
 
 
 # ── CSV export ────────────────────────────────────────────────────────────
