@@ -4700,6 +4700,35 @@ async def admin_backfill_chroma_firm_id(request: Request):
 
     return summary
 
+# TEMPORARY — read-only verification for the Matter Health AML-combining
+# change (2026-09-04): looks up one real matter by (partial, case-insensitive)
+# name and returns compute_matter_health()'s real output against its actual
+# row, so the "Verification test matter — refresh check 0828" case (AML:
+# InScope, Risk: Medium) can be confirmed to show Amber, not Green, against
+# real staging data rather than trusting the code read alone. Remove once
+# confirmed.
+@app.get("/api/admin/verify-matter-health-aml")
+async def admin_verify_matter_health_aml(request: Request, name: str):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, name, status, next_deadline, next_review_date, last_activity, "
+            "created_at, aml_scope, matter_risk, aml_scope_reason "
+            "FROM matters WHERE firm_id=$1 AND name ILIKE $2 AND NOT is_sentinel",
+            FIRM_ID, f"%{name}%",
+        )
+        return [
+            {
+                "matter_id": str(r["id"]),
+                "matter_name": r["name"],
+                "aml_scope": r["aml_scope"],
+                "matter_risk": r["matter_risk"],
+                "aml_scope_reason": r["aml_scope_reason"],
+                "matter_health": compute_matter_health(dict(r)),
+            }
+            for r in rows
+        ]
+
 # ── Matters ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/matters")
