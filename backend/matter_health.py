@@ -1,7 +1,7 @@
 """
-matter_health.py — a single, computed status per matter (Green/Amber/Red/
-Grey), derived entirely from data that already exists on the matter row.
-Never manually set by a lawyer.
+matter_health.py — a single, computed status per matter (Red/Amber/Blue/
+Green, plus Grey), derived entirely from data that already exists on the
+matter row. Never manually set by a lawyer.
 
 Foundational piece for the reports roadmap's Firm Pulse and Lawyer Matter
 Review (neither built in this pass — this is scoped to computing the
@@ -33,6 +33,32 @@ calendar_events (event_type='hearing'). compute_matter_health() takes one
 matter dict and stays a pure function; if a firm starts tracking hearing
 dates that never get mirrored onto next_deadline, this will miss them.
 Revisit if that turns out to matter in practice.
+
+TWO DIMENSIONS, ONE COLOR (2026-09-04, confirmed with the user before
+hardcoding): operational health (deadlines/reviews/activity, all of the
+above) and AML/matter risk (matters.matter_risk/aml_scope, added
+2026-09-03) are computed independently by
+_compute_operational_health()/_compute_compliance_floor() and then
+combined by taking the more severe of the two -- compliance is a FLOOR
+on the color, never something operational factors can lower. Severity
+order, confirmed with the user: Red > Amber > Blue > Green (Grey stays
+a separate short-circuit, unrelated to severity -- an inactive-by-design
+matter isn't "at risk", it's just closed). "Blue" is new this pass,
+specifically for "AML Scope is In Scope but Matter Risk was never
+actually rated" -- the same shape of gap as the PEP-without-risk-rating
+bug (backend/main.py's _compute_compliance_status(), 2026-09-02): a real
+data gap, but not itself evidence of elevated risk, so it gets its own
+tier rather than being lumped into Amber alongside a genuinely
+elevated-risk matter. Low/Not Assessed matter_risk (outside that one
+gap case) contributes NO floor at all -- absence of a rating is not
+itself a risk signal, so it must never invent alarm on a matter nobody
+has gotten to yet; color there stays purely operational.
+
+`reasons` always lists every contributing factor from BOTH dimensions,
+not just whichever one happened to decide the final color -- a Medium-
+risk matter that's also 2 days from an overdue deadline shows Red (the
+operational factor is more severe), but its reasons list still names
+the Medium risk too, so "why is this Red" never hides half the answer.
 """
 from datetime import date, datetime
 from typing import Optional
@@ -62,6 +88,13 @@ INACTIVITY_RED_DAYS = 7
 # exists to catch.
 GREY_STATUSES = {"Awaiting Client", "On Hold", "Closed"}
 
+# Severity order for combining the operational and compliance dimensions
+# -- confirmed with the user (2026-09-04): Red > Amber > Blue > Green.
+# Grey is deliberately absent here; it's a status-driven short-circuit
+# handled before either dimension is even computed, not a severity level
+# these two dimensions could ever produce or compete with.
+_SEVERITY = {"green": 0, "blue": 1, "amber": 2, "red": 3}
+
 
 def _parse_date_like(value) -> Optional[date]:
     """Accepts a date, a datetime, an ISO string (either produced by
@@ -83,29 +116,17 @@ def _parse_date_like(value) -> Optional[date]:
     return None
 
 
-def compute_matter_health(matter: dict, today: Optional[date] = None) -> dict:
+def _compute_operational_health(matter: dict, today: date) -> dict:
     """
-    Returns {"status": "green"|"amber"|"red"|"grey", "reasons": [str, ...]}.
-
-    `reasons` is never empty for amber/red (a color alone is not a useful
-    signal to a lawyer); green's reasons list explains what was checked
-    and found clear, matching this module's principle that a status is
-    only ever useful with its "why" attached. grey explains which status
-    field made it inactive-by-design.
-
-    `matter` needs: status, next_deadline, next_deadline_note,
-    next_review_date, last_activity, created_at. Missing/None fields are
-    treated as "no signal from that field", not an error -- every caller
-    (the matter panel, My Portfolio, Matter Review Status) already has a
-    matter dict shaped closely enough to this for the relevant keys to be
-    present when they mean something.
+    Deadlines/reviews/activity only -- exactly the logic this module had
+    before AML/matter risk existed, unchanged. Returns
+    {"status": "red"|"amber"|"green", "reasons": [...]} -- green's
+    reasons are deliberately [] here (not a canned message): the
+    top-level compute_matter_health() composes the final green message
+    itself, since a genuinely green overall result now depends on BOTH
+    this function and _compute_compliance_floor() agreeing, and the
+    message needs to say so.
     """
-    today = today or datetime.utcnow().date()
-
-    status = matter.get("status")
-    if status in GREY_STATUSES:
-        return {"status": "grey", "reasons": [f"Matter is {status} — not being actively tracked"]}
-
     next_deadline = _parse_date_like(matter.get("next_deadline"))
     next_review_date = _parse_date_like(matter.get("next_review_date"))
     last_activity = _parse_date_like(matter.get("last_activity"))
@@ -166,4 +187,67 @@ def compute_matter_health(matter: dict, today: Optional[date] = None) -> dict:
     if amber_reasons:
         return {"status": "amber", "reasons": amber_reasons}
 
-    return {"status": "green", "reasons": ["No deadlines, reviews, or inactivity flagged"]}
+    return {"status": "green", "reasons": []}
+
+
+def _compute_compliance_floor(matter: dict) -> dict:
+    """
+    AML scope / matter risk only (matters.aml_scope/matter_risk, added
+    2026-09-03) -- a FLOOR on the overall color, never something that
+    can lower what operational factors already established. Returns
+    {"status": "red"|"amber"|"blue"|"green", "reasons": [...]} -- green
+    here means "no compliance floor", not "explicitly assessed and
+    clear"; Low/Not Assessed risk (outside the one Blue gap case below)
+    contributes nothing, on purpose, so absence of a rating never reads
+    as an alarm on a matter nobody has gotten to yet.
+    """
+    matter_risk = matter.get("matter_risk") or "NotAssessed"
+    aml_scope = matter.get("aml_scope") or "NotAssessed"
+    reason_suffix = f" — {matter['aml_scope_reason']}" if matter.get("aml_scope_reason") else ""
+
+    if matter_risk == "High":
+        return {"status": "red", "reasons": [f"Matter risk: High{reason_suffix}"]}
+    if matter_risk == "Medium":
+        return {"status": "amber", "reasons": [f"Matter risk: Medium{reason_suffix}"]}
+    if aml_scope == "InScope" and matter_risk == "NotAssessed":
+        # The PEP-without-risk-rating shape, at matter level: in scope
+        # for AML purposes but nobody has actually rated the risk yet --
+        # a real gap worth a lawyer's attention, but not itself evidence
+        # of elevated risk, so Blue rather than Amber.
+        return {"status": "blue", "reasons": ["AML scope: In Scope but Matter Risk not yet assessed"]}
+    return {"status": "green", "reasons": []}
+
+
+def compute_matter_health(matter: dict, today: Optional[date] = None) -> dict:
+    """
+    Returns {"status": "red"|"amber"|"blue"|"green"|"grey", "reasons": [str, ...]}.
+
+    `reasons` is never empty (a color alone is not a useful signal to a
+    lawyer) and always includes every contributing factor from BOTH the
+    operational and compliance dimensions, not just whichever one
+    decided the final color -- see this module's own docstring for why.
+    grey explains which status field made it inactive-by-design.
+
+    `matter` needs: status, next_deadline, next_deadline_note,
+    next_review_date, last_activity, created_at, aml_scope, matter_risk,
+    aml_scope_reason. Missing/None fields are treated as "no signal from
+    that field", not an error -- every caller (the matter panel, My
+    Portfolio, Matter Review Status) already has a matter dict shaped
+    closely enough to this for the relevant keys to be present when they
+    mean something.
+    """
+    today = today or datetime.utcnow().date()
+
+    status = matter.get("status")
+    if status in GREY_STATUSES:
+        return {"status": "grey", "reasons": [f"Matter is {status} — not being actively tracked"]}
+
+    operational = _compute_operational_health(matter, today)
+    compliance = _compute_compliance_floor(matter)
+
+    overall_status = max(operational["status"], compliance["status"], key=_SEVERITY.__getitem__)
+    reasons = operational["reasons"] + compliance["reasons"]
+    if not reasons:
+        reasons = ["No deadlines, reviews, inactivity, or elevated matter risk flagged"]
+
+    return {"status": overall_status, "reasons": reasons}

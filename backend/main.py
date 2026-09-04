@@ -7239,6 +7239,7 @@ async def _fetch_matter_review_status_rows(
         SELECT m.id, m.name, m.number, m.matter_number, m.client_id, m.client_name,
                m.status, m.next_review_date, m.last_reviewed_date, m.last_activity,
                m.next_deadline, m.next_deadline_note,
+               m.aml_scope, m.matter_risk, m.aml_scope_reason,
                m.created_at, m.created_by,
                c.full_name AS client_full_name,
                u.display_name AS created_by_name
@@ -7311,14 +7312,17 @@ async def _fetch_matter_review_status_rows(
         # need just to match this report's existing batched query.
         health = compute_matter_health({
             "status": r["status"],
-            # .get() rather than [] on the two columns this function just
-            # started selecting -- keeps every pre-existing FakeConnection
-            # fixture across this file's tests working unchanged; a real
-            # asyncpg Record always has both present.
+            # .get() rather than [] on the columns this function has added
+            # after its own original SELECT -- keeps every pre-existing
+            # FakeConnection fixture across this file's tests working
+            # unchanged; a real asyncpg Record always has all of them.
             "next_deadline": r.get("next_deadline"),
             "next_review_date": r["next_review_date"],
             "last_activity": last_activity_date,
             "created_at": r["created_at"],
+            "aml_scope": r.get("aml_scope"),
+            "matter_risk": r.get("matter_risk"),
+            "aml_scope_reason": r.get("aml_scope_reason"),
         })
 
         result.append({

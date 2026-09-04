@@ -4112,8 +4112,8 @@ function deadlineChipHtml(m) {
 function matterHealthChipHtml(matter) {
   const health = matter.matter_health;
   if (!health) return '';
-  const COLORS = { red: 'chip-red', amber: 'chip-gold', green: 'chip-green', grey: 'chip-gray' };
-  const LABELS = { red: '🔴 Red', amber: '🟡 Amber', green: '🟢 Green', grey: '⚪ Grey' };
+  const COLORS = { red: 'chip-red', amber: 'chip-gold', blue: 'chip-blue', green: 'chip-green', grey: 'chip-gray' };
+  const LABELS = { red: '🔴 Red', amber: '🟡 Amber', blue: '🔵 Blue', green: '🟢 Green', grey: '⚪ Grey' };
   const color = COLORS[health.status] || 'chip-gray';
   const label = LABELS[health.status] || health.status;
   const title = (health.reasons || []).join('; ') || 'Matter Health';

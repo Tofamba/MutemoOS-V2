@@ -199,3 +199,117 @@ def test_missing_keys_treated_as_no_signal_not_an_error():
     result = compute_matter_health({"status": "Active"}, today=TODAY)
     assert result["status"] == "red"
     assert any("Never entered the review cycle" in r for r in result["reasons"])
+
+
+# ── AML/matter risk as an independent compliance floor (2026-09-04) ────────
+# Severity order confirmed with the user: Red > Amber > Blue > Green.
+# Compliance can only ever push the color UP (more severe), never down --
+# these tests use an operationally-clean matter (_matter()'s own
+# defaults: no deadline, review due in 15 days, activity today) so any
+# non-green result is attributable to the compliance dimension alone.
+
+def test_high_matter_risk_is_red_even_with_perfect_operational_status():
+    m = _matter(aml_scope="InScope", matter_risk="High")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "red"
+    assert any("Matter risk: High" in r for r in result["reasons"])
+
+
+def test_medium_matter_risk_is_amber_with_perfect_operational_status():
+    m = _matter(aml_scope="InScope", matter_risk="Medium")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "amber"
+    assert any("Matter risk: Medium" in r for r in result["reasons"])
+
+
+def test_matter_risk_reason_includes_the_lawyers_own_aml_scope_reason_text():
+    m = _matter(aml_scope="InScope", matter_risk="High", aml_scope_reason="High-value property transaction")
+    result = compute_matter_health(m, today=TODAY)
+    assert any("Matter risk: High — High-value property transaction" in r for r in result["reasons"])
+
+
+def test_in_scope_with_risk_not_assessed_is_blue():
+    """The matter-level PEP-without-risk-rating shape: in scope for AML
+    purposes but nobody has actually rated the risk -- a real gap, but
+    not itself evidence of elevated risk, so Blue rather than Amber."""
+    m = _matter(aml_scope="InScope", matter_risk="NotAssessed")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "blue"
+    assert any("In Scope but Matter Risk not yet assessed" in r for r in result["reasons"])
+
+
+def test_out_of_scope_with_risk_not_assessed_is_purely_operational_green():
+    """Out of scope -- the "in scope but unrated" gap only applies when
+    the matter IS in scope; out-of-scope matters are simply not this
+    report's problem, regardless of matter_risk."""
+    m = _matter(aml_scope="OutOfScope", matter_risk="NotAssessed")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "green"
+
+
+def test_low_matter_risk_never_pushed_up_purely_operational():
+    """Low is a real, explicit assessment (not an absence of one) --
+    still contributes no floor, matching the instruction that only
+    Medium/High actually signal elevated risk."""
+    m = _matter(aml_scope="InScope", matter_risk="Low")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "green"
+
+
+def test_not_assessed_risk_without_being_in_scope_is_purely_operational():
+    """The common default state (no aml_scope/matter_risk ever set) must
+    never itself read as an alarm -- absence of a rating is not a risk
+    signal. Uses an operationally-red matter to prove the color is
+    coming purely from that dimension, unaffected by the missing keys."""
+    m = _matter(next_deadline=(TODAY - timedelta(days=5)).isoformat())
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "red"
+    assert not any("Matter risk" in r or "AML scope" in r for r in result["reasons"])
+
+
+def test_grey_status_overrides_high_matter_risk():
+    """Grey short-circuits before either dimension is even computed --
+    a closed/on-hold/awaiting-client matter isn't "at risk", it's just
+    closed, regardless of how its AML fields are set."""
+    m = _matter(status="Closed", aml_scope="InScope", matter_risk="High")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "grey"
+
+
+def test_reasons_include_both_operational_and_compliance_factors_when_red_comes_from_operational():
+    """The core "why" requirement: when operational factors alone already
+    force Red, a co-occurring Medium/High matter risk must still be
+    named in reasons, not silently dropped just because it didn't need
+    to be the deciding factor."""
+    m = _matter(next_deadline=(TODAY - timedelta(days=2)).isoformat(), aml_scope="InScope", matter_risk="Medium")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "red"
+    assert any("Deadline passed 2 day" in r for r in result["reasons"])
+    assert any("Matter risk: Medium" in r for r in result["reasons"])
+
+
+def test_compliance_floor_never_lowers_an_operationally_red_result():
+    """The floor only ever pushes UP -- an operationally Red matter with
+    Low/unrated risk stays Red, compliance can't pull it down to Amber."""
+    m = _matter(next_deadline=(TODAY - timedelta(days=2)).isoformat(), aml_scope="InScope", matter_risk="Low")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "red"
+
+
+def test_blue_floor_is_overridden_by_a_more_severe_operational_amber():
+    """Blue (severity 1) loses to a genuinely Amber (severity 2)
+    operational signal -- severity order is Red > Amber > Blue > Green,
+    not "compliance always wins over operational Amber"."""
+    m = _matter(next_review_date=(TODAY + timedelta(days=3)).isoformat(), aml_scope="InScope", matter_risk="NotAssessed")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "amber"
+    assert any("Review due in 3 day" in r for r in result["reasons"])
+    assert any("In Scope but Matter Risk not yet assessed" in r for r in result["reasons"])
+
+
+def test_fully_clean_matter_is_green_with_a_reason_mentioning_both_dimensions():
+    m = _matter(aml_scope="OutOfScope", matter_risk="NotAssessed")
+    result = compute_matter_health(m, today=TODAY)
+    assert result["status"] == "green"
+    assert result["reasons"]  # never empty
+    assert "matter risk" in result["reasons"][0].lower()
