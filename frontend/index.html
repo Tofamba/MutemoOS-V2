@@ -4637,6 +4637,22 @@ async function updateMatterField(matterId, field, value) {
   // per-field): capture whether the panel was open before the rebuild,
   // put it right back if so.
   const wasOpen = document.getElementById(`matter-docs-${matterId}`)?.classList.contains('open');
+  // renderMattersList() closes every panel for one frame before wasOpen
+  // puts this one back -- while closed, the whole matters list is only as
+  // tall as its collapsed rows, which for an open panel with any real
+  // content (docs, notes, the full field set) is far shorter than the
+  // page was a moment ago. The browser clamps window scroll to that
+  // shorter document instantly, i.e. the viewport jumps to the new
+  // (much lower) bottom of the page -- then the panel reopens and the
+  // page grows back, but nothing was ever restoring where the user had
+  // actually been looking, so it just stays wherever it got clamped to.
+  // Real bug found 2026-09-04, reproduced on any field (status,
+  // next_review_date, AML scope all tried) -- this collapse/reopen
+  // sequence is the one shared path every field save goes through, so
+  // the fix belongs here, not per-field. window.scrollY (not a
+  // container's scrollTop) is correct: the matters tab has no scrolling
+  // container of its own, the page itself scrolls.
+  const scrollY = window.scrollY;
   renderMattersList();
   if (wasOpen) {
     const docsEl = document.getElementById(`matter-docs-${matterId}`);
@@ -4645,6 +4661,7 @@ async function updateMatterField(matterId, field, value) {
     if (icon) icon.textContent = '▼';
     await renderMatterPanel(matterId);
   }
+  window.scrollTo(0, scrollY);
 }
 
 // Same as updateMatterField, but also re-renders the currently-open matter
