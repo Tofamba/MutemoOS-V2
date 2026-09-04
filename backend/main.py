@@ -7890,6 +7890,21 @@ async def matter_aml_status_report_export_pdf(request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+# TEMP (2026-09-04) -- read-only, direct chunk read of the real, confirmed-
+# intact MLPCA text (section 15 / specified activities) to answer a real
+# question about the Act's own wording accurately, rather than from
+# recollection. X-Admin-Token gated. Removed right after.
+@app.get("/api/admin/read-mlpca-chunks")
+async def _read_mlpca_chunks_TEMP(request: Request, q: str = "specified activit"):
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT chunk_index, text FROM chunks WHERE firm_id=$1 AND chunk_source='legal' "
+            "AND text ILIKE $2 ORDER BY chunk_index ASC LIMIT 15",
+            FIRM_ID, f"%{q}%"
+        )
+    return [{"chunk_index": r["chunk_index"], "text": r["text"]} for r in rows]
+
 # ── My Portfolio (self-scoped, every lawyer — NOT a reports:* endpoint) ────
 # Deliberately outside the reports:* permission family above: those are all
 # admin/partner-tier firm-wide views; this is the opposite shape, modeled on
