@@ -280,13 +280,27 @@ select{cursor:pointer}
 .result-placeholder{text-align:center;padding:3rem 1rem;color:var(--ink3)}
 .result-placeholder .icon{font-size:2.5rem;opacity:0.25;margin-bottom:0.75rem}
 
-/* ── Matter list ── */
-.matter-item{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);overflow:visible;margin-bottom:0.6rem;transition:box-shadow 0.15s}
+/* ── Matter list ──
+   2026-09-06 visual refinement, Stage 2: matter name is the strongest
+   hierarchy (serif, bold, largest); .matter-refline is new -- the
+   reference numbers on their own quiet line, split out of what used
+   to be one flat row of equal-weight chips; .matter-meta is what's
+   left of that row (practice area/type/status + doc-note-activity
+   counts), now genuinely the quietest line. The left border is a
+   status-at-a-glance indicator -- default value below is the "nothing
+   flagged" case (transparent, so unflagged matters don't gain a visual
+   border they didn't have before); renderMattersList() sets an actual
+   color inline per matter, reusing matter.matter_health (computed
+   server-side, already combines operational + AML risk -- see
+   backend/matter_health.py) rather than inventing a second "is this
+   matter OK" calculation just for this indicator. */
+.matter-item{background:var(--white);border:1px solid var(--border);border-left:3px solid transparent;border-radius:var(--radius);overflow:visible;margin-bottom:0.6rem;transition:box-shadow 0.15s}
 .matter-item:hover{box-shadow:0 2px 8px rgba(0,0,0,0.08)}
 .matter-row{padding:0.85rem 1rem;display:flex;align-items:center;gap:10px;cursor:pointer}
 .matter-icon{width:36px;height:36px;background:linear-gradient(135deg,var(--green),#2d7a4f);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;color:white;box-shadow:0 2px 4px rgba(0,0,0,0.12)}
-.matter-name{font-weight:700;font-size:0.9rem;color:var(--ink)}
-.matter-meta{font-size:0.72rem;color:var(--ink3);margin-top:3px}
+.matter-name{font-weight:700;font-size:0.95rem;color:var(--ink)}
+.matter-refline{font-size:0.74rem;color:var(--ink3);font-family:var(--font-sans);margin-top:2px;letter-spacing:0.1px}
+.matter-meta{font-size:0.72rem;color:var(--ink3);font-family:var(--font-sans);margin-top:3px}
 .matter-expand{flex:1}
 .matter-actions{display:flex;gap:6px;align-items:center}
 .matter-docs{border-top:2px solid var(--paper2);padding:0;display:none;background:var(--paper)}
@@ -813,32 +827,21 @@ select{cursor:pointer}
       <h2>📂 Matter Dashboard</h2>
       <p>All matters with indexed documents, progress notes, and status tracking.</p>
     </div>
-    <button class="btn btn-primary" onclick="openNewMatterModal()" style="white-space:nowrap;margin-top:0.25rem">+ New Matter</button>
-  </div>
-
-  <!-- Bulk Import -->
-  <div class="card" style="margin-bottom:1rem;margin-top:1rem">
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
-      <div>
-        <div class="card-title">⬆ Bulk Import Matters</div>
-        <div class="card-desc">Upload a completed Matter Register to create all your matters at once. Supports Word (.docx) and Excel (.xlsx).</div>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <a href="/api/matters/template-excel" download="MutemoDesk_Matter_Import_Template.xlsx"
-           class="btn btn-outline btn-sm">⬇ Excel Template</a>
-        <a href="/api/matters/template" download="MutemoDesk_Matter_Import_Template.docx"
-           class="btn btn-outline btn-sm">⬇ Word Template</a>
-        <input type="file" id="bulk-import-file" accept=".docx,.doc,.xlsx,.xlsm" style="display:none"
-               onchange="bulkImportMatters(this)"/>
-        <button class="btn btn-primary btn-sm" onclick="document.getElementById('bulk-import-file').click()">
-          ⬆ Import Matters
-        </button>
-      </div>
+    <!-- 2026-09-06 visual refinement, Stage 2: was a lone full-width
+         .btn-primary (that class defaults to width:100%, correct for a
+         form's own submit button, wrong for a header action sitting next
+         to a title) -- .btn-compact (added in Stage 1) is the real fix,
+         and Bulk Import moves from a permanent card into this one
+         secondary trigger + modal, so the header stops competing with
+         the matter list for attention. -->
+    <div style="display:flex;gap:8px;align-items:center;margin-top:0.25rem">
+      <button class="btn btn-outline btn-compact" onclick="openBulkImportModal()">⬆ Import</button>
+      <button class="btn btn-primary btn-compact" onclick="openNewMatterModal()">+ New Matter</button>
     </div>
-    <div id="bulk-import-status" class="status" style="margin-top:0.5rem"></div>
   </div>
 
-  <!-- Matters Search -->
+  <!-- Matters Search -- first thing under the header now that Bulk
+       Import no longer sits between them. -->
   <div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center">
     <input type="text" id="matters-search" placeholder="🔍 Search matters by name, client, or reference…"
       style="flex:1;padding:0.6rem 0.85rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:var(--font-sans)"
@@ -847,6 +850,33 @@ select{cursor:pointer}
   </div>
 
   <div id="matters-list"></div>
+</div>
+
+<!-- Bulk Import modal (2026-09-06) -- same Excel/Word import + templates
+     as before, moved out of a permanent full-width card on the Matter
+     Dashboard itself and into an on-demand modal, opened via the compact
+     "Import" button above. Same overlay pattern as client-modal/
+     compliance-modal elsewhere in this file. -->
+<div id="bulk-import-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+      <div style="font-weight:700;font-size:1rem">⬆ Bulk Import Matters</div>
+      <button onclick="closeBulkImportModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+    <p style="font-size:0.8rem;color:var(--ink3);font-family:var(--font-sans);margin-bottom:1rem">Upload a completed Matter Register to create all your matters at once. Supports Word (.docx) and Excel (.xlsx).</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:0.75rem">
+      <a href="/api/matters/template-excel" download="MutemoDesk_Matter_Import_Template.xlsx"
+         class="btn btn-outline btn-sm">⬇ Excel Template</a>
+      <a href="/api/matters/template" download="MutemoDesk_Matter_Import_Template.docx"
+         class="btn btn-outline btn-sm">⬇ Word Template</a>
+    </div>
+    <input type="file" id="bulk-import-file" accept=".docx,.doc,.xlsx,.xlsm" style="display:none"
+           onchange="bulkImportMatters(this)"/>
+    <button class="btn btn-primary" style="width:100%" onclick="document.getElementById('bulk-import-file').click()">
+      ⬆ Import Matters
+    </button>
+    <div id="bulk-import-status" class="status" style="margin-top:0.5rem"></div>
+  </div>
 </div>
 
 <!-- ═══════════════ CLIENTS TAB ═══════════════ -->
@@ -4279,6 +4309,24 @@ function matterHealthChipHtml(matter) {
   return `<span class="chip ${color}" title="${escHtml(title)}">${label}</span>`;
 }
 
+// Matter list left-edge status indicator (2026-09-06, visual refinement
+// Stage 2) -- reuses matter.matter_health directly rather than a second
+// "does this need attention" calculation: red/amber map to the same
+// --danger/--warning tokens used everywhere else, blue (the AML-scope-
+// unrated gap) to --info, greens/no-signal stay transparent (an
+// unflagged matter shouldn't gain a colored border it never had), grey
+// (Awaiting Client/On Hold/Closed) gets the same neutral --border color
+// already used for the card's own edge -- a closed matter isn't "at
+// risk," it's just closed, so it stays visually quiet, not colored.
+function matterHealthBorderColor(matter) {
+  const status = matter.matter_health?.status;
+  if (status === 'red') return 'var(--danger)';
+  if (status === 'amber') return 'var(--warning)';
+  if (status === 'blue') return 'var(--info)';
+  if (status === 'grey') return 'var(--border)';
+  return 'transparent';
+}
+
 function renderMattersList(filtered = null) {
   const el = document.getElementById('matters-list');
   const countEl = document.getElementById('matters-count');
@@ -4319,8 +4367,13 @@ function renderMattersList(filtered = null) {
     const ref = m.internal_ref || m.number || '';
     const extRef = m.external_ref || '';
     const lastActivity = m.last_activity ? m.last_activity.slice(0, 10) : '';
+    // Reference line (2026-09-06, Stage 2): plain quiet text, not a pair
+    // of heavy chip pills -- these are identifiers a lawyer scans past,
+    // not a status worth colored emphasis. Middot-joined, matching the
+    // "DU-009-01 HC4471/26" shape from the design review.
+    const refLine = [ref, extRef].filter(Boolean).join(' · ');
     return `
-    <div class="matter-item">
+    <div class="matter-item" style="border-left-color:${matterHealthBorderColor(m)}">
       <div class="matter-row" onclick="toggleMatter('${m.id}')">
         <div class="matter-icon">${(() => {
           const t = (m.matter_type || '').toLowerCase().replace(/_/g,' ');
@@ -4334,23 +4387,19 @@ function renderMattersList(filtered = null) {
                  '📁';
         })()}</div>
         <div class="matter-expand">
-          <div class="matter-name">
-            ${ref ? `<span style="color:var(--ink3);font-size:0.75rem;font-weight:600;margin-right:6px">${escHtml(ref)}</span>` : ''}
-            ${escHtml(m.name)}
-          </div>
+          <div class="matter-name">${escHtml(m.name)}</div>
+          ${refLine ? `<div class="matter-refline">${escHtml(refLine)}</div>` : ''}
           <div class="matter-meta">
-            ${m.matter_number ? `<span class="chip chip-blue" title="Matter number">${escHtml(m.matter_number)}</span>` : ''}
-            ${extRef ? `<span class="chip chip-blue" title="External reference">${escHtml(extRef)}</span>` : ''}
             ${m.practice_area ? `<span class="chip chip-gold">${escHtml(m.practice_area)}</span>` : ''}
             ${m.matter_type ? `<span class="chip chip-gray">${m.matter_type.replace(/_/g,' ')}</span>` : ''}
             <span class="chip ${statusColor}">${escHtml(status)}</span>
-            ${deadlineChipHtml(m)}
-            <span style="font-size:0.7rem;color:var(--ink3)">${m.document_count || 0} doc${m.document_count !== 1 ? 's' : ''}</span>
-            ${(m.progress_notes||[]).length ? `<span style="font-size:0.7rem;color:var(--ink3)">${m.progress_notes.length} note${m.progress_notes.length !== 1 ? 's' : ''}</span>` : ''}
-            ${lastActivity ? `<span style="font-size:0.7rem;color:var(--ink3)">· ${lastActivity}</span>` : ''}
+            <span>${m.document_count || 0} doc${m.document_count !== 1 ? 's' : ''}</span>
+            ${(m.progress_notes||[]).length ? `<span>${m.progress_notes.length} note${m.progress_notes.length !== 1 ? 's' : ''}</span>` : ''}
+            ${lastActivity ? `<span>· ${lastActivity}</span>` : ''}
           </div>
         </div>
         <div class="matter-actions">
+          ${deadlineChipHtml(m)}
           ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();deleteMatter('${m.id}')">🗑</button>` : ''}
           <span style="color:var(--ink3);font-size:0.8rem" id="expand-icon-${m.id}">▶</span>
         </div>
@@ -4987,6 +5036,14 @@ async function addNoteDatesToCalendar(matterId, dates) {
     document.body.appendChild(notif);
     setTimeout(() => notif.remove(), 3500);
   }
+}
+
+function openBulkImportModal() {
+  document.getElementById('bulk-import-modal').style.display = 'flex';
+}
+
+function closeBulkImportModal() {
+  document.getElementById('bulk-import-modal').style.display = 'none';
 }
 
 async function bulkImportMatters(input) {
