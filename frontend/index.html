@@ -233,7 +233,7 @@ a{color:var(--green);text-decoration:none}
 
 /* ── Forms ── */
 .form-section{margin-bottom:1.1rem}
-.form-section-label{font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:var(--green);margin-bottom:0.6rem;padding-bottom:0.3rem;border-bottom:1px solid var(--gold2)}
+.form-section-label{font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.9px;color:var(--green);font-family:var(--font-sans);margin-bottom:0.6rem;padding-bottom:0.3rem;border-bottom:1px solid var(--gold2)}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem}
 .form-group{margin-bottom:0.65rem}
 .form-group:last-child{margin-bottom:0}
@@ -594,6 +594,15 @@ select{cursor:pointer}
           <div><div class="card-title">Select Matter</div><div class="card-desc">Assign documents to a matter</div></div>
         </div>
         <div class="card-body">
+          <!-- 2026-09-06 visual refinement, Stage 3: this card used to be
+               one flat run of 8 equal-weight fields (picker, name, refs,
+               client, status, type, practice area, submit) -- regrouped
+               into "pick or create" (the primary path, most prominent)
+               vs. a clearly-labeled "Matter details" section for the new-
+               matter fields, using the same .form-section-label divider
+               the compliance modal elsewhere in this file already uses --
+               no new component, no new workflow step, same fields,
+               same createMatterFromVault() call. -->
           <div class="form-group">
             <label>Matter</label>
             <input type="text" id="upload-matter-search" placeholder="🔍 Type to filter matters…"
@@ -603,7 +612,9 @@ select{cursor:pointer}
               <option value="">— Select existing matter —</option>
             </select>
           </div>
-          <div style="text-align:center;font-size:0.75rem;color:var(--ink3);margin:0.5rem 0">or create new</div>
+          <div style="text-align:center;font-size:0.75rem;color:var(--ink3);font-family:var(--font-sans);margin:0.5rem 0">or create new ↓</div>
+
+          <div class="form-section-label" style="margin-top:0.5rem">Matter Details</div>
           <div class="form-group">
             <label>Matter Name / Description</label>
             <input type="text" id="new-matter-name" placeholder="e.g. Moyo v Dube — Stand 245 Borrowdale"/>
@@ -634,33 +645,35 @@ select{cursor:pointer}
               </select>
             </div>
           </div>
-          <div class="form-group">
-            <label>Matter Type</label>
-            <select id="new-matter-type">
-              <option value="">— Select —</option>
-              <option value="eviction">Eviction</option>
-              <option value="estate">Estate Administration</option>
-              <option value="trust">Trust</option>
-              <option value="employment">Employment / Labour</option>
-              <option value="commercial_property">Commercial Property</option>
-              <option value="commercial_contract">Commercial Contract</option>
-              <option value="conveyancing">Conveyancing</option>
-              <option value="customary_law">Customary Law</option>
-              <option value="matrimonial">Matrimonial / Divorce</option>
-              <option value="family_law">Family Law</option>
-              <option value="company_law">Company Law</option>
-              <option value="criminal">Criminal</option>
-              <option value="constitutional">Constitutional</option>
-              <option value="debt_collection">Debt Collection</option>
-              <option value="mining">Mining</option>
-              <option value="other">Other</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Practice Area</label>
-            <select id="new-matter-practice-area">
-              <option value="">— Select —</option>
-            </select>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Matter Type</label>
+              <select id="new-matter-type">
+                <option value="">— Select —</option>
+                <option value="eviction">Eviction</option>
+                <option value="estate">Estate Administration</option>
+                <option value="trust">Trust</option>
+                <option value="employment">Employment / Labour</option>
+                <option value="commercial_property">Commercial Property</option>
+                <option value="commercial_contract">Commercial Contract</option>
+                <option value="conveyancing">Conveyancing</option>
+                <option value="customary_law">Customary Law</option>
+                <option value="matrimonial">Matrimonial / Divorce</option>
+                <option value="family_law">Family Law</option>
+                <option value="company_law">Company Law</option>
+                <option value="criminal">Criminal</option>
+                <option value="constitutional">Constitutional</option>
+                <option value="debt_collection">Debt Collection</option>
+                <option value="mining">Mining</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Practice Area</label>
+              <select id="new-matter-practice-area">
+                <option value="">— Select —</option>
+              </select>
+            </div>
           </div>
           <button class="btn btn-outline btn-sm" onclick="createMatterFromVault()" style="width:100%">+ Create Matter</button>
         </div>
@@ -686,7 +699,14 @@ select{cursor:pointer}
           <button class="btn btn-primary" id="upload-btn" onclick="processUploads()" disabled>
             Index documents into Vault
           </button>
-          <div class="tip">Documents are chunked and indexed for semantic search. The AI will learn your firm's drafting style and precedents.</div>
+          <!-- 2026-09-06 visual refinement, Stage 3: was .tip -- a
+               bordered, brand-tinted callout, the same visual weight as
+               a warning -- for what's genuinely a quiet aside, not
+               something the lawyer needs to act on. .note-quiet (added
+               Stage 1) is the toned-down register; copy trimmed to
+               plain product language, no "the AI will learn your
+               style" claim. -->
+          <div class="note-quiet">Vault indexes your firm's documents for search and AI-assisted drafting.</div>
         </div>
       </div>
     </div>
