@@ -13709,39 +13709,6 @@ async def send_reminder_email(recipient: str, events: list, test: bool = False, 
         print(f"[email] send failed: {e}")
         return False
 
-@app.get("/api/admin/inspect-notification-bleed")
-async def admin_inspect_notification_bleed(request: Request):
-    """
-    TEMPORARY, read-only -- urgent live investigation (2026-09-06) into a
-    reported cross-user notification bleed: Nyari stopped receiving her
-    own email alerts after an admin user configured their own email
-    reminder settings; the admin started receiving alerts instead.
-    Returns the real reminder_settings row (recipient_email/
-    digest_recipient_email -- the two fields both "Email Reminders" and
-    "Daily Vault Digest" panels write to) plus the firm's real user list
-    (id/display_name/email/role) so the two can be correlated against
-    real identities before proposing a fix. Remove once confirmed.
-    """
-    require_admin_token(request)
-    async with _db_pool.acquire() as conn:
-        settings_row = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
-        user_rows = await conn.fetch(
-            "SELECT id, display_name, email, phone, role FROM users WHERE firm_id=$1 ORDER BY display_name", FIRM_ID
-        )
-    settings = dict(settings_row) if settings_row else None
-    if settings:
-        settings["firm_id"] = str(settings["firm_id"])
-        for k in ("last_run_date", "digest_last_run_date"):
-            if settings.get(k):
-                settings[k] = str(settings[k])
-    return {
-        "reminder_settings": settings,
-        "users": [
-            {"id": str(u["id"]), "display_name": u["display_name"], "email": u["email"], "phone": u["phone"], "role": u["role"]}
-            for u in user_rows
-        ],
-    }
-
 @app.get("/api/reminders/settings")
 async def get_reminder_settings(request: Request):
     user = await get_current_user(request)
