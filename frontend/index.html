@@ -435,8 +435,8 @@ select{cursor:pointer}
 .dash-section-body{padding:1.1rem 1.25rem}
 .dash-stat-card{background:var(--white);border:1px solid var(--border);border-radius:var(--dash-radius-lg);box-shadow:var(--dash-shadow);padding:1rem 1.2rem;display:flex;align-items:center;gap:12px}
 .dash-stat-icon{width:40px;height:40px;border-radius:var(--dash-radius-md);background:var(--dash-green-light);color:var(--dash-green);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
-.dash-stat-value{font-size:1.35rem;font-weight:700;color:var(--dash-green);line-height:1.1}
-.dash-stat-label{font-size:0.72rem;color:var(--ink3);margin-top:2px}
+.dash-stat-value{font-size:1.35rem;font-weight:700;color:var(--dash-green);font-family:var(--font-sans);line-height:1.1}
+.dash-stat-label{font-size:0.72rem;color:var(--ink3);font-family:var(--font-sans);margin-top:2px}
 .dash-row{display:flex;align-items:center;gap:10px;padding:0.65rem 0;border-bottom:1px solid var(--paper2)}
 .dash-row:last-child{border-bottom:none}
 .dash-row-main{flex:1;min-width:0}
@@ -8494,22 +8494,22 @@ function _ccsRenderSummary(s) {
   const risk = s.risk_ratings || {};
   const tile = (label, value, color) => `
     <div style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;min-width:120px;background:var(--paper2)">
-      <div style="font-size:0.68rem;color:var(--ink3);text-transform:uppercase;letter-spacing:0.02em">${label}</div>
-      <div style="font-size:1.15rem;font-weight:700;${color ? `color:${color}` : ''}">${value}</div>
+      <div style="font-size:0.68rem;color:var(--ink3);font-family:var(--font-sans);text-transform:uppercase;letter-spacing:0.02em">${label}</div>
+      <div style="font-size:1.15rem;font-weight:700;font-family:var(--font-sans);${color ? `color:${color}` : ''}">${value}</div>
     </div>`;
   el.style.display = 'block';
   el.innerHTML = `
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:0.5rem">
       ${tile('Total Clients', s.total_clients ?? 0)}
-      ${tile('Cleared', s.cleared_count ?? 0, 'var(--green)')}
-      ${tile('Action Required', s.action_required_count ?? 0, (s.action_required_count ? 'var(--red)' : ''))}
+      ${tile('Cleared', s.cleared_count ?? 0, 'var(--success)')}
+      ${tile('Action Required', s.action_required_count ?? 0, (s.action_required_count ? 'var(--danger)' : ''))}
       ${tile('PEP Clients', s.pep_count ?? 0)}
-      ${tile('PEP Approval Outstanding', s.pep_approval_outstanding_count ?? 0, (s.pep_approval_outstanding_count ? 'var(--red)' : ''))}
+      ${tile('PEP Approval Outstanding', s.pep_approval_outstanding_count ?? 0, (s.pep_approval_outstanding_count ? 'var(--danger)' : ''))}
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
-      ${tile('Risk: Low', risk.Low ?? 0, 'var(--green)')}
-      ${tile('Risk: Medium', risk.Medium ?? 0, 'var(--gold)')}
-      ${tile('Risk: High', risk.High ?? 0, (risk.High ? 'var(--red)' : ''))}
+      ${tile('Risk: Low', risk.Low ?? 0, 'var(--success)')}
+      ${tile('Risk: Medium', risk.Medium ?? 0, 'var(--warning)')}
+      ${tile('Risk: High', risk.High ?? 0, (risk.High ? 'var(--danger)' : ''))}
       ${tile('Risk: Not Assessed', risk.NotAssessed ?? 0)}
     </div>
   `;
@@ -8965,12 +8965,17 @@ function _cddKV(rows) {
   // Shared two-column "Item | Status" / "Field | Information" table --
   // every section in the sample report is exactly this shape except the
   // list-shaped ones (BO, reps, matters, documents), which get their own
-  // multi-column tables below.
+  // multi-column tables below. Label column is sans-serif (2026-09-06,
+  // visual refinement Stage 4) -- these are field labels/metadata, same
+  // category as every other label in the app, not report content; the
+  // value column stays serif since a value like a client's own risk
+  // rating or overall status is the actual content this report exists
+  // to show.
   return `
     <table style="width:100%;border-collapse:collapse;margin-bottom:0.5rem">
       ${rows.map(([label, value]) => `
         <tr style="border-bottom:1px solid var(--border)">
-          <td style="padding:5px 8px;font-weight:600;color:var(--ink2);width:38%;vertical-align:top">${escHtml(label)}</td>
+          <td style="padding:5px 8px;font-weight:600;color:var(--ink2);font-family:var(--font-sans);width:38%;vertical-align:top">${escHtml(label)}</td>
           <td style="padding:5px 8px;color:var(--ink)">${value}</td>
         </tr>
       `).join('')}
@@ -8979,9 +8984,13 @@ function _cddKV(rows) {
 }
 
 function _cddSection(title, bodyHtml) {
+  // Section titles ("1. Overall Compliance Position", ...) are structural
+  // labels, the same role .card-title plays elsewhere in the app
+  // (already sans-serif since Stage 1) -- these were missed then because
+  // they're built from a plain inline-styled div, not that class.
   return `
     <div style="margin-bottom:1rem">
-      <div style="font-weight:700;font-size:0.82rem;margin-bottom:0.35rem;color:var(--ink2)">${title}</div>
+      <div style="font-weight:700;font-size:0.82rem;margin-bottom:0.35rem;color:var(--ink2);font-family:var(--font-sans)">${title}</div>
       ${bodyHtml}
     </div>
   `;
@@ -9075,7 +9084,7 @@ function _renderCddReport(r) {
   const header = `
     <div style="margin-bottom:1rem;padding-bottom:0.75rem;border-bottom:1px solid var(--border)">
       <div style="font-size:0.95rem;font-weight:700">${escHtml(c.full_name)}</div>
-      <div style="font-size:0.8rem;color:var(--ink3)">
+      <div style="font-size:0.8rem;color:var(--ink3);font-family:var(--font-sans)">
         Client No. ${escHtml(c.client_number || '—')} &middot; ${escHtml(c.client_type || 'Type not recorded')}
       </div>
     </div>
