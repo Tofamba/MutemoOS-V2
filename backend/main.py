@@ -851,6 +851,36 @@ async def run_migrations():
         ALTER TABLE reminder_settings ADD COLUMN IF NOT EXISTS digest_send_hour_utc INT NOT NULL DEFAULT 6;
         ALTER TABLE reminder_settings ADD COLUMN IF NOT EXISTS digest_last_run_date DATE;
 
+        -- 2026-09-06, real production incident: reminder_settings above is
+        -- PRIMARY KEY(firm_id) -- ONE shared row per FIRM, not per user --
+        -- despite the "Email Reminders"/"Daily Vault Digest" panels reading
+        -- like personal settings. Both require admin:settings, granted to
+        -- admin AND partner, so two different real people (a partner and an
+        -- admin) each configuring "their own" email silently overwrote the
+        -- same value: one user's alerts stopped, the other started
+        -- receiving alerts meant for the first. user_reminder_settings
+        -- replaces reminder_settings/recipient_email/digest_recipient_email
+        -- as the source of truth (reminder_settings itself is left in place,
+        -- unused going forward, rather than dropped -- no need to destroy
+        -- real historical data to fix this). recipient_email/
+        -- digest_recipient_email are nullable BY DESIGN: NULL means "use my
+        -- own users.email", resolved at read/send time, not copied in --
+        -- so a user's reminder address tracks their account email
+        -- automatically unless they've genuinely typed a different one.
+        CREATE TABLE IF NOT EXISTS user_reminder_settings (
+            user_id                 UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            firm_id                 UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            enabled                 BOOLEAN NOT NULL DEFAULT FALSE,
+            recipient_email         TEXT,
+            send_hour_utc           INT NOT NULL DEFAULT 5,
+            last_run_date           DATE,
+            digest_enabled          BOOLEAN NOT NULL DEFAULT FALSE,
+            digest_recipient_email  TEXT,
+            digest_send_hour_utc    INT NOT NULL DEFAULT 6,
+            digest_last_run_date    DATE
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_reminder_settings_firm ON user_reminder_settings(firm_id);
+
         CREATE TABLE IF NOT EXISTS chunks (
             id              TEXT PRIMARY KEY,
             firm_id         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
@@ -1125,6 +1155,52 @@ async def run_migrations():
         INSERT INTO reminder_settings (firm_id)
         VALUES ($1) ON CONFLICT (firm_id) DO NOTHING
         """, FIRM_ID)
+
+        # One-time backfill of user_reminder_settings from the old shared
+        # reminder_settings row (2026-09-06 incident fix) -- needs bound
+        # FIRM_ID/data lookups, so it can't live in the big unparameterized
+        # migration block above. Guarded by "no rows exist yet for this
+        # firm" so it only ever runs once, the first deploy after this
+        # table is introduced -- every later restart finds existing rows
+        # and skips straight past.
+        #
+        # Deliberately does NOT copy the old shared recipient_email/
+        # digest_recipient_email to everyone (or to no one arbitrarily) --
+        # a user only inherits the old enabled/hour/last_run_date state
+        # when their own real users.email is what the old shared value
+        # actually held, i.e. they were genuinely the one it was working
+        # for. Every other user starts with reminders off, and their
+        # recipient_email column stays NULL either way -- it was never
+        # "theirs" to inherit, and NULL already means "use my own
+        # users.email" once they turn it on.
+        already_backfilled = await conn.fetchval(
+            "SELECT COUNT(*) FROM user_reminder_settings WHERE firm_id=$1", FIRM_ID
+        )
+        if not already_backfilled:
+            old_shared = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
+            firm_user_rows = await conn.fetch("SELECT id, email FROM users WHERE firm_id=$1", FIRM_ID)
+            old_reminder_email = ((old_shared["recipient_email"] if old_shared else None) or "").strip().lower()
+            old_digest_email = ((old_shared["digest_recipient_email"] if old_shared else None) or "").strip().lower()
+            for u in firm_user_rows:
+                u_email = (u["email"] or "").strip().lower()
+                was_reminder_recipient = bool(old_shared and u_email and u_email == old_reminder_email)
+                was_digest_recipient = bool(old_shared and u_email and u_email == old_digest_email)
+                await conn.execute("""
+                    INSERT INTO user_reminder_settings
+                        (user_id, firm_id, enabled, send_hour_utc, last_run_date,
+                         digest_enabled, digest_send_hour_utc, digest_last_run_date)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                    ON CONFLICT (user_id) DO NOTHING
+                """,
+                u["id"], FIRM_ID,
+                old_shared["enabled"] if was_reminder_recipient else False,
+                old_shared["send_hour_utc"] if was_reminder_recipient else 5,
+                old_shared["last_run_date"] if was_reminder_recipient else None,
+                old_shared["digest_enabled"] if was_digest_recipient else False,
+                old_shared["digest_send_hour_utc"] if was_digest_recipient else 6,
+                old_shared["digest_last_run_date"] if was_digest_recipient else None,
+                )
+            print(f"[db] backfilled user_reminder_settings for {len(firm_user_rows)} user(s)")
 
     print("[db] schema migrations complete")
 
@@ -12824,7 +12900,8 @@ async def add_calendar_event(event: CalendarEvent, background_tasks: BackgroundT
 
     if attendees_list and is_email_configured():
         organizer_name = (user or {}).get("display_name") or FIRM_NAME
-        background_tasks.add_task(send_event_invites, result, attendees_list, organizer_name, event.invite_message)
+        background_tasks.add_task(send_event_invites, result, attendees_list, organizer_name, event.invite_message,
+                                   organizer_email=(user or {}).get("email"))
 
     return result
 
@@ -12865,7 +12942,8 @@ async def invite_to_calendar_event(event_id: str, req: CalendarInviteRequest, ba
 
     if is_email_configured():
         organizer_name = (user or {}).get("display_name") or FIRM_NAME
-        background_tasks.add_task(send_event_invites, result, new_attendees, organizer_name, req.invite_message)
+        background_tasks.add_task(send_event_invites, result, new_attendees, organizer_name, req.invite_message,
+                                   organizer_email=(user or {}).get("email"))
 
     return {"added": [a["email"] for a in new_attendees], "event": result}
 
@@ -12939,7 +13017,8 @@ async def update_calendar_event(event_id: str, update: CalendarEventUpdate,
         organizer_name = (user or {}).get("display_name") or FIRM_NAME
         background_tasks.add_task(
             send_event_invites, result, attendees, organizer_name,
-            update.update_message, "updated", result.get("sequence", 1)
+            update.update_message, "updated", result.get("sequence", 1),
+            organizer_email=(user or {}).get("email")
         )
 
     return result
@@ -12974,7 +13053,8 @@ async def delete_calendar_event(event_id: str, background_tasks: BackgroundTasks
         # remove/cancel the entry via METHOD:CANCEL.
         background_tasks.add_task(
             send_event_invites, event, attendees, organizer_name,
-            None, "cancelled", event.get("sequence", 0) + 1
+            None, "cancelled", event.get("sequence", 0) + 1,
+            organizer_email=(user or {}).get("email")
         )
 
     return {"deleted": True, "notified": [a["email"] for a in attendees]}
@@ -13397,23 +13477,6 @@ def build_reminder_email_body(events: list, review_matters: Optional[list] = Non
 
     return text, html
 
-async def get_firm_contact_email() -> Optional[str]:
-    """
-    The email address the firm already set up on the Calendar tab for daily
-    reminders (reminder_settings.recipient_email). Reused as the calendar
-    invite ORGANIZER/CC/Reply-To so Accept/Decline responses and any
-    "reply" from an attendee actually reach the firm, not a generic system
-    inbox nobody reads.
-    """
-    if not _db_pool:
-        return None
-    async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT recipient_email FROM reminder_settings WHERE firm_id=$1", FIRM_ID
-        )
-    email = row["recipient_email"] if row else None
-    return email.strip() if email and email.strip() else None
-
 def build_ics(events: list) -> str:
     """Build an ICS calendar string from a list of event dicts."""
     lines = [
@@ -13519,10 +13582,11 @@ def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, tex
     render Accept/Decline buttons, and that Gmail also wants for full RSVP
     support rather than just silently adding the event.
 
-    cc/reply_to are the firm's own contact email (reminder_settings.
-    recipient_email) — CC'd so there's a visible record it went out, and
+    cc/reply_to are the organizing lawyer's own email (2026-09-06 — used to
+    be one shared firm-wide contact address; see user_reminder_settings'
+    migration comment) — CC'd so there's a visible record it went out, and
     Reply-To so a plain "Reply" in the recipient's mail client reaches the
-    firm rather than a generic system inbox.
+    lawyer who actually sent the invite, not a generic system inbox.
     """
     import base64
     api_key = os.environ.get("RESEND_API_KEY", "")
@@ -13557,7 +13621,8 @@ def _send_via_resend_sync_with_method(to: str, subject: str, html_body: str, tex
 
 async def send_event_invites(event: dict, attendees: list, organizer_name: str,
                               invite_message: Optional[str] = None,
-                              kind: str = "new", sequence: int = 0) -> dict:
+                              kind: str = "new", sequence: int = 0,
+                              organizer_email: Optional[str] = None) -> dict:
     """
     Send a calendar invite/update/cancellation email (with .ics attachment)
     to each attendee on an event. Sends one email per attendee — each ICS
@@ -13574,10 +13639,17 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
     invite_message is an optional free-text note from whoever is sending the
     invite, giving the recipient context — shown under the "From the Desk
     of ..." heading.
+
+    organizer_email is the ACTING/organizing lawyer's own email (2026-09-06
+    — this used to be a single firm-wide "contact" address shared by every
+    user via reminder_settings.recipient_email; see user_reminder_settings'
+    own migration comment for the real cross-account bleed that caused. CC
+    and Reply-To go to whoever actually sent the invite, not a shared
+    value). Falls back to the Resend from-address if the organizer has no
+    email on file.
     Returns {"sent": [...], "failed": [...]}.
     """
-    firm_contact_email = await get_firm_contact_email()
-    organizer_email = firm_contact_email or os.environ.get(
+    resolved_organizer_email = organizer_email or os.environ.get(
         "RESEND_FROM", f"reminders@{os.environ.get('RESEND_FROM_DOMAIN', 'tofamba.com')}"
     )
     ics_method = "CANCEL" if kind == "cancelled" else "REQUEST"
@@ -13596,12 +13668,12 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
     message_text = f"\n\"{invite_message}\"\n" if invite_message else ""
     contact_html = (
         f'<p style="font-size:13px">Should you need to discuss this further, please feel free to '
-        f'contact me on {_escape_html(firm_contact_email)}.</p>'
-        if firm_contact_email and kind != "cancelled" else ""
+        f'contact me on {_escape_html(resolved_organizer_email)}.</p>'
+        if organizer_email and kind != "cancelled" else ""
     )
     contact_text = (
-        f"\nShould you need to discuss this further, please feel free to contact me on {firm_contact_email}.\n"
-        if firm_contact_email and kind != "cancelled" else ""
+        f"\nShould you need to discuss this further, please feel free to contact me on {resolved_organizer_email}.\n"
+        if organizer_email and kind != "cancelled" else ""
     )
 
     if kind == "cancelled":
@@ -13643,7 +13715,7 @@ async def send_event_invites(event: dict, attendees: list, organizer_name: str,
         try:
             await asyncio.to_thread(
                 _send_via_resend_sync_with_method, a["email"], subject, html_body, text_body,
-                ics_content, ics_method, firm_contact_email, firm_contact_email
+                ics_content, ics_method, resolved_organizer_email, resolved_organizer_email
             )
             sent.append(a["email"])
         except Exception as e:
@@ -13709,44 +13781,70 @@ async def send_reminder_email(recipient: str, events: list, test: bool = False, 
         print(f"[email] send failed: {e}")
         return False
 
+def _own_email_or_none(user: dict) -> Optional[str]:
+    email = (user.get("email") or "").strip()
+    return email or None
+
 @app.get("/api/reminders/settings")
 async def get_reminder_settings(request: Request):
+    """
+    Per-user (2026-09-06 -- was firm-wide, a real production incident, see
+    user_reminder_settings' own migration comment). recipient_email in the
+    response is the EFFECTIVE address: the user's own explicit override if
+    they've set one, otherwise their account's own users.email -- the
+    field is never blank for a real account, so the form always shows
+    something meaningful to save over.
+    """
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    own_email = _own_email_or_none(user) or ""
     async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
+        row = await conn.fetchrow("SELECT * FROM user_reminder_settings WHERE user_id=$1", user_id)
     if not row:
-        return {"enabled": False, "recipient_email": "", "send_hour_utc": 5}
-    d = dict(row)
-    d["firm_id"] = str(d["firm_id"])
-    if d.get("last_run_date"):
-        d["last_run_date"] = str(d["last_run_date"])
-    return d
+        return {"enabled": False, "recipient_email": own_email, "send_hour_utc": 5}
+    return {
+        "enabled": row["enabled"],
+        "recipient_email": row["recipient_email"] or own_email,
+        "send_hour_utc": row["send_hour_utc"],
+        "last_run_date": str(row["last_run_date"]) if row["last_run_date"] else None,
+    }
 
 @app.post("/api/reminders/settings")
 async def update_reminder_settings(settings: ReminderSettings, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    own_email = (_own_email_or_none(user) or "").lower()
+    entered = (settings.recipient_email or "").strip()
+    # Store NULL (defer to users.email) rather than a frozen copy when the
+    # entered value is just their own account email -- so it keeps
+    # tracking that account's email automatically if it's ever changed,
+    # and an override is only ever stored when it genuinely differs.
+    recipient_to_store = None if entered.lower() == own_email else (entered or None)
     async with _db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO reminder_settings (firm_id, enabled, recipient_email, send_hour_utc)
-            VALUES ($1,$2,$3,$4)
-            ON CONFLICT (firm_id) DO UPDATE SET
-                enabled=$2, recipient_email=$3, send_hour_utc=$4
-        """, FIRM_ID, settings.enabled, settings.recipient_email, settings.send_hour_utc)
+            INSERT INTO user_reminder_settings (user_id, firm_id, enabled, recipient_email, send_hour_utc)
+            VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT (user_id) DO UPDATE SET
+                enabled=$3, recipient_email=$4, send_hour_utc=$5
+        """, user_id, FIRM_ID, settings.enabled, recipient_to_store, settings.send_hour_utc)
     return {"saved": True}
 
 @app.get("/api/digest/settings")
 async def get_digest_settings(request: Request):
+    """Per-user, same convention as GET /api/reminders/settings above."""
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    own_email = _own_email_or_none(user) or ""
     async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
+        row = await conn.fetchrow("SELECT * FROM user_reminder_settings WHERE user_id=$1", user_id)
     if not row:
-        return {"enabled": False, "recipient_email": "", "send_hour_utc": 6}
+        return {"enabled": False, "recipient_email": own_email, "send_hour_utc": 6}
     return {
         "enabled": row["digest_enabled"],
-        "recipient_email": row["digest_recipient_email"] or "",
+        "recipient_email": row["digest_recipient_email"] or own_email,
         "send_hour_utc": row["digest_send_hour_utc"],
         "last_run_date": str(row["digest_last_run_date"]) if row["digest_last_run_date"] else None,
     }
@@ -13755,24 +13853,35 @@ async def get_digest_settings(request: Request):
 async def update_digest_settings(settings: DigestSettings, request: Request):
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    own_email = (_own_email_or_none(user) or "").lower()
+    entered = (settings.recipient_email or "").strip()
+    recipient_to_store = None if entered.lower() == own_email else (entered or None)
     async with _db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO reminder_settings (firm_id, digest_enabled, digest_recipient_email, digest_send_hour_utc)
-            VALUES ($1,$2,$3,$4)
-            ON CONFLICT (firm_id) DO UPDATE SET
-                digest_enabled=$2, digest_recipient_email=$3, digest_send_hour_utc=$4
-        """, FIRM_ID, settings.enabled, settings.recipient_email, settings.send_hour_utc)
+            INSERT INTO user_reminder_settings (user_id, firm_id, digest_enabled, digest_recipient_email, digest_send_hour_utc)
+            VALUES ($1,$2,$3,$4,$5)
+            ON CONFLICT (user_id) DO UPDATE SET
+                digest_enabled=$3, digest_recipient_email=$4, digest_send_hour_utc=$5
+        """, user_id, FIRM_ID, settings.enabled, recipient_to_store, settings.send_hour_utc)
     return {"saved": True}
 
 @app.post("/api/digest/test")
 async def test_digest(request: Request):
+    """Sends to the CALLING user's own resolved digest email (per-user,
+    2026-09-06) -- the frontend always POSTs .../digest/settings with the
+    address to test immediately before calling this, so this always
+    reads back whatever was just saved for this account."""
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
     if not is_email_configured():
         raise HTTPException(status_code=503, detail="Email is not configured on this server.")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    own_email = _own_email_or_none(user)
     async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
-    if not row or not row["digest_recipient_email"]:
+        row = await conn.fetchrow("SELECT * FROM user_reminder_settings WHERE user_id=$1", user_id)
+    recipient = (row["digest_recipient_email"] if row else None) or own_email
+    if not recipient:
         raise HTTPException(status_code=400, detail="No digest recipient email configured.")
 
     since = datetime.utcnow() - timedelta(hours=24)
@@ -13800,20 +13909,25 @@ async def test_digest(request: Request):
     subject = f"[TEST] \u2696 Mutemo Desk \u2014 Daily vault digest ({total} item{'s' if total != 1 else ''})"
 
     try:
-        await asyncio.to_thread(_send_via_resend_sync, row["digest_recipient_email"], subject, html_body, text_body)
+        await asyncio.to_thread(_send_via_resend_sync, recipient, subject, html_body, text_body)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to send: {e}")
-    return {"sent": True, "recipient": row["digest_recipient_email"], "items_included": total}
+    return {"sent": True, "recipient": recipient, "items_included": total}
 
 @app.post("/api/reminders/test")
 async def test_reminder(request: Request):
+    """Sends to the CALLING user's own resolved reminder email (per-user,
+    2026-09-06) -- same convention as /api/digest/test above."""
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
     if not is_email_configured():
         raise HTTPException(status_code=503, detail="Email is not configured on this server.")
+    user_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    own_email = _own_email_or_none(user)
     async with _db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
-    if not row or not row["recipient_email"]:
+        row = await conn.fetchrow("SELECT * FROM user_reminder_settings WHERE user_id=$1", user_id)
+    recipient = (row["recipient_email"] if row else None) or own_email
+    if not recipient:
         raise HTTPException(status_code=400, detail="No recipient email configured.")
     # Send a test with a dummy upcoming event so the HTML template renders
     today = datetime.utcnow().date()
@@ -13842,11 +13956,11 @@ async def test_reminder(request: Request):
     # renders correctly for whatever real data exists right now, rather
     # than a synthetic stand-in.
     review_matters = await _get_review_matters_for_digest(today)
-    sent = await send_reminder_email(row["recipient_email"], test_events, test=True, review_matters=review_matters)
+    sent = await send_reminder_email(recipient, test_events, test=True, review_matters=review_matters)
     if not sent:
         raise HTTPException(status_code=500, detail="Failed to send test email.")
     return {
-        "sent": True, "recipient": row["recipient_email"],
+        "sent": True, "recipient": recipient,
         "event_count": len(test_events), "review_matter_count": len(review_matters),
     }
 
@@ -13919,57 +14033,63 @@ async def _maybe_send_digest():
     """
     if not _db_pool:
         return
-    async with _db_pool.acquire() as conn:
-        settings = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
-    if not settings or not settings["digest_enabled"] or not settings["digest_recipient_email"]:
-        return
-
     now_utc = datetime.utcnow()
-    if now_utc.hour != settings["digest_send_hour_utc"]:
-        return
     today = now_utc.date()
     if today.weekday() >= 5:
         return
-    if settings.get("digest_last_run_date") == today:
-        return
-
-    # "Since last digest" — falls back to the last 24 hours on first run
-    since = datetime.combine(settings["digest_last_run_date"], datetime.min.time()) if settings.get("digest_last_run_date") else now_utc - timedelta(hours=24)
 
     async with _db_pool.acquire() as conn:
-        news_rows = await conn.fetch(
-            "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='news' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
-            FIRM_ID, since
-        )
-        legislation_rows = await conn.fetch(
-            "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='legislation' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
-            FIRM_ID, since
-        )
-        judgment_rows = await conn.fetch(
-            "SELECT * FROM zlr_entries WHERE firm_id=$1 AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
-            FIRM_ID, since
+        due = await conn.fetch("""
+            SELECT urs.user_id, urs.digest_recipient_email, urs.digest_last_run_date, u.email AS account_email
+            FROM user_reminder_settings urs
+            JOIN users u ON u.id = urs.user_id
+            WHERE urs.firm_id=$1 AND urs.digest_enabled AND urs.digest_send_hour_utc=$2
+        """, FIRM_ID, now_utc.hour)
+
+    for row in due:
+        recipient = row["digest_recipient_email"] or row["account_email"]
+        if not recipient or row["digest_last_run_date"] == today:
+            continue
+
+        since = (
+            datetime.combine(row["digest_last_run_date"], datetime.min.time())
+            if row["digest_last_run_date"] else now_utc - timedelta(hours=24)
         )
 
-    news_items = [dict(r) for r in news_rows]
-    legislation_items = [dict(r) for r in legislation_rows]
-    judgment_items = [dict(r) for r in judgment_rows]
+        async with _db_pool.acquire() as conn:
+            news_rows = await conn.fetch(
+                "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='news' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+                FIRM_ID, since
+            )
+            legislation_rows = await conn.fetch(
+                "SELECT * FROM legal_updates WHERE firm_id=$1 AND source_type='legislation' AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+                FIRM_ID, since
+            )
+            judgment_rows = await conn.fetch(
+                "SELECT * FROM zlr_entries WHERE firm_id=$1 AND uploaded_at >= $2 ORDER BY uploaded_at DESC",
+                FIRM_ID, since
+            )
 
-    text_body, html_body = build_digest_email_body(news_items, legislation_items, judgment_items)
-    total = len(news_items) + len(legislation_items) + len(judgment_items)
-    subject = f"\u2696 Mutemo Desk \u2014 Daily vault digest ({total} new item{'s' if total != 1 else ''})" if total else "\u2696 Mutemo Desk \u2014 Daily vault digest (nothing new today)"
+        news_items = [dict(r) for r in news_rows]
+        legislation_items = [dict(r) for r in legislation_rows]
+        judgment_items = [dict(r) for r in judgment_rows]
 
-    try:
-        await asyncio.to_thread(_send_via_resend_sync, settings["digest_recipient_email"], subject, html_body, text_body)
-        print(f"[digest] Sent daily digest to {settings['digest_recipient_email']} ({total} items)")
-    except Exception as e:
-        print(f"[digest] Failed to send: {e}")
-        return  # don't mark as sent if it failed — retry next hour
+        text_body, html_body = build_digest_email_body(news_items, legislation_items, judgment_items)
+        total = len(news_items) + len(legislation_items) + len(judgment_items)
+        subject = f"⚖ Mutemo Desk — Daily vault digest ({total} new item{'s' if total != 1 else ''})" if total else "⚖ Mutemo Desk — Daily vault digest (nothing new today)"
 
-    async with _db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE reminder_settings SET digest_last_run_date=$1 WHERE firm_id=$2",
-            today, FIRM_ID
-        )
+        try:
+            await asyncio.to_thread(_send_via_resend_sync, recipient, subject, html_body, text_body)
+            print(f"[digest] Sent daily digest to {recipient} ({total} items)")
+        except Exception as e:
+            print(f"[digest] Failed to send to {recipient}: {e}")
+            continue  # don't mark as sent if it failed — retry next hour
+
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE user_reminder_settings SET digest_last_run_date=$1 WHERE user_id=$2",
+                today, row["user_id"]
+            )
 
 
 async def reminder_scheduler_loop():
@@ -14029,21 +14149,30 @@ async def _get_review_matters_for_digest(today: date) -> list:
     return review_matters
 
 async def _maybe_send_reminder():
+    """Per-user (2026-09-06 — was firm-wide, one shared recipient; see
+    user_reminder_settings' own migration comment for the real incident
+    this fixed). Events/deadlines/review_matters are firm-wide data and
+    computed once; only the recipient list and each recipient's own
+    last_run_date fan out per user."""
     if not _db_pool:
         return
-    async with _db_pool.acquire() as conn:
-        settings = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
-    if not settings or not settings["enabled"] or not settings["recipient_email"]:
-        return
-
     now_utc = datetime.utcnow()
-    if now_utc.hour != settings["send_hour_utc"]:
-        return
     today = now_utc.date()
     # Skip weekends — reminders only on Mon–Fri
     if today.weekday() >= 5:
         return
-    if settings.get("last_run_date") == today:
+
+    async with _db_pool.acquire() as conn:
+        due = await conn.fetch("""
+            SELECT urs.user_id, urs.recipient_email, urs.last_run_date, u.email AS account_email
+            FROM user_reminder_settings urs
+            JOIN users u ON u.id = urs.user_id
+            WHERE urs.firm_id=$1 AND urs.enabled AND urs.send_hour_utc=$2
+              AND urs.last_run_date IS DISTINCT FROM $3
+        """, FIRM_ID, now_utc.hour, today)
+
+    due = [r for r in due if (r["recipient_email"] or r["account_email"])]
+    if not due:
         return
 
     # Collect upcoming events (next 30 days, including today). LEFT JOINs to
@@ -14105,10 +14234,11 @@ async def _maybe_send_reminder():
 
     if not events and not review_matters:
         async with _db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE reminder_settings SET last_run_date=$1 WHERE firm_id=$2",
-                today, FIRM_ID
-            )
+            for row in due:
+                await conn.execute(
+                    "UPDATE user_reminder_settings SET last_run_date=$1 WHERE user_id=$2",
+                    today, row["user_id"]
+                )
         return
 
     # Enrich events with days_until for the HTML email builder
@@ -14119,14 +14249,16 @@ async def _maybe_send_reminder():
         except Exception:
             e["days_until"] = 0  # treat as today if date parse fails
 
-    sent = await send_reminder_email(settings["recipient_email"], events, review_matters=review_matters)
-    if sent:
-        async with _db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE reminder_settings SET last_run_date=$1 WHERE firm_id=$2",
-                today, FIRM_ID
-            )
-        print(f"[reminder] digest sent to {settings['recipient_email']}: {len(events)} events, {len(review_matters)} for review")
+    for row in due:
+        recipient = row["recipient_email"] or row["account_email"]
+        sent = await send_reminder_email(recipient, events, review_matters=review_matters)
+        if sent:
+            async with _db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE user_reminder_settings SET last_run_date=$1 WHERE user_id=$2",
+                    today, row["user_id"]
+                )
+            print(f"[reminder] digest sent to {recipient}: {len(events)} events, {len(review_matters)} for review")
 
 # ── Inactivity Alerts ─────────────────────────────────────────────────────────
 
@@ -14134,9 +14266,12 @@ async def _maybe_send_reminder():
 async def inactivity_check(request: Request):
     user = await get_current_user(request)
     _check_permission(user, "admin:settings")
+    # Sends to the calling user's own effective address (2026-09-06 — was a
+    # shared firm-wide field; see user_reminder_settings' migration comment).
     async with _db_pool.acquire() as conn:
-        settings = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
-    if not settings or not settings["recipient_email"]:
+        settings = await conn.fetchrow("SELECT * FROM user_reminder_settings WHERE user_id=$1", user["id"])
+    recipient = (settings["recipient_email"] if settings else None) or _own_email_or_none(user)
+    if not recipient:
         raise HTTPException(status_code=400, detail="No recipient email configured.")
 
     threshold = datetime.utcnow() - timedelta(days=14)
@@ -14167,7 +14302,7 @@ async def inactivity_check(request: Request):
         lines.append(f"  • [{ref}] {m['name']} — last activity: {last}")
     body = "\n".join(lines)
     sent = await send_reminder_email(
-        settings["recipient_email"],
+        recipient,
         f"Mutemo Desk — {len(inactive)} inactive matter(s)",
         body
     )

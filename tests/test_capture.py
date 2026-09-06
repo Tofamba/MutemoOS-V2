@@ -361,13 +361,15 @@ def test_practice_area_breakdown_excludes_the_sentinel_matter(monkeypatch):
 
 
 def test_inactivity_check_excludes_the_sentinel_matter(monkeypatch):
-    """inactivity_check() also needs a reminder_settings row with a
-    recipient_email before it will reach the matters query at all."""
+    """inactivity_check() also needs a user_reminder_settings row (or the
+    calling user's own account email) with a recipient_email before it will
+    reach the matters query at all -- per-user since 2026-09-06, see
+    user_reminder_settings' own migration comment."""
     from backend.main import inactivity_check
 
     class _Conn(_QueryCapturingConnection):
         async def fetchrow(self, query, *args):
-            if query.strip().startswith("SELECT * FROM reminder_settings"):
+            if query.strip().startswith("SELECT * FROM user_reminder_settings"):
                 return {"recipient_email": "partner@example.com"}
             return await super().fetchrow(query, *args)
 
