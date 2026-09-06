@@ -58,7 +58,7 @@
 .tiptap-editor [style*="text-align: center"] { text-align: center; }
 .tiptap-editor [style*="text-align: right"] { text-align: right; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 4px; padding: 0.5rem; background: var(--paper2); border: 1px solid var(--border); border-bottom: none; border-radius: 4px 4px 0 0; }
-.toolbar .tbar-btn { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 3px 7px; cursor: pointer; font-size: 0.8rem; font-family: 'Georgia', serif; color: var(--ink2); transition: all 0.1s; min-width: 28px; text-align: center; }
+.toolbar .tbar-btn { background: white; border: 1px solid var(--border); border-radius: 3px; padding: 3px 7px; cursor: pointer; font-size: 0.8rem; font-family: var(--font-sans); color: var(--ink2); transition: all 0.1s; min-width: 28px; text-align: center; }
 .toolbar .tbar-btn:hover { background: var(--paper3); border-color: var(--ink3); }
 .toolbar .tbar-btn.active { background: var(--green); color: white; border-color: var(--green); }
 .toolbar .tbar-sep { width: 1px; background: var(--border); margin: 2px 2px; }
@@ -146,6 +146,10 @@
 /* ── Reset & Base ── */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
+  /* Brand palette (unchanged hues — --green has always meant the
+     terracotta brand color, not literal green; kept as the canonical
+     name since hundreds of existing rules reference it, but --brand
+     below is the honestly-named alias new rules should reach for). */
   --green:#c45a1a;--green2:#d96b20;--green3:#e8803a;
   --gold:#b8922a;--gold2:#d4a832;--gold3:#f0c84a;
   --ink:#1a1a18;--ink2:#3d3d38;--ink3:#6b6b64;
@@ -153,10 +157,43 @@
   --white:#ffffff;--border:#d8d3c8;
   --red:#b83232;--blue:#1e4a7a;
   --radius:6px;--shadow:0 1px 3px rgba(0,0,0,0.08);
+
+  /* ── Design system additions (2026-09-06, visual refinement pass) ──
+     Additive only -- every existing var(--green)/var(--radius)/
+     var(--shadow) usage above keeps working unchanged. New rules
+     should prefer the semantic names below. */
+  --brand: var(--green);
+  --brand-dark: var(--green2);
+  --brand-light: #fdf0e8;
+  --success: #1a7f37;   /* genuine positive/complete states -- Cleared, Verified, Active */
+  --warning: var(--gold); /* attention/in-progress -- Review Due, Medium Risk, In Scope */
+  --danger: var(--red);   /* critical/overdue -- Overdue, High Risk, Action Required */
+  --info: var(--blue);    /* neutral-informational -- Awaiting Court, meetings */
+
+  --radius-sm: 4px;   /* controls */
+  --radius-md: 8px;   /* cards */
+  --radius-lg: 12px;  /* hero / major surfaces */
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+
+  --space-1: 4px; --space-2: 8px; --space-3: 12px;
+  --space-4: 16px; --space-5: 24px; --space-6: 32px;
+
+  /* Two typefaces, two jobs (2026-09-06): serif is CONTENT -- page
+     titles, matter/client names, report headings, drafted document
+     text. Sans is INTERFACE -- buttons, nav, form controls, table
+     headers, chips/badges, dates, reference numbers, metadata. Before
+     this, button/input/select/textarea/label/nav/chips/table headers
+     all inherited the same Georgia serif as matter names -- nothing
+     visually distinguished "this is the software" from "this is the
+     matter." System font stack, not a webfont -- no new network
+     dependency, and it already matches the OS UI the lawyer is used to. */
+  --font-serif: 'Georgia', 'Times New Roman', serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
-body{font-family:'Georgia',serif;background:var(--paper);color:var(--ink);min-height:100vh;font-size:15px;line-height:1.6}
-h1,h2,h3,h4{font-family:'Georgia',serif;font-weight:700;color:var(--ink)}
-button,input,select,textarea{font-family:'Georgia',serif}
+body{font-family:var(--font-serif);background:var(--paper);color:var(--ink);min-height:100vh;font-size:15px;line-height:1.6}
+h1,h2,h3,h4{font-family:var(--font-serif);font-weight:700;color:var(--ink)}
+button,input,select,textarea,label,.nav-btn,.chip,.card-title,th{font-family:var(--font-sans)}
 a{color:var(--green);text-decoration:none}
 
 /* ── Layout ── */
@@ -172,7 +209,7 @@ a{color:var(--green);text-decoration:none}
 
 /* ── Nav ── */
 .nav{background:var(--green2);display:flex;gap:0;border-bottom:2px solid var(--gold)}
-.nav-btn{background:none;border:none;color:rgba(255,255,255,0.7);padding:0.7rem 1.2rem;cursor:pointer;font-size:0.82rem;font-family:'Georgia',serif;letter-spacing:0.3px;transition:all 0.15s;display:flex;align-items:center;gap:6px;position:relative}
+.nav-btn{background:none;border:none;color:rgba(255,255,255,0.7);padding:0.7rem 1.2rem;cursor:pointer;font-size:0.82rem;font-family:var(--font-sans);letter-spacing:0.3px;transition:all 0.15s;display:flex;align-items:center;gap:6px;position:relative}
 .nav-btn:hover{color:white;background:rgba(255,255,255,0.07)}
 .nav-btn.active{color:white;background:rgba(255,255,255,0.12)}
 .nav-btn.active::after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;background:var(--gold3)}
@@ -201,13 +238,13 @@ a{color:var(--green);text-decoration:none}
 .form-group{margin-bottom:0.65rem}
 .form-group:last-child{margin-bottom:0}
 label{display:block;font-size:0.73rem;font-weight:700;color:var(--ink3);margin-bottom:0.28rem;letter-spacing:0.2px}
-input[type=text],input[type=date],input[type=time],input[type=email],select,textarea{width:100%;padding:0.45rem 0.65rem;border:1px solid var(--border);border-radius:4px;font-size:0.84rem;font-family:'Georgia',serif;color:var(--ink);background:var(--white);transition:border-color 0.15s}
+input[type=text],input[type=date],input[type=time],input[type=email],select,textarea{width:100%;padding:0.45rem 0.65rem;border:1px solid var(--border);border-radius:4px;font-size:0.84rem;font-family:var(--font-sans);color:var(--ink);background:var(--white);transition:border-color 0.15s}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 2px rgba(27,77,46,0.1)}
 textarea{resize:vertical;line-height:1.55}
 select{cursor:pointer}
 
 /* ── Buttons ── */
-.btn{display:inline-flex;align-items:center;gap:6px;padding:0.5rem 1rem;border:none;border-radius:4px;font-size:0.82rem;font-family:'Georgia',serif;cursor:pointer;transition:all 0.15s;font-weight:700}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:0.5rem 1rem;border:none;border-radius:4px;font-size:0.82rem;font-family:var(--font-sans);cursor:pointer;transition:all 0.15s;font-weight:700}
 .btn-primary{background:var(--green);color:white;width:100%;justify-content:center;margin-top:0.5rem;padding:0.65rem}
 .btn-primary:hover:not(:disabled){background:var(--green2)}
 .btn-primary:disabled{opacity:0.5;cursor:not-allowed}
@@ -218,6 +255,15 @@ select{cursor:pointer}
 .btn-sm{padding:0.3rem 0.65rem;font-size:0.75rem}
 .btn-danger{background:var(--red);color:white}
 .btn-danger:hover{background:#a02828}
+/* .btn-primary/.btn-gold both default to width:100% -- correct for a
+   form's own submit button (Save Compliance Info, Create Matter), wrong
+   for a primary action sitting in a page header next to a title (e.g.
+   "+ New Matter") -- that case has been getting the same class plus an
+   ad hoc inline `style="width:auto"` override at each call site (13+
+   places). .btn-compact is that override as a real, reusable modifier:
+   stack it alongside .btn-primary (`class="btn btn-primary btn-compact"`)
+   for any header-level action button. */
+.btn-compact{width:auto;margin-top:0;padding:0.5rem 1rem}
 
 /* ── Status ── */
 .status{padding:0.55rem 0.85rem;border-radius:4px;font-size:0.8rem;margin-bottom:0.75rem;display:none}
@@ -277,13 +323,21 @@ select{cursor:pointer}
 .note-delete{background:none;border:none;color:var(--ink3);cursor:pointer;font-size:0.75rem;padding:0;opacity:0.5;transition:opacity .15s}
 .note-delete:hover{opacity:1;color:var(--red)}
 
-/* ── Tags / Chips ── */
+/* ── Tags / Chips ──
+   chip-green used to render in the brand terracotta (var(--green) --
+   see that variable's own note: it has always meant terracotta, not
+   literal green), so every "Active"/"Cleared"/"Verified"/"Low risk"
+   chip in the app was rendering in the same orange as every button and
+   link -- never actually green, and inconsistent with dash-badge-green
+   (My Portfolio/Dashboard), which already used a real green. Fixed to
+   var(--success) so "genuinely positive" finally means the same color
+   everywhere it appears. */
 .chip{display:inline-block;font-size:0.65rem;padding:2px 8px;border-radius:12px;font-weight:700;letter-spacing:0.3px;margin-right:4px}
-.chip-green{background:#fde8d8;color:var(--green)}
+.chip-green{background:#dafbe1;color:var(--success)}
 .chip-gold{background:#f5ead0;color:var(--gold)}
-.chip-blue{background:#e0eaf5;color:var(--blue)}
+.chip-blue{background:#e0eaf5;color:var(--info)}
 .chip-gray{background:var(--paper2);color:var(--ink3)}
-.chip-red{background:#fde8e8;color:var(--red)}
+.chip-red{background:#fde8e8;color:var(--danger)}
 
 /* ── Search results ── */
 .search-result{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:0.75rem;overflow:hidden}
@@ -333,15 +387,27 @@ select{cursor:pointer}
 .actions-row .btn{flex:1}
 .doc-id{font-size:0.65rem;color:var(--ink3);text-align:right;margin-top:0.3rem}
 .tip{background:#fdf0e8;border:1px solid #e8c0a0;border-radius:4px;padding:0.65rem 0.85rem;font-size:0.75rem;color:var(--green);margin-top:0.75rem}
+/* .tip's bordered, brand-tinted box reads as important/warning-adjacent
+   -- right for an actual tip a lawyer should act on, wrong for a purely
+   informational aside (e.g. Vault's "documents are indexed for search"
+   note). .note-quiet is that lighter register: no border, no fill,
+   sans-serif metadata weight, just a muted line of text. */
+.note-quiet{font-size:0.72rem;color:var(--ink3);font-family:var(--font-sans);margin-top:0.6rem;line-height:1.5}
 .upcoming-banner{background:var(--green);color:white;border-radius:var(--radius);padding:0.85rem 1.1rem;margin-bottom:1rem;display:flex;align-items:center;gap:10px}
 .upcoming-banner .icon{font-size:1.3rem}
 .upcoming-banner strong{font-size:0.88rem}
 .upcoming-banner p{font-size:0.75rem;opacity:0.8;margin-top:2px}
 
-/* ── Dashboard tab (scoped — new tokens live here only, global :root untouched) ── */
+/* ── Dashboard tab (scoped — new tokens live here only, global :root untouched) ──
+   2026-09-06: these used to be an actual forest green (#1b4d2e), a second,
+   competing brand palette that made the Dashboard tab render in a visibly
+   different color scheme than every other screen (header, buttons, nav
+   all terracotta). Repointed to the real brand tokens -- every rule below
+   that consumes --dash-green/--dash-shadow/etc. picks up the fix through
+   this one indirection, no other line in this block needed to change. */
 .dashboard-scope{
-  --dash-green:#1b4d2e;--dash-green-mid:#2d7a4f;--dash-green-light:#e9f0eb;
-  --dash-radius-lg:12px;--dash-radius-md:8px;--dash-shadow:0 2px 8px rgba(0,0,0,0.05);
+  --dash-green:var(--brand);--dash-green-mid:var(--brand-dark);--dash-green-light:var(--brand-light);
+  --dash-radius-lg:var(--radius-lg);--dash-radius-md:var(--radius-md);--dash-shadow:var(--shadow-md);
 }
 .dash-hero{background:linear-gradient(135deg,var(--dash-green),var(--dash-green-mid));color:white;border-radius:var(--dash-radius-lg);padding:1.4rem 1.6rem;margin-bottom:1.25rem;box-shadow:var(--dash-shadow)}
 .dash-hero h2{color:white;font-size:1.3rem;margin-bottom:3px}
@@ -362,10 +428,10 @@ select{cursor:pointer}
 .dash-row-main{flex:1;min-width:0}
 .dash-row-title{font-size:0.84rem;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dash-row-meta{font-size:0.72rem;color:var(--ink3);margin-top:2px}
-.dash-badge{display:inline-flex;align-items:center;gap:4px;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.2px}
-.dash-badge-green{background:#dafbe1;color:#1a7f37}
-.dash-badge-red{background:#fde8e8;color:#b83232}
-.dash-badge-blue{background:#e0eaf5;color:#1e4a7a}
+.dash-badge{display:inline-flex;align-items:center;gap:4px;font-size:0.68rem;font-weight:700;padding:3px 9px;border-radius:20px;letter-spacing:0.2px;font-family:var(--font-sans)}
+.dash-badge-green{background:#dafbe1;color:var(--success)}
+.dash-badge-red{background:#fde8e8;color:var(--danger)}
+.dash-badge-blue{background:#e0eaf5;color:var(--info)}
 .dash-empty{font-size:0.8rem;color:var(--ink3);padding:0.5rem 0}
 </style>
 </head>
@@ -775,7 +841,7 @@ select{cursor:pointer}
   <!-- Matters Search -->
   <div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center">
     <input type="text" id="matters-search" placeholder="🔍 Search matters by name, client, or reference…"
-      style="flex:1;padding:0.6rem 0.85rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit"
+      style="flex:1;padding:0.6rem 0.85rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:var(--font-sans)"
       oninput="filterMatters(this.value)"/>
     <span id="matters-count" style="font-size:0.75rem;color:var(--ink3);white-space:nowrap"></span>
   </div>
@@ -807,7 +873,7 @@ select{cursor:pointer}
 
     <div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center">
       <input type="text" id="clients-search" placeholder="🔍 Search clients by name, email, phone, or ID/registration number…"
-        style="flex:1;padding:0.6rem 0.85rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:inherit"
+        style="flex:1;padding:0.6rem 0.85rem;border:1px solid var(--border);border-radius:6px;font-size:0.85rem;font-family:var(--font-sans)"
         oninput="filterClients(this.value)"/>
       <span id="clients-count" style="font-size:0.75rem;color:var(--ink3);white-space:nowrap"></span>
     </div>
@@ -3186,7 +3252,7 @@ function renderClientDetailContent(client) {
     <div id="link-matter-picker-${client.id}" style="display:none;margin-bottom:0.75rem">
       <input type="text" id="link-matter-search-${client.id}" placeholder="🔍 Search matters to link…"
         oninput="filterLinkMatterOptions('${client.id}', this.value)"
-        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.8rem;margin-bottom:0.4rem;font-family:inherit"/>
+        style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.8rem;margin-bottom:0.4rem;font-family:var(--font-sans)"/>
       <select id="link-matter-select-${client.id}" onchange="onLinkMatterSelectChange('${client.id}')"
         style="width:100%;padding:0.5rem 0.75rem;border:1px solid var(--border);border-radius:6px;font-size:0.8rem">
       </select>
