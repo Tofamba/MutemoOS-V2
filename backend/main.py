@@ -4588,34 +4588,6 @@ async def health():
         "dependencies": deps,
     }
 
-@app.get("/api/admin/verify-user-reminder-settings")
-async def _TEMP_verify_user_reminder_settings(request: Request):
-    """
-    TEMP, read-only, admin-token-gated -- real-data verification for the
-    2026-09-06 notification-bleed fix (commit 1d174d6). Confirms each real
-    user now has their own independent user_reminder_settings row keyed by
-    user_id, with the correct effective (explicit-or-own-email) recipient,
-    and that the migration backfill only granted enabled/hour continuity to
-    whichever user's real account email actually matched the old shared
-    value. Removed once verified on staging/production.
-    """
-    require_admin_token(request)
-    async with _db_pool.acquire() as conn:
-        old_shared = await conn.fetchrow("SELECT * FROM reminder_settings WHERE firm_id=$1", FIRM_ID)
-        rows = await conn.fetch("""
-            SELECT u.id AS user_id, u.email AS account_email, u.display_name, u.role,
-                   urs.enabled, urs.recipient_email, urs.send_hour_utc, urs.last_run_date,
-                   urs.digest_enabled, urs.digest_recipient_email, urs.digest_send_hour_utc, urs.digest_last_run_date
-            FROM users u
-            LEFT JOIN user_reminder_settings urs ON urs.user_id = u.id
-            WHERE u.firm_id=$1
-            ORDER BY u.display_name
-        """, FIRM_ID)
-    return {
-        "old_shared_reminder_settings_row": dict(old_shared) if old_shared else None,
-        "per_user_settings": [dict(r) for r in rows],
-    }
-
 @app.post("/api/admin/reindex")
 async def reindex_semantic_search(request: Request):
     require_admin_token(request)
