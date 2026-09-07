@@ -37,9 +37,11 @@ function's FakeConnection doesn't need).
 """
 
 import asyncio
+import io
 import uuid
 from datetime import date, datetime, timezone
 
+import pdfplumber
 import pytest
 from fastapi import HTTPException
 
@@ -834,6 +836,44 @@ def _csv_rows(response):
     return list(csv.reader(io.StringIO(text)))
 
 
+def _pdf_tables_by_header(response):
+    """Every section of this report is its own separate bordered table
+    (own heading, own header row, own column widths) -- not one big
+    table spanning the page the way Matter AML Status's report is, so
+    pdfplumber's extract_tables() row-clustering (which broke down on
+    that report's 22-row scale) is reliable here: each section typically
+    has only a few rows. Keyed by the header row tuple -- but that
+    alone doesn't uniquely identify a section: Sections 1 (Overall
+    Compliance Position), 5 (PEP/Risk) and 6 (Conflict Check) all use
+    the identical ("Item", "Status") header, so this returns a LIST of
+    tables per header (use _table_with_item() below to pick out the
+    right one by its actual row content, not by header alone)."""
+    tables = {}
+    with pdfplumber.open(io.BytesIO(response.body)) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                if not table:
+                    continue
+                header = tuple(table[0])
+                rows = [
+                    [" ".join((cell or "").split()) for cell in row]
+                    for row in table[1:]
+                ]
+                tables.setdefault(header, []).append(rows)
+    return tables
+
+
+def _table_with_item(tables_for_header, item_label):
+    """Given the list of same-header tables from _pdf_tables_by_header(),
+    return the one row list that actually contains a row whose first
+    cell is item_label -- disambiguates Sections 1/5/6's shared
+    ("Item", "Status") header by content instead."""
+    for rows in tables_for_header:
+        if any(row[0] == item_label for row in rows):
+            return rows
+    raise AssertionError(f"No ('Item', 'Status') table contains a row for {item_label!r}")
+
+
 def test_csv_export_includes_all_nine_sections(monkeypatch):
     import backend.main as m
     client_id = uuid.uuid4()
@@ -913,3 +953,166 @@ def test_pdf_export_handles_empty_sections_without_crashing(monkeypatch):
 
     assert response.media_type == "application/pdf"
     assert response.body.startswith(b"%PDF")
+
+
+# ── PDF formatting fixes (2026-09-07, full-report review) ──────────────────
+# Sections 3, 5, 7, 8 and 9 carried genuinely open-ended free text
+# squeezed into equal-width, unwrapped _mp_pdf_table() columns --
+# confirmed truncating with an ellipsis on real staging data (20 real
+# clients), not just theoretically. Each now wraps its own free-text
+# column(s) via _CDD_SECTION_LAYOUT instead. Sections 1, 2, 4 are a
+# known, deferred follow-up (see _CDD_SECTION_LAYOUT's own comment) --
+# not covered here since they weren't touched.
+
+def test_pdf_export_wraps_long_beneficial_ownership_basis(monkeypatch):
+    """Real bug: Basis (ownership_or_control_basis) is unbounded free
+    text squeezed into one of 5 equal-width columns -- confirmed
+    truncating on real staging data even at ~40-50 chars, well under
+    what a naive length-based check would flag (Section 3's columns are
+    narrower than a 2-column section's)."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    long_basis = "70% shareholding and executive director with day-to-day control of operations"
+    owner = _owner(client_id, owner_name="Gershom Sabri", ownership_percentage=70,
+                    ownership_or_control_basis=long_basis, verification_status="Verified")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], owners=[owner]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+    tables = _pdf_tables_by_header(response)
+    bo_rows = tables[("Name", "Nationality", "Ownership", "Basis", "Verification")][0]
+
+    assert len(bo_rows) == 1
+    assert bo_rows[0][3] == long_basis
+    assert not bo_rows[0][3].endswith("...")
+
+
+def test_pdf_export_wraps_long_source_of_wealth_and_funds(monkeypatch):
+    """The originally-reported bug: Source of Wealth/Source of Funds,
+    both unbounded TEXT, share Section 5's ("Item", "Status") table with
+    Sections 1 and 6 -- disambiguated by row content since all three
+    sections render an identical header."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    long_wealth = (
+        "Company profits accumulated from investment holdings and "
+        "portfolio management activities since incorporation"
+    )
+    long_funds = "Client payments from investment advisory and portfolio management contracts"
+    compliance = _compliance(client_id, source_of_wealth=long_wealth, source_of_funds=long_funds)
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance={client_id: compliance}))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+    tables = _pdf_tables_by_header(response)[("Item", "Status")]
+    pep_rows = _table_with_item(tables, "Source of Wealth")
+    by_item = {row[0]: row[1] for row in pep_rows}
+
+    assert by_item["Source of Wealth"] == long_wealth
+    assert by_item["Source of Funds"] == long_funds
+    assert not by_item["Source of Wealth"].endswith("...")
+    assert not by_item["Source of Funds"].endswith("...")
+
+
+def test_pdf_export_wraps_long_matter_name_and_reason_for_aml_scope(monkeypatch):
+    """Same aml_scope_reason field, and the same number+name Matter
+    combination, already fixed once in the Matter AML Status report --
+    this report renders its own separate Section 7 table and had the
+    identical unfixed bug."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    long_name = "Estate Late Tendekai Mafuta — Winding up estate, letters of administration"
+    long_reason = "Purchase of mining claims from PEP who wants payment offshore, requires enhanced due diligence"
+    matter = _matter(client_id, name=long_name, number="TC-001-01",
+                      aml_scope="InScope", aml_scope_reason=long_reason, matter_risk="High")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], matters=[matter]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+    tables = _pdf_tables_by_header(response)
+    matter_rows = tables[("Matter", "Status", "AML Scope", "Reason for AML Scope", "Matter Risk")][0]
+
+    assert len(matter_rows) == 1
+    assert matter_rows[0][0] == f"TC-001-01 - {long_name.replace(chr(8212), '-')}"
+    assert matter_rows[0][3] == long_reason
+    assert not matter_rows[0][0].endswith("...")
+    assert not matter_rows[0][3].endswith("...")
+
+
+def test_pdf_export_wraps_long_document_filename(monkeypatch):
+    """Confirmed on real data (Mould Enterprises): a real matter-linked
+    document's filename truncated in the "File" column. A filename has
+    no natural word-break points, so fpdf2's wrap force-splits it
+    mid-word with no separator (confirmed: every character survives,
+    just split across two lines) -- _pdf_tables_by_header()'s
+    space-joining collapse can't tell that artifact apart from a real
+    space, so the comparison below strips spaces from both sides rather
+    than asserting exact equality (a real filename never legitimately
+    contains one anyway)."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    matter = _matter(client_id)
+    long_filename = "Mould_Enterprises_Court_Order_Boundary_Dispute_Ruling_2026.docx"
+    doc = _document(matter_id=matter["id"], filename=long_filename, document_type="Court Order")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], matters=[matter], documents=[doc]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+    tables = _pdf_tables_by_header(response)
+    doc_rows = tables[("Document", "Category", "Status", "File")][0]
+
+    assert len(doc_rows) == 1
+    assert doc_rows[0][3].replace(" ", "") == long_filename
+    assert not doc_rows[0][3].endswith("...")
+
+
+def test_pdf_export_wraps_long_compliance_history_review_note(monkeypatch):
+    """Confirmed on real data (Farai Zvenyika, Mould Enterprises): a CDD
+    review's changes_identified text, appended to the Result column by
+    _row_to_cdd_review_event(), truncating independently of the
+    arrow-character issue covered below."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id)
+    long_note = "Client is appointed as director of Fox Mining Group effective 01 September 2026, requiring AML re-assessment"
+    review = _cdd_review_row(client_id, risk_rating="Low", changes_identified=long_note)
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], cdd_reviews=[review]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+    tables = _pdf_tables_by_header(response)
+    history_rows = tables[("Date", "Event", "User", "Result")][0]
+
+    assert len(history_rows) == 1
+    assert history_rows[0][3] == f"Complete - risk Low; {long_note}"
+    assert not history_rows[0][3].endswith("...")
+
+
+def test_pdf_export_renders_arrow_as_plain_ascii_not_garbled(monkeypatch):
+    """Real encoding bug found across all 20 real staging clients (59
+    arrow-bearing values, 100% garbled): _row_to_compliance_event()
+    builds "old -> new" strings with a real right-arrow character (→),
+    which fpdf2's latin-1-only Helvetica can't render -- _pdf_safe()
+    degraded it to "?" with no plain-ASCII substitute. Fixed at the
+    source (_pdf_safe()'s own substitution table) rather than patched
+    at this one call site."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    matter = _matter(client_id)
+    client = _client_row(client_id)
+    log = _audit_log("MATTER", matter["id"], "MATTER_AML_SCOPE_SET",
+                      {"old": "NotAssessed", "new": "InScope"}, actor_name="Compliance Officer")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], matters=[matter], audit_logs=[log]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+    tables = _pdf_tables_by_header(response)
+    history_rows = tables[("Date", "Event", "User", "Result")][0]
+
+    assert len(history_rows) == 1
+    assert history_rows[0][3] == "Not Assessed -> In Scope"
+    assert "?" not in history_rows[0][3]

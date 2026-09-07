@@ -5980,9 +5980,43 @@ def _client_cdd_report_csv(report: dict) -> str:
         writer.writerow([])
     return buf.getvalue()
 
+# 2026-09-07, real formatting review (20 real staging clients): every
+# section below rendered through equal-width, unwrapped _mp_pdf_table()
+# columns, and five of them carry genuinely open-ended free text backed
+# by unbounded TEXT columns -- confirmed truncating with an ellipsis in
+# real client data (not just theoretically): Beneficial Ownership's
+# Basis (4 clients), PEP/Risk's Source of Wealth/Funds (3 clients),
+# Matters' Matter name and Reason for AML Scope (most clients with any
+# matter), Supporting Document Index's File, and Compliance History's
+# Result (both the arrow-based change strings -- see _pdf_safe()'s own
+# 2026-09-07 note -- and long CDD-review change notes, independently).
+# Each gets its free-text column(s) wrapped (wrap_cols) instead of
+# truncated, widened at its own short/fixed-enum columns' expense.
+#
+# DEFERRED, not fixed here: Sections 1 (Overall Compliance Position --
+# the "Outstanding" row joins multiple missing-item labels with "; ",
+# unbounded in principle), 2 (Client Identification -- address fields
+# are also unbounded TEXT) and 4 (Person Acting for Client --
+# authority_basis is unbounded TEXT too) carry the same structural risk
+# but no real client's data pushes them past their equal-width limit
+# yet. Tracked as a known follow-up rather than fixed preemptively,
+# since this report needs to ship now -- revisit if a real client's
+# data ever visibly truncates in one of these three.
+_CDD_SECTION_LAYOUT = {
+    "3. Beneficial Ownership":        {"col_pcts": (18, 14, 10, 40, 18), "wrap_cols": {3}},   # Basis
+    "5. PEP / Risk Assessment":       {"col_pcts": (25, 75),             "wrap_cols": {1}},   # Status
+    "7. Matters for this Client":     {"col_pcts": (30, 12, 13, 32, 13), "wrap_cols": {0, 3}},  # Matter, Reason
+    "8. Supporting Document Index":   {"col_pcts": (30, 15, 15, 40),     "wrap_cols": {3}},   # File
+    "9. Compliance History":          {"col_pcts": (12, 24, 16, 48),     "wrap_cols": {3}},   # Result
+}
+
 def _build_client_cdd_pdf(report: dict) -> bytes:
     """Reuses _mp_pdf_table() for every section -- same bordered-table
-    renderer every other AML report's PDF export already uses."""
+    renderer every other AML report's PDF export already uses. Sections
+    named in _CDD_SECTION_LAYOUT get that section's own column widths
+    and wrap_cols; every other section keeps the original equal-width,
+    unwrapped layout (see _CDD_SECTION_LAYOUT's own comment for which
+    sections are deliberately deferred, not overlooked)."""
     from fpdf import FPDF
     c = report["client"]
     pdf = FPDF(orientation="P", unit="mm", format="A4")
@@ -6002,8 +6036,15 @@ def _build_client_cdd_pdf(report: dict) -> bytes:
         pdf.set_font("Helvetica", "B", 11)
         pdf.cell(0, 7, _pdf_safe(section["title"]), new_x="LMARGIN", new_y="NEXT")
         if section["rows"]:
-            col_widths = [usable_width / len(section["headers"])] * len(section["headers"])
-            _mp_pdf_table(pdf, section["headers"], col_widths, [[str(v) for v in row] for row in section["rows"]])
+            layout = _CDD_SECTION_LAYOUT.get(section["title"])
+            if layout:
+                col_widths = [pct * usable_width / 100 for pct in layout["col_pcts"]]
+                wrap_cols = layout["wrap_cols"]
+            else:
+                col_widths = [usable_width / len(section["headers"])] * len(section["headers"])
+                wrap_cols = None
+            _mp_pdf_table(pdf, section["headers"], col_widths, [[str(v) for v in row] for row in section["rows"]],
+                          wrap_cols=wrap_cols)
         else:
             pdf.set_font("Helvetica", "I", 9)
             pdf.cell(0, 6, "None recorded.", new_x="LMARGIN", new_y="NEXT")
@@ -7392,6 +7433,17 @@ def _pdf_safe(text: str) -> str:
     plain-ASCII substitute; anything else outside latin-1 (e.g. an
     accented name) degrades to "?" via latin-1's replace mode rather than
     crashing the whole export over one character.
+
+    2026-09-07: added the right-arrow (→) here, at the source, rather
+    than patching just the one call site that surfaced it -- the
+    Individual Client AML/CDD Report's Compliance History section builds
+    "old → new" change strings (_row_to_compliance_event()) that were
+    silently degrading to "old ? new" in every PDF export, confirmed
+    across all 20 real staging clients (59 arrow-bearing values, 100%
+    garbled in the PDF, all correct in the CSV since that's real UTF-8).
+    Fixing it here means any FUTURE caller that builds an arrow into a
+    PDF-bound string gets the same protection automatically, without
+    needing to remember this latin-1 limitation itself.
     """
     if not text:
         return ""
@@ -7400,6 +7452,7 @@ def _pdf_safe(text: str) -> str:
         "‘": "'", "’": "'",       # curly single quotes
         "“": '"', "”": '"',       # curly double quotes
         "…": "...",                    # ellipsis
+        "→": "->", "←": "<-",     # right/left arrow
     }
     for char, replacement in substitutions.items():
         text = text.replace(char, replacement)
