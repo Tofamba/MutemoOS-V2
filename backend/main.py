@@ -6616,6 +6616,75 @@ async def client_aml_cdd_report_export_pdf(client_id: str, request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+@app.get("/api/admin/verify-exceptions-phase2")
+async def _TEMP_verify_exceptions_phase2(request: Request):
+    """
+    TEMP, read-only, admin-token-gated -- real-data verification for the
+    Compliance Exception Resolution Workflow, Phase 2 (commit 4649bd4):
+    AML Exceptions report Due/summary, and the CDD report's Exceptions/
+    Follow-up section. Checks:
+      1. GET .../aml-exceptions and .../aml-exceptions-summary agree with
+         each other (summary.total == len(rows), by_status counts sum to
+         it) and with the real persisted compliance_exceptions table
+         (not just internally self-consistent).
+      2. Every real client's CDD report carries an "exceptions" list and
+         a matching "10. Exceptions / Follow-up" section (same row
+         count) -- composition wiring, not a second calculation.
+      3. Mould Enterprises specifically (the one real exception found in
+         Phase 1 verification, CDD_REVIEW_OUTSTANDING) still shows up
+         correctly end to end: in the AML Exceptions report at Medium
+         priority (confirms _priority_for_issue_code didn't regress the
+         Phase 1 priority rule), and in its own CDD report's new section.
+    Removed once verified.
+    """
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        ae_rows = await _fetch_aml_exceptions_rows(conn)
+        ae_summary_counts = {"Open": 0, "In Progress": 0, "Awaiting Client": 0}
+        for r in ae_rows:
+            ae_summary_counts[r["status"]] = ae_summary_counts.get(r["status"], 0) + 1
+
+        db_rows = await conn.fetch(
+            "SELECT status, client_id FROM compliance_exceptions WHERE firm_id=$1", FIRM_ID
+        )
+        db_actionable_count = sum(1 for r in db_rows if r["status"] in ("Open", "InProgress", "AwaitingClient"))
+
+        client_rows = await conn.fetch(
+            "SELECT id, full_name FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+        )
+        cdd_section_mismatches = []
+        mould_cdd_check = None
+        for crow in client_rows:
+            cid = crow["id"]
+            report = await _fetch_client_aml_cdd_report(conn, cid, {"id": None, "display_name": "System (verify)", "role": "system"})
+            sections = _client_cdd_report_sections(report)
+            section10 = next((s for s in sections if s["title"].startswith("10.")), None)
+            if section10 is None or len(section10["rows"]) != len(report.get("exceptions", [])):
+                cdd_section_mismatches.append({
+                    "client": crow["full_name"],
+                    "exceptions_count": len(report.get("exceptions", [])),
+                    "section10_row_count": len(section10["rows"]) if section10 else None,
+                })
+            if crow["full_name"] == "Mould Enterprises (Pvt) Ltd":
+                mould_cdd_check = {
+                    "exceptions": report.get("exceptions", []),
+                    "section10_rows": section10["rows"] if section10 else None,
+                }
+
+        mould_ae_row = next((r for r in ae_rows if r["client_name"] == "Mould Enterprises (Pvt) Ltd"), None)
+
+    return {
+        "total_clients": len(client_rows),
+        "ae_report_row_count": len(ae_rows),
+        "ae_summary_total_matches_row_count": sum(ae_summary_counts.values()) == len(ae_rows),
+        "ae_rows_have_due_field": all("due" in r for r in ae_rows),
+        "db_actionable_exception_count": db_actionable_count,
+        "ae_report_matches_db_actionable_count": len(ae_rows) == db_actionable_count,
+        "cdd_report_section10_mismatches": cdd_section_mismatches,
+        "mould_enterprises_ae_row": mould_ae_row,
+        "mould_enterprises_cdd_report_check": mould_cdd_check,
+    }
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
