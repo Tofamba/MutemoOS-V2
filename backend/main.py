@@ -8209,18 +8209,29 @@ async def matter_aml_status_report_export_pdf(request: Request):
         pdf.cell(0, 6, "No matters on file.", new_x="LMARGIN", new_y="NEXT")
     else:
         usable_width = pdf.w - pdf.l_margin - pdf.r_margin
-        # Reason (index 4) is genuinely open-ended compliance free text --
-        # e.g. "Purchase of mining claims from PEP who declared beneficial
-        # ownership through a trust structure..." -- and was truncating
-        # mid-sentence at the old 21%/single-line layout (2026-09-07 real
-        # formatting bug). Widened at Client/Matter's expense and wrapped
-        # onto multiple lines (wrap_cols) instead of an ellipsis, since an
-        # ellipsis would hide real compliance-relevant text, not just a
-        # long name.
-        col_pcts = (14, 22, 11, 11, 32, 10)
+        # Client (0), Matter (1) and Reason (4) all wrap onto multiple
+        # lines (wrap_cols) instead of truncating with an ellipsis --
+        # Reason for the same reason as the 2026-09-07 fix (genuinely
+        # open-ended compliance free text); Client and Matter added the
+        # same day once real staging data showed both truncating just as
+        # badly -- a real client name ("Nyaradzo Construction &
+        # Engineering (Pvt) Ltd") and a real matter description ("Mining
+        # claim boundary dispute - HC 452/26") both cut off mid-word at
+        # the original single-line layout. AML Scope/Matter Risk/Matter
+        # Status are left untouched (still single-line, unwrapped, same
+        # 11/11/10 widths) -- they're short, fixed enumerated labels
+        # ("Not Assessed" is the longest any of them ever renders), never
+        # free text, so there's nothing there to truncate or wrap.
+        # Client/Matter/Reason's combined 68% is redistributed among
+        # just the three of them (14/22/32 -> 16/24/28): Reason gives up
+        # some width to fund Client and Matter's increase, but keeps far
+        # more room than its original pre-fix 21% -- and since all three
+        # now wrap, none needs to be huge to avoid truncation, just
+        # enough to keep the average row to 2-3 lines rather than 5+.
+        col_pcts = (16, 24, 11, 11, 28, 10)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_matter_aml_export_row(r) for r in rows]
-        _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={4})
+        _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4})
 
     filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(

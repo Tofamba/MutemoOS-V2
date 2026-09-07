@@ -30,6 +30,7 @@ from fastapi import HTTPException
 
 from backend.main import (
     FIRM_ID,
+    _MATTER_AML_HEADERS,
     matter_aml_status_report,
     matter_aml_status_report_export,
     matter_aml_status_report_export_pdf,
@@ -102,6 +103,23 @@ def _partner():
 def _pdf_text(response):
     with pdfplumber.open(io.BytesIO(response.body)) as pdf:
         return "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+
+def _pdf_table_rows(response):
+    """Real per-column cell text via pdfplumber's ruling-line-based table
+    extraction, not a flat-text substring check -- necessary once more
+    than one column in the same row wraps onto multiple lines (Client,
+    Matter, Reason all do), since flat-text extraction reads purely by
+    page position and interleaves whichever wrapped lines from different
+    columns happen to share a row band. Table extraction uses the real
+    drawn cell borders instead, so each returned cell is genuinely just
+    that column's own text, with internal wraps as literal newlines."""
+    rows = []
+    with pdfplumber.open(io.BytesIO(response.body)) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                rows.extend(table)
+    return rows
 
 
 # ── permission gate ──────────────────────────────────────────────────────
@@ -323,26 +341,57 @@ def test_pdf_export_does_not_truncate_long_reason_text(monkeypatch):
     _as_current_user(monkeypatch, m, _partner())
 
     response = asyncio.run(matter_aml_status_report_export_pdf(_fake_request()))
-    # Collapse wrapped-line newlines into spaces for a substring check. Note:
-    # pdfplumber's plain-text extraction places words purely by page
-    # position, so the short single-line Matter Status value ("Active"),
-    # which sits on the same visual row as the Reason column's first
-    # wrapped line, gets interleaved right after it -- a real artifact of
-    # extracting a multi-column table as flat text, not of the PDF's
-    # actual (correct) rendering. Asserting on the text in two chunks
-    # split around that one splice point still proves every character of
-    # the reason survived, with nothing missing or truncated.
-    text = " ".join(_pdf_text(response).split())
+    # Real per-column cell text via pdfplumber's ruling-line-based table
+    # extraction (not a flat-text substring check) -- necessary once more
+    # than one column in the same row wraps (Client/Matter/Reason all
+    # do): flat-text extraction reads purely by page position and
+    # interleaves whichever wrapped lines from different columns happen
+    # to share a row band, which isn't a rendering defect, just an
+    # artifact of reading a bordered table as a flat text stream. Table
+    # extraction uses the real drawn borders instead, so each cell
+    # returned is genuinely just that column's own text.
+    rows = _pdf_table_rows(response)
+    reason_col = _MATTER_AML_HEADERS.index("Reason")
+    reasons = [" ".join(row[reason_col].split()) for row in rows[1:]]  # skip header row
 
-    assert "Purchase of mining claims from PEP who declared beneficial" in text
-    assert (
-        "ownership through a trust structure requiring enhanced due "
-        "diligence and ongoing monitoring of the underlying trust deed."
-    ) in text
-    assert "Sale of immoveable property. Buyer lives in a high-risk jurisdiction" in text
-    assert (
-        "per the FIU advisory list, so source-of-funds documentation was "
-        "requested and verified before instruction."
-    ) in text
-    assert "PEP who ..." not in text
-    assert "lives i..." not in text
+    assert long_reason in reasons
+    assert other_long_reason in reasons
+    assert not any(r.endswith("...") for r in reasons)
+
+
+def test_pdf_export_does_not_truncate_long_client_or_matter_text(monkeypatch):
+    """Real formatting bug (2026-09-07, follow-up to the Reason fix above):
+    Client and Matter were the same single-line, ellipsis-truncated
+    layout -- a real staging row for "Nyaradzo Construction &
+    Engineering (Pvt) Ltd" / "Mining claim boundary dispute - HC 452/26"
+    was visibly cut off ("Nyaradzo Construction & Engineeri..."). Both
+    columns now wrap the same way Reason does."""
+    import backend.main as m
+    client_name = "Nyaradzo Construction & Engineering (Pvt) Ltd"
+    matter_name = "Mining claim boundary dispute - HC 452/26"
+    matter_number = "NC-452-01"
+    matters = [
+        _matter(
+            client_name=client_name, name=matter_name, matter_number=matter_number,
+            aml_scope="InScope", matter_risk="High",
+            aml_scope_reason="Mining rights dispute involves a PEP-adjacent counterparty.",
+        ),
+    ]
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=matters))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(matter_aml_status_report_export_pdf(_fake_request()))
+    rows = _pdf_table_rows(response)
+    client_col = _MATTER_AML_HEADERS.index("Client")
+    matter_col = _MATTER_AML_HEADERS.index("Matter")
+    data_row = rows[1]
+
+    client_cell = " ".join(data_row[client_col].split())
+    matter_cell = " ".join(data_row[matter_col].split())
+
+    assert client_cell == client_name
+    # _pdf_safe() substitutes the em-dash for a plain "-" -- fpdf2's core
+    # Helvetica font is latin-1 only, same as every other PDF export here.
+    assert matter_cell == f"{matter_number} - {matter_name}"
+    assert not client_cell.endswith("...")
+    assert not matter_cell.endswith("...")
