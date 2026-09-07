@@ -79,6 +79,13 @@ class FakeConnection:
         self.matters = []
         self.audit_logs = []  # captured INSERT INTO audit_logs calls -- see Part C tests below
         self.cdd_reviews = []  # client_id -> [review dict, ...] -- see CDD Review tests below
+        # Compliance Exception Resolution Workflow (2026-09-07) -- neither
+        # update_client_compliance() nor update_beneficial_owner() cares
+        # about exceptions themselves, but both now call
+        # _sync_compliance_exceptions_for_client() as part of their real
+        # behavior, so this fixture needs to answer its queries even though
+        # no test in this file asserts on compliance_exceptions content.
+        self.compliance_exceptions = []
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -159,6 +166,14 @@ class FakeConnection:
                 row[col] = val
             return dict(row)
 
+        if q.startswith("SELECT review_date, status, changes_identified FROM cdd_reviews"):
+            firm_id, cid = args
+            matching = [r for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid]
+            if not matching:
+                return None
+            latest = max(matching, key=lambda r: (r["review_date"], r.get("created_at") or datetime.min.replace(tzinfo=timezone.utc)))
+            return {k: latest[k] for k in ("review_date", "status", "changes_identified")}
+
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
     async def fetch(self, query, *args):
@@ -181,6 +196,10 @@ class FakeConnection:
         if q.startswith("SELECT * FROM calendar_events WHERE matter_id = ANY($1)"):
             return []
 
+        if q.startswith("SELECT * FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2"):
+            firm_id, cid = args
+            return [dict(e) for e in self.compliance_exceptions if e["firm_id"] == firm_id and e["client_id"] == cid]
+
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def fetchval(self, query, *args):
@@ -200,6 +219,27 @@ class FakeConnection:
                 "action": action, "target_type": target_type, "target_id": target_id,
                 "details": json.loads(details) if details else {},
             })
+        elif q.startswith("INSERT INTO compliance_exceptions"):
+            firm_id, cid, issue_code, issue_label, responsible_user_id = args
+            self.compliance_exceptions.append({
+                "id": uuid.uuid4(), "firm_id": firm_id, "client_id": cid,
+                "issue_code": issue_code, "issue_label": issue_label, "status": "Open",
+                "responsible_user_id": responsible_user_id, "due_date": None, "notes": None,
+                "closed_reason": None, "resolved_at": None, "closed_at": None,
+                "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+            })
+        elif q.startswith("UPDATE compliance_exceptions SET status='Open'"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["status"] = "Open"
+                    e["issue_label"] = issue_label
+                    e["resolved_at"] = None
+        elif q.startswith("UPDATE compliance_exceptions SET issue_label=$1"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["issue_label"] = issue_label
         return "OK"
 
 
@@ -675,9 +715,18 @@ def test_update_beneficial_owner_logs_bo_verified_on_real_transition(monkeypatch
     ))
 
     logs = pool.conn.audit_logs
-    assert len(logs) == 1
-    assert logs[0]["action"] == "BO_VERIFIED"
-    assert logs[0]["details"]["owner_name"] == "Tendai Moyo"
+    # This client has no client_compliance row at all yet, so the same
+    # update_beneficial_owner() call's own compliance-exception sync
+    # (2026-09-07) also opens real exceptions for this client's other,
+    # genuinely-still-missing items on first contact -- a real, separate
+    # concern covered by its own test file, not asserted on here; this
+    # test only cares that BO_VERIFIED itself logs correctly and that
+    # nothing else UNEXPECTED leaked in alongside it.
+    bo_logs = [l for l in logs if l["action"] == "BO_VERIFIED"]
+    assert len(bo_logs) == 1
+    assert bo_logs[0]["details"]["owner_name"] == "Tendai Moyo"
+    other_actions = {l["action"] for l in logs if l["action"] != "BO_VERIFIED"}
+    assert other_actions <= {"COMPLIANCE_EXCEPTION_OPENED"}
 
 
 def test_update_beneficial_owner_no_op_repatch_to_verified_logs_nothing(monkeypatch):
@@ -818,7 +867,13 @@ def test_update_client_compliance_logs_risk_rating_changed_with_old_and_new(monk
 
 def test_update_client_compliance_unrelated_field_logs_nothing(monkeypatch):
     """A PATCH that only touches a field with no compliance-history event
-    of its own (source_of_wealth) must not log anything at all."""
+    of its own (source_of_wealth) must not log a compliance-history event
+    of its own. This client has no client_compliance row at all yet, so
+    the same PATCH's own compliance-exception sync (2026-09-07) legitimately
+    opens real exceptions for this client's other, genuinely-still-missing
+    items on first contact -- a real, separate concern covered by its own
+    test file, not asserted on here; this test only cares that nothing
+    UNEXPECTED (i.e. not one of this new engine's own events) leaked in."""
     client = _client_row(m.FIRM_ID, client_type="Individual")
     pool = FakePool(clients=[client])
     monkeypatch.setattr(m, "_db_pool", pool)
@@ -827,4 +882,5 @@ def test_update_client_compliance_unrelated_field_logs_nothing(monkeypatch):
         str(client["id"]), ClientComplianceUpdate(source_of_wealth="Salary"), None
     ))
 
-    assert pool.conn.audit_logs == []
+    actions = {l["action"] for l in pool.conn.audit_logs}
+    assert actions <= {"COMPLIANCE_EXCEPTION_OPENED"}

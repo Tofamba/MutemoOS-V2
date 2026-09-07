@@ -35,6 +35,13 @@ class FakeConnection:
     def __init__(self, clients, cdd_reviews=None):
         self.clients = clients
         self.cdd_reviews = cdd_reviews if cdd_reviews is not None else []
+        # create_cdd_review() now also calls _sync_compliance_exceptions_
+        # for_client() (2026-09-07) as part of its real behavior -- none of
+        # these tests assert on compliance_exceptions/beneficial_owners
+        # content, but the fixture still needs to answer those queries.
+        self.beneficial_owners = []
+        self.audit_logs = []
+        self.compliance_exceptions = []
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -54,7 +61,30 @@ class FakeConnection:
             self.cdd_reviews.append(row)
             return dict(row)
 
+        if q.startswith("SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2"):
+            return None  # no client_compliance fixture in this file -- sync falls back to defaults
+
+        if q.startswith("SELECT review_date, status, changes_identified FROM cdd_reviews"):
+            firm_id, cid = args
+            matching = [r for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid]
+            if not matching:
+                return None
+            latest = max(matching, key=lambda r: (r["review_date"], r.get("created_at") or datetime.min.replace(tzinfo=timezone.utc)))
+            return {k: latest[k] for k in ("review_date", "status", "changes_identified")}
+
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
+
+    async def fetch(self, query, *args):
+        q = " ".join(query.split())
+
+        if q.startswith("SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2"):
+            return []
+
+        if q.startswith("SELECT * FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2"):
+            firm_id, cid = args
+            return [dict(e) for e in self.compliance_exceptions if e["firm_id"] == firm_id and e["client_id"] == cid]
+
+        raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def fetchval(self, query, *args):
         q = " ".join(query.split())
@@ -63,6 +93,37 @@ class FakeConnection:
             dates = [r["review_date"] for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid]
             return max(dates) if dates else None
         raise NotImplementedError(f"FakeConnection.fetchval: unhandled query: {q}")
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO audit_logs"):
+            (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details) = args
+            self.audit_logs.append({
+                "firm_id": firm_id, "user_id": user_id, "actor_name": actor_name, "actor_role": actor_role,
+                "action": action, "target_type": target_type, "target_id": target_id, "details": details,
+            })
+        elif q.startswith("INSERT INTO compliance_exceptions"):
+            firm_id, cid, issue_code, issue_label, responsible_user_id = args
+            self.compliance_exceptions.append({
+                "id": uuid.uuid4(), "firm_id": firm_id, "client_id": cid,
+                "issue_code": issue_code, "issue_label": issue_label, "status": "Open",
+                "responsible_user_id": responsible_user_id, "due_date": None, "notes": None,
+                "closed_reason": None, "resolved_at": None, "closed_at": None,
+                "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+            })
+        elif q.startswith("UPDATE compliance_exceptions SET status='Open'"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["status"] = "Open"
+                    e["issue_label"] = issue_label
+                    e["resolved_at"] = None
+        elif q.startswith("UPDATE compliance_exceptions SET issue_label=$1"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["issue_label"] = issue_label
+        return "OK"
 
 
 class _FakeAcquireCtx:

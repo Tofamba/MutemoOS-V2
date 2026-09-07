@@ -707,6 +707,54 @@ async def run_migrations():
         );
         CREATE INDEX IF NOT EXISTS idx_cdd_reviews_client ON cdd_reviews(client_id, review_date DESC);
 
+        -- Compliance Exception Resolution Workflow (2026-09-07). One row
+        -- per (client_id, issue_code) EVER -- not one row per occurrence --
+        -- reused across that issue's whole lifecycle, including any
+        -- auto-reopen (see _sync_compliance_exceptions_for_client()). This
+        -- is a persisted lifecycle on top of _compute_compliance_status()'s
+        -- existing missing[]/issue_codes signal (and the AML Exceptions
+        -- report's pre-existing CDD-review-outstanding signal) -- NOT a
+        -- second, independent compliance calculation. Causality only ever
+        -- flows real-compliance-state -> exception row; there is no path
+        -- from this table back into client_compliance/beneficial_owners/
+        -- cdd_reviews, by design (see update_compliance_exception()'s own
+        -- docstring).
+        --
+        -- issue_label is a stored SNAPSHOT of the exact missing[]/CDD-
+        -- review-outstanding label text at the time this row was last
+        -- (re)opened -- not a live re-lookup at read time -- so a Resolved
+        -- or Closed row still displays honestly even after the live
+        -- condition it referred to has since changed shape (e.g. a
+        -- different CDD review's own changes_identified text).
+        --
+        -- status: Open -> InProgress -> AwaitingClient are freely
+        -- reorderable working states; Resolved requires the issue_code's
+        -- own canonical compliance check to confirm the underlying
+        -- requirement is genuinely satisfied (the ONLY path to Resolved);
+        -- ClosedNoFurtherAction is a distinct, deliberate firm decision
+        -- that no further action is being taken (requires closed_reason,
+        -- never auto-set, never a "Waived" stand-in for Resolved).
+        CREATE TABLE IF NOT EXISTS compliance_exceptions (
+            id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id                 UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            client_id               UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            issue_code              TEXT NOT NULL,
+            issue_label             TEXT NOT NULL,
+            status                  TEXT NOT NULL DEFAULT 'Open'
+                CHECK (status IN ('Open', 'InProgress', 'AwaitingClient', 'Resolved', 'ClosedNoFurtherAction')),
+            responsible_user_id     UUID REFERENCES users(id),
+            due_date                DATE,
+            notes                   TEXT,
+            closed_reason           TEXT,
+            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            resolved_at             TIMESTAMPTZ,
+            closed_at               TIMESTAMPTZ,
+            UNIQUE(client_id, issue_code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_compliance_exceptions_firm_status
+            ON compliance_exceptions(firm_id, status);
+
         CREATE TABLE IF NOT EXISTS legal_updates (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             firm_id         UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
@@ -4272,41 +4320,56 @@ def _compute_compliance_status(client: dict, compliance: Optional[dict], benefic
     risk_rating still NotAssessed). Fixed narrowly: only PEP clients are
     held to this; a non-PEP client's risk_rating, assessed or not, never
     affects compliance_status, unchanged from before.
+
+    2026-09-07 (Compliance Exception Resolution Workflow): each missing[]
+    entry is now built as a (issue_code, label) pair, evaluated exactly
+    once, then split into "missing" (labels, byte-for-byte identical to
+    every string this function has always returned -- no display text
+    changed) and "missing_codes" (the new stable machine-readable keys,
+    in the same order). Building both from one evaluation, not two
+    independently-hand-written lists, is what guarantees issue_code can
+    never drift from the label it's supposed to mean -- see
+    _is_exception_issue_resolved()'s own docstring, which relies on this.
     """
     compliance = compliance or _DEFAULT_CLIENT_COMPLIANCE
-    missing = []
+    missing_pairs = []  # [(issue_code, label), ...]
 
     client_type = client.get("client_type")
     if not client_type:
-        return {"compliance_status": "Action Required", "missing": ["Client type not recorded"]}
+        return {
+            "compliance_status": "Action Required",
+            "missing": ["Client type not recorded"],
+            "missing_codes": ["CLIENT_TYPE_NOT_RECORDED"],
+        }
 
     if compliance.get("identity_verification_status") != "Verified":
-        missing.append("Identity not verified")
+        missing_pairs.append(("IDENTITY_NOT_VERIFIED", "Identity not verified"))
 
     if client_type in LEGAL_PERSON_CLIENT_TYPES:
         is_bo = compliance.get("client_is_beneficial_owner")
         if is_bo == "No":
             if not any(o.get("verification_status") == "Verified" for o in beneficial_owners):
-                missing.append("Beneficial ownership not verified")
+                missing_pairs.append(("BENEFICIAL_OWNER_NOT_VERIFIED", "Beneficial ownership not verified"))
         elif is_bo in (None, "Unknown"):
-            missing.append("Beneficial ownership not assessed")
+            missing_pairs.append(("BENEFICIAL_OWNER_NOT_ASSESSED", "Beneficial ownership not assessed"))
         # is_bo == "Yes" -> client itself is the beneficial owner, satisfied
 
     is_pep = compliance.get("is_pep")
     if is_pep is None:
-        missing.append("PEP screening not completed")
+        missing_pairs.append(("PEP_SCREENING_INCOMPLETE", "PEP screening not completed"))
     elif is_pep is True:
         if not compliance.get("senior_management_approved_by"):
-            missing.append("Senior management approval required (PEP)")
+            missing_pairs.append(("PEP_APPROVAL_REQUIRED", "Senior management approval required (PEP)"))
         if (compliance.get("risk_rating") or "NotAssessed") == "NotAssessed":
-            missing.append("Risk rating required for PEP client")
+            missing_pairs.append(("RISK_RATING_REQUIRED", "Risk rating required for PEP client"))
 
     if not compliance.get("conflict_check_reviewed"):
-        missing.append("Conflict check not reviewed")
+        missing_pairs.append(("CONFLICT_CHECK_REQUIRED", "Conflict check not reviewed"))
 
     return {
-        "compliance_status": "Cleared" if not missing else "Action Required",
-        "missing": missing,
+        "compliance_status": "Cleared" if not missing_pairs else "Action Required",
+        "missing": [label for _, label in missing_pairs],
+        "missing_codes": [code for code, _ in missing_pairs],
     }
 
 def _compute_bo_status(client: dict, compliance: dict, beneficial_owners: list) -> str:
@@ -4379,6 +4442,15 @@ _COMPLIANCE_EVENT_LABELS = {
     "RISK_RATING_CHANGED": "Risk rating changed",
     "MATTER_AML_SCOPE_SET": "Matter AML scope set",
     "MATTER_RISK_SET": "Matter risk set",
+    # Compliance Exception Resolution Workflow (2026-09-07) -- these merge
+    # into this same Compliance History timeline (per the workflow's own
+    # spec), not a second history of their own.
+    "COMPLIANCE_EXCEPTION_OPENED": "Compliance exception opened",
+    "COMPLIANCE_EXCEPTION_REOPENED": "Compliance exception reopened",
+    "COMPLIANCE_EXCEPTION_RESOLVED": "Compliance exception resolved",
+    "COMPLIANCE_EXCEPTION_CLOSED_NO_FURTHER_ACTION": "Compliance exception closed — no further action",
+    "COMPLIANCE_EXCEPTION_STATUS_CHANGED": "Compliance exception status changed",
+    "COMPLIANCE_EXCEPTION_REASSIGNED": "Compliance exception reassigned",
 }
 
 def _row_to_compliance_event(row) -> dict:
@@ -4396,6 +4468,15 @@ def _row_to_compliance_event(row) -> dict:
         result = f"{old_label} → {new_label}" if old_label else new_label
     elif "owner_name" in details:
         result = details["owner_name"]
+    elif "issue" in details:
+        # Compliance exception events (opened/resolved/reopened/closed) --
+        # "reason" is only present for reopen (the fixed reopening
+        # sentence) and close-no-further-action (the required written
+        # reason), so this naturally reads as just the issue for a plain
+        # open/resolve.
+        result = details["issue"]
+        if details.get("reason"):
+            result += f" — {details['reason']}"
     else:
         result = "—"
     return {
@@ -4459,11 +4540,228 @@ async def _fetch_last_cdd_review_date(conn, cid) -> Optional[str]:
     )
     return str(d) if d else None
 
+async def _fetch_latest_cdd_review_row(conn, cid):
+    """Full most-recent cdd_reviews row (not just its date) -- same
+    query shape _fetch_aml_exceptions_rows() already uses to compute
+    CDD_REVIEW_OUTSTANDING for the AML Exceptions report; this is the
+    single shared place both that report and the exception engine read
+    it from, so the two can never disagree about whether a client's
+    latest review is Outstanding."""
+    return await conn.fetchrow(
+        "SELECT review_date, status, changes_identified FROM cdd_reviews "
+        "WHERE firm_id=$1 AND client_id=$2 ORDER BY review_date DESC, created_at DESC LIMIT 1",
+        FIRM_ID, cid
+    )
+
+def _cdd_review_outstanding_issue(latest_review) -> Optional[tuple]:
+    """Returns (issue_code, label) if the client's most recent CDD
+    review is itself Outstanding, else None. This is NOT a new policy --
+    it's the exact same signal the AML Exceptions report already
+    computes from cdd_reviews.status (_CDD_REVIEW_OUTSTANDING_LABEL,
+    below), just factored out so the exception engine can reuse it
+    instead of re-deriving its own version."""
+    if latest_review and latest_review["status"] == "Outstanding":
+        label = _CDD_REVIEW_OUTSTANDING_LABEL
+        if latest_review.get("changes_identified"):
+            label += f": {latest_review['changes_identified']}"
+        return ("CDD_REVIEW_OUTSTANDING", label)
+    return None
+
 def _priority_for_missing_item(item: str) -> str:
     item_lower = item.lower()
     if "pep" in item_lower or "beneficial ownership" in item_lower:
         return "High"
     return "Medium"
+
+# ── Compliance Exception Resolution Workflow (2026-09-07) ───────────────────
+# A persisted lifecycle on top of the two signals that already exist and are
+# already trusted (_compute_compliance_status()'s missing[]/missing_codes,
+# and the AML Exceptions report's own CDD-review-outstanding check) -- NOT a
+# second, competing compliance calculation. The whole point of this engine
+# is a strict one-way causality: real compliance state decides whether an
+# exception MAY be marked Resolved or gets auto-reopened; nothing here ever
+# writes back into client_compliance/beneficial_owners/cdd_reviews. See
+# update_compliance_exception() for the one and only place a human can move
+# an exception's status, and _sync_compliance_exceptions_for_client() for
+# the one and only place a row gets created or auto-reopened.
+
+EXCEPTION_ISSUE_CODES = [
+    "CLIENT_TYPE_NOT_RECORDED",
+    "IDENTITY_NOT_VERIFIED",
+    "BENEFICIAL_OWNER_NOT_ASSESSED",
+    "BENEFICIAL_OWNER_NOT_VERIFIED",
+    "PEP_SCREENING_INCOMPLETE",
+    "PEP_APPROVAL_REQUIRED",
+    "RISK_RATING_REQUIRED",
+    "CONFLICT_CHECK_REQUIRED",
+    "CDD_REVIEW_OUTSTANDING",
+]
+
+EXCEPTION_STATUSES = ["Open", "InProgress", "AwaitingClient", "Resolved", "ClosedNoFurtherAction"]
+
+# Display-only status labels (the frontend/reports show these, never the
+# raw PascalCase storage form) -- separate from issue_label, which is the
+# actual compliance-gap description, not the workflow status.
+_EXCEPTION_STATUS_LABELS = {
+    "Open": "Open",
+    "InProgress": "In Progress",
+    "AwaitingClient": "Awaiting Client",
+    "Resolved": "Resolved",
+    "ClosedNoFurtherAction": "Closed — No Further Action",
+}
+
+_COMPLIANCE_EXCEPTION_REOPEN_REASON = "Underlying compliance condition is no longer satisfied"
+
+async def _is_exception_issue_resolved(conn, issue_code: str, cid) -> bool:
+    """
+    The canonical compliance-state lookup requirement #2 describes:
+    Exception -> issue_code -> look up the real state for that code ->
+    is it ACTUALLY satisfied right now? This is the ONLY function that
+    answers that question, and update_compliance_exception() is the
+    ONLY caller allowed to act on its answer to move an exception to
+    Resolved.
+
+    For the 8 codes _compute_compliance_status() itself can produce,
+    this recomputes that function fresh from the real client/
+    client_compliance/beneficial_owners rows and checks the code is no
+    longer in missing_codes -- by construction (missing/missing_codes
+    are built from one evaluation each, see that function's own
+    docstring), this cannot drift from what a lawyer sees as this
+    client's own missing[] list. CDD_REVIEW_OUTSTANDING reuses the
+    read-only cdd_reviews check the AML Exceptions report already
+    computes, not a new invented policy.
+    """
+    if issue_code == "CDD_REVIEW_OUTSTANDING":
+        latest_review = await _fetch_latest_cdd_review_row(conn, cid)
+        return _cdd_review_outstanding_issue(latest_review) is None
+
+    if issue_code not in EXCEPTION_ISSUE_CODES:
+        raise ValueError(f"Unknown issue_code: {issue_code}")
+
+    client_row = await conn.fetchrow("SELECT * FROM clients WHERE id=$1 AND firm_id=$2", cid, FIRM_ID)
+    if not client_row:
+        return False
+    compliance_row = await conn.fetchrow(
+        "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+    )
+    compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
+    owner_rows = await conn.fetch(
+        "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+    )
+    status = _compute_compliance_status(dict(client_row), compliance, [dict(o) for o in owner_rows])
+    return issue_code not in status["missing_codes"]
+
+async def _sync_compliance_exceptions_for_client(conn, cid, actor: dict) -> list:
+    """
+    The ONLY place compliance_exceptions rows are created or
+    auto-reopened -- never resolved (see _is_exception_issue_resolved()'s
+    own docstring: resolving is always an explicit, validated human
+    action via update_compliance_exception(), even once the underlying
+    condition is genuinely met; this function never marks anything
+    Resolved on its own).
+
+    For every issue_code currently unsatisfied (real missing_codes plus
+    CDD_REVIEW_OUTSTANDING if applicable):
+      - no existing row for (client_id, issue_code) -> INSERT one, Open,
+        responsible_user_id defaulting to the client's own created_by
+        (the existing responsible-person default).
+      - an existing row whose status is 'Resolved' -> the condition that
+        was satisfied when it got marked Resolved no longer is. This is
+        the ONLY auto-reopen path in the whole system: flip back to
+        Open and log COMPLIANCE_EXCEPTION_REOPENED with the fixed
+        reason string, never a silent status flip.
+      - an existing row already Open/InProgress/AwaitingClient -> still
+        being actively tracked; only its stored issue_label is
+        refreshed if the live description text has changed (e.g. a
+        different CDD review's own changes_identified), no audit event
+        for a label-only refresh.
+      - an existing row 'ClosedNoFurtherAction' -> left alone,
+        deliberately terminal. The firm decided no further action is
+        being taken on that occurrence; the system doesn't re-litigate
+        that decision on its own. A person can still move it manually
+        via update_compliance_exception() if the situation genuinely
+        changes enough to warrant revisiting.
+    Every issue_code NOT in the unsatisfied set is left completely
+    untouched here, resolved or not -- this function never marks
+    anything Resolved.
+
+    Called at every compliance-mutating endpoint that could plausibly
+    move one of these 9 conditions (so a reopening's audit timestamp
+    reflects the real moment of change), and defensively at every read
+    of a client's exceptions/reports as a catch-all in case a mutation
+    path is ever missed.
+    """
+    client_row = await conn.fetchrow("SELECT * FROM clients WHERE id=$1 AND firm_id=$2", cid, FIRM_ID)
+    if not client_row:
+        return []
+    compliance_row = await conn.fetchrow(
+        "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+    )
+    compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
+    owner_rows = await conn.fetch(
+        "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+    )
+    status = _compute_compliance_status(dict(client_row), compliance, [dict(o) for o in owner_rows])
+    label_by_code = dict(zip(status["missing_codes"], status["missing"]))
+
+    latest_review = await _fetch_latest_cdd_review_row(conn, cid)
+    cdd_issue = _cdd_review_outstanding_issue(latest_review)
+    if cdd_issue:
+        label_by_code[cdd_issue[0]] = cdd_issue[1]
+
+    existing_rows = await conn.fetch(
+        "SELECT * FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2", FIRM_ID, cid
+    )
+    existing_by_code = {r["issue_code"]: dict(r) for r in existing_rows}
+
+    for code, label in label_by_code.items():
+        existing = existing_by_code.get(code)
+        if existing is None:
+            await conn.execute(
+                """INSERT INTO compliance_exceptions
+                       (firm_id, client_id, issue_code, issue_label, status, responsible_user_id)
+                   VALUES ($1,$2,$3,$4,'Open',$5)""",
+                FIRM_ID, cid, code, label, client_row.get("created_by")
+            )
+            await _log_compliance_event(
+                conn, actor, "CLIENT", cid, "COMPLIANCE_EXCEPTION_OPENED",
+                {"issue_code": code, "issue": label}
+            )
+        elif existing["status"] == "Resolved":
+            await conn.execute(
+                "UPDATE compliance_exceptions SET status='Open', issue_label=$1, resolved_at=NULL, "
+                "updated_at=NOW() WHERE id=$2",
+                label, existing["id"]
+            )
+            await _log_compliance_event(
+                conn, actor, "CLIENT", cid, "COMPLIANCE_EXCEPTION_REOPENED",
+                {"issue_code": code, "issue": label, "reason": _COMPLIANCE_EXCEPTION_REOPEN_REASON}
+            )
+        elif existing["status"] != "ClosedNoFurtherAction" and existing["issue_label"] != label:
+            await conn.execute(
+                "UPDATE compliance_exceptions SET issue_label=$1, updated_at=NOW() WHERE id=$2",
+                label, existing["id"]
+            )
+        # ClosedNoFurtherAction: deliberately left untouched, see docstring.
+
+    rows = await conn.fetch(
+        "SELECT * FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2 ORDER BY created_at ASC",
+        FIRM_ID, cid
+    )
+    return [dict(r) for r in rows]
+
+def _row_to_compliance_exception(row: dict) -> dict:
+    d = dict(row)
+    for k in ("id", "firm_id", "client_id", "responsible_user_id"):
+        if d.get(k):
+            d[k] = str(d[k])
+    for k in ("created_at", "updated_at", "resolved_at", "closed_at"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    if d.get("due_date"):
+        d["due_date"] = str(d["due_date"])
+    d["status_label"] = _EXCEPTION_STATUS_LABELS.get(d["status"], d["status"])
+    return d
 
 def _aggregate_compliance_counts(client_rows, compliance_by_client: dict, owners_by_client: dict) -> dict:
     """
@@ -5270,6 +5568,13 @@ async def update_beneficial_owner(client_id: str, owner_id: str, update: Benefic
         )
         if row and fields.get("verification_status") == "Verified" and before and before["verification_status"] != "Verified":
             await _log_compliance_event(conn, user, "CLIENT", cid, "BO_VERIFIED", {"owner_name": row["owner_name"]})
+        if row:
+            # A verification flip is one of the ways BENEFICIAL_OWNER_NOT_
+            # VERIFIED can resolve or (if a verified owner's status is ever
+            # reverted) reopen -- sync right away so the audit trail's
+            # timestamp reflects this actual change, not just whenever a
+            # report is next viewed.
+            await _sync_compliance_exceptions_for_client(conn, cid, user)
     if not row:
         raise HTTPException(status_code=404, detail="Beneficial owner not found")
     return _row_to_beneficial_owner(row)
@@ -5525,6 +5830,11 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         if new_risk != old_risk:
             await _log_compliance_event(conn, user, "CLIENT", cid, "RISK_RATING_CHANGED", {"old": old_risk, "new": new_risk})
         last_cdd_review_date = await _fetch_last_cdd_review_date(conn, cid)
+        # This PATCH can move any of identity/BO-assessment/PEP/senior
+        # management approval/risk rating/conflict check -- i.e. every one
+        # of _compute_compliance_status()'s own missing_codes -- so sync
+        # exceptions right here rather than waiting for the next read.
+        await _sync_compliance_exceptions_for_client(conn, cid, user)
     compliance = _row_to_client_compliance(row)
     status = _compute_compliance_status(client_row, compliance, [dict(r) for r in owner_rows])
     return {**compliance, **status, "last_cdd_review_date": last_cdd_review_date}
@@ -5626,7 +5936,173 @@ async def create_cdd_review(client_id: str, review: CDDReviewCreate, request: Re
             review.info_current, review.bo_current, review.matter_activity_consistent,
             review.risk_rating, changes_identified, further_action, status,
         )
+        # A new review can flip CDD_REVIEW_OUTSTANDING either way -- clear
+        # it (this review is Complete and is now the most recent) or set it
+        # (this one itself is Outstanding) -- sync right away.
+        await _sync_compliance_exceptions_for_client(conn, cid, user)
     return _row_to_cdd_review(row)
+
+# ── Compliance Exceptions (2026-09-07) ──────────────────────────────────────
+# Gated at client:read/client:edit, same tier as the compliance data these
+# exceptions are derived from -- this exposes nothing about a client that
+# those permissions don't already grant elsewhere.
+
+@app.get("/api/clients/{client_id}/exceptions")
+async def list_compliance_exceptions(client_id: str, request: Request):
+    """Syncs first (creating/reopening rows as needed against the client's
+    real, current compliance state -- see _sync_compliance_exceptions_for_
+    client()'s own docstring), then returns every exception this client has
+    ever had, oldest first."""
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        rows = await _sync_compliance_exceptions_for_client(conn, cid, user)
+    return [_row_to_compliance_exception(r) for r in rows]
+
+class ComplianceExceptionUpdate(BaseModel):
+    status: Optional[str] = None
+    responsible_user_id: Optional[str] = None
+    due_date: Optional[str] = None  # "" clears it; omit to leave unchanged
+    notes: Optional[str] = None
+    closed_reason: Optional[str] = None
+
+@app.patch("/api/clients/{client_id}/exceptions/{exception_id}")
+async def update_compliance_exception(client_id: str, exception_id: str, update: ComplianceExceptionUpdate, request: Request):
+    """
+    The ONLY place a human can move an exception's status, reassign its
+    responsible person, or set its due date/notes.
+
+    Resolved (requirement #2's exact shape): Exception -> issue_code ->
+    _is_exception_issue_resolved() looks up the canonical compliance
+    state for that code -> only if it confirms the underlying
+    requirement is genuinely satisfied right now does this endpoint
+    allow the transition; otherwise it's rejected outright (409), never
+    silently accepted. This is the ONLY path to Resolved anywhere in the
+    system, and there is no code here (or anywhere else) that writes
+    this exception's Resolved status back into client_compliance/
+    beneficial_owners/cdd_reviews -- causality only flows the other way.
+
+    ClosedNoFurtherAction is a genuinely distinct outcome from Resolved,
+    not a "Waived"/"Dismissed" stand-in for it: it means the firm is
+    documenting that no further action is being taken, not claiming the
+    requirement is met. Requires a non-blank closed_reason and logs its
+    own COMPLIANCE_EXCEPTION_CLOSED_NO_FURTHER_ACTION event, distinct
+    from COMPLIANCE_EXCEPTION_RESOLVED.
+
+    Reassignment (existing responsible-person default, now changeable):
+    responsible_user_id must be a real user in this firm; logs
+    COMPLIANCE_EXCEPTION_REASSIGNED with the real old/new names.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    cid = _parse_client_id(client_id)
+    try:
+        eid = _uuid_mod.UUID(exception_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="exception_id must be a valid UUID")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM compliance_exceptions WHERE id=$1 AND client_id=$2 AND firm_id=$3",
+            eid, cid, FIRM_ID
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Exception not found")
+        row = dict(row)
+        fields = {}
+
+        if update.responsible_user_id is not None:
+            try:
+                new_resp = _uuid_mod.UUID(update.responsible_user_id)
+            except ValueError:
+                raise HTTPException(status_code=422, detail="responsible_user_id must be a valid UUID")
+            if new_resp != row.get("responsible_user_id"):
+                new_user_row = await conn.fetchrow(
+                    "SELECT display_name FROM users WHERE id=$1 AND firm_id=$2", new_resp, FIRM_ID
+                )
+                if not new_user_row:
+                    raise HTTPException(status_code=422, detail="responsible_user_id is not a user in this firm")
+                old_user_row = None
+                if row.get("responsible_user_id"):
+                    old_user_row = await conn.fetchrow(
+                        "SELECT display_name FROM users WHERE id=$1 AND firm_id=$2",
+                        row["responsible_user_id"], FIRM_ID
+                    )
+                fields["responsible_user_id"] = new_resp
+                await _log_compliance_event(
+                    conn, user, "CLIENT", cid, "COMPLIANCE_EXCEPTION_REASSIGNED",
+                    {
+                        "issue_code": row["issue_code"], "issue": row["issue_label"],
+                        "old": old_user_row["display_name"] if old_user_row else None,
+                        "new": new_user_row["display_name"],
+                    }
+                )
+
+        if update.due_date is not None:
+            try:
+                fields["due_date"] = date.fromisoformat(update.due_date) if update.due_date else None
+            except ValueError:
+                raise HTTPException(status_code=400, detail="due_date must be in YYYY-MM-DD format")
+
+        if update.notes is not None:
+            fields["notes"] = update.notes
+
+        if update.status is not None:
+            if update.status not in EXCEPTION_STATUSES:
+                raise HTTPException(status_code=422, detail=f"status must be one of: {', '.join(EXCEPTION_STATUSES)}")
+
+            if update.status == "Resolved":
+                if not await _is_exception_issue_resolved(conn, row["issue_code"], cid):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Cannot mark Resolved -- the underlying compliance requirement "
+                            f"({row['issue_label']}) is not currently satisfied."
+                        ),
+                    )
+                fields["status"] = "Resolved"
+                fields["resolved_at"] = datetime.utcnow()
+                await _log_compliance_event(
+                    conn, user, "CLIENT", cid, "COMPLIANCE_EXCEPTION_RESOLVED",
+                    {"issue_code": row["issue_code"], "issue": row["issue_label"]}
+                )
+            elif update.status == "ClosedNoFurtherAction":
+                reason = (update.closed_reason or "").strip()
+                if not reason:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="closed_reason is required to close an exception with no further action.",
+                    )
+                fields["status"] = "ClosedNoFurtherAction"
+                fields["closed_reason"] = reason
+                fields["closed_at"] = datetime.utcnow()
+                await _log_compliance_event(
+                    conn, user, "CLIENT", cid, "COMPLIANCE_EXCEPTION_CLOSED_NO_FURTHER_ACTION",
+                    {"issue_code": row["issue_code"], "issue": row["issue_label"], "reason": reason}
+                )
+            elif update.status != row["status"]:
+                fields["status"] = update.status
+                await _log_compliance_event(
+                    conn, user, "CLIENT", cid, "COMPLIANCE_EXCEPTION_STATUS_CHANGED",
+                    {
+                        "issue_code": row["issue_code"], "issue": row["issue_label"],
+                        "old": _EXCEPTION_STATUS_LABELS.get(row["status"], row["status"]),
+                        "new": _EXCEPTION_STATUS_LABELS.get(update.status, update.status),
+                    }
+                )
+
+        if not fields:
+            return _row_to_compliance_exception(row)
+
+        fields["updated_at"] = datetime.utcnow()
+        set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
+        updated = await conn.fetchrow(
+            f"UPDATE compliance_exceptions SET {set_clauses} WHERE id=$1 RETURNING *",
+            eid, *fields.values()
+        )
+    return _row_to_compliance_exception(dict(updated))
 
 def _compute_person_acting_status(reps: list) -> str:
     """
