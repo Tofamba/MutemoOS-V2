@@ -8246,6 +8246,7 @@ async def _TEMP_verify_matter_aml_pdf_wrap(request: Request):
         # (correct) rendering. Head is checked before that splice point;
         # tail is on a later wrapped line, never affected by it.
         head, tail = reason[:20], reason[-40:]
+        head_pos = pdf_text.find(head)
         results.append({
             "matter_number": r["matter_number"],
             "reason_length": len(reason),
@@ -8253,6 +8254,7 @@ async def _TEMP_verify_matter_aml_pdf_wrap(request: Request):
             "reason_tail": tail,
             "head_in_pdf": head in pdf_text,
             "tail_in_pdf": tail in pdf_text,
+            "pdf_window_after_head": pdf_text[head_pos:head_pos + 160] if head_pos != -1 else None,
             "full_reason_in_csv": reason in csv_text,
         })
 
