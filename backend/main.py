@@ -8184,6 +8184,70 @@ async def matter_aml_status_report_export(request: Request):
     filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
 
+@app.get("/api/admin/verify-matter-aml-client-matter-wrap")
+async def _TEMP_verify_matter_aml_client_matter_wrap(request: Request):
+    """
+    TEMP, read-only, admin-token-gated -- real-data verification for the
+    2026-09-07 Client/Matter wrap extension. Regenerates the REAL PDF for
+    this report (same construction as the real endpoint below), reads it
+    back with pdfplumber's extract_tables() (real per-column cell text
+    via the actual drawn borders, not a flat-text substring check), and
+    reports every real matter whose client_name or matter cell is long
+    enough that the old single-line layout would have truncated it,
+    together with the ACTUAL rendered cell text for each. Removed once
+    verified.
+    """
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_matter_aml_status_rows(conn)
+
+    from fpdf import FPDF
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Matter AML Status", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+    col_pcts = (16, 24, 11, 11, 28, 10)
+    col_widths = [pct * usable_width / 100 for pct in col_pcts]
+    table_rows = [_matter_aml_export_row(r) for r in rows]
+    _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4})
+    pdf_bytes = bytes(pdf.output())
+
+    import io as _io, pdfplumber
+    with pdfplumber.open(_io.BytesIO(pdf_bytes)) as p:
+        pdf_rows = []
+        for page in p.pages:
+            for table in page.extract_tables():
+                pdf_rows.extend(table)
+    client_col = _MATTER_AML_HEADERS.index("Client")
+    matter_col = _MATTER_AML_HEADERS.index("Matter")
+    pdf_data_rows = pdf_rows[1:]  # skip header row
+
+    results = []
+    for r, pdf_row in zip(rows, pdf_data_rows):
+        expected_client = r["client_name"]
+        expected_matter = f"{r['matter_number']} - {r['matter_name']}"  # _pdf_safe() em-dash -> "-"
+        if len(expected_client) <= 30 and len(expected_matter) <= 40:
+            continue  # short enough the old layout wouldn't have truncated it either
+        actual_client = " ".join(pdf_row[client_col].split())
+        actual_matter = " ".join(pdf_row[matter_col].split())
+        results.append({
+            "matter_number": r["matter_number"],
+            "expected_client": expected_client,
+            "actual_client_in_pdf": actual_client,
+            "client_matches_full_text": actual_client == expected_client,
+            "expected_matter": expected_matter,
+            "actual_matter_in_pdf": actual_matter,
+            "matter_matches_full_text": actual_matter == expected_matter,
+        })
+
+    return {"total_matters": len(rows), "long_client_or_matter_checked": len(results), "results": results}
+
 @app.get("/api/reports/matter-aml-status-export-pdf")
 async def matter_aml_status_report_export_pdf(request: Request):
     """Same data/permission as the JSON report and CSV export above --
