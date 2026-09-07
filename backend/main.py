@@ -6126,9 +6126,31 @@ async def _TEMP_verify_compliance_exceptions(request: Request):
         )
         system_actor = {"id": None, "firm_id": FIRM_ID, "display_name": "Verification Script", "role": "system"}
         results = []
+        raw_state_by_client = []  # every client, even zero-exception ones -- distinguishes genuinely
+                                   # cleared from a sync bug silently missing something real
         first_open = None
         for crow in client_rows:
             cid = crow["id"]
+            client_row = await conn.fetchrow("SELECT * FROM clients WHERE id=$1 AND firm_id=$2", cid, FIRM_ID)
+            compliance_row = await conn.fetchrow(
+                "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+            )
+            compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
+            owner_rows = await conn.fetch(
+                "SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+            )
+            raw_status = _compute_compliance_status(dict(client_row), compliance, [dict(o) for o in owner_rows])
+            raw_state_by_client.append({
+                "client": crow["full_name"],
+                "client_type": client_row.get("client_type"),
+                "has_compliance_row": compliance_row is not None,
+                "identity_verification_status": compliance.get("identity_verification_status"),
+                "is_pep": compliance.get("is_pep"),
+                "conflict_check_reviewed": compliance.get("conflict_check_reviewed"),
+                "missing": raw_status["missing"],
+                "missing_codes": raw_status["missing_codes"],
+            })
+
             rows = await _sync_compliance_exceptions_for_client(conn, cid, system_actor)
             if not rows:
                 continue
@@ -6172,6 +6194,7 @@ async def _TEMP_verify_compliance_exceptions(request: Request):
         "clients_with_open_exceptions": len(results),
         "results": results,
         "rejection_test": rejection_test,
+        "raw_state_by_client": raw_state_by_client,
     }
 
 def _compute_person_acting_status(reps: list) -> str:
