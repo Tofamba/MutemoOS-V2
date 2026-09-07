@@ -8218,33 +8218,54 @@ async def _TEMP_verify_matter_aml_client_matter_wrap(request: Request):
     _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4})
     pdf_bytes = bytes(pdf.output())
 
+    # Column-crop + extract_text() instead of extract_tables(): a first
+    # attempt using extract_tables() (ruling-line table-structure
+    # detection) worked perfectly in isolation but broke down on the
+    # real 22-row table -- one row's clustering came out wrong, which
+    # then misaligned every row after it. That's a limitation of
+    # pdfplumber's row-clustering heuristic at this scale, not evidence
+    # of a real rendering defect (confirmed separately by reproducing
+    # just the one flagged row in isolation, where extract_tables()
+    # returned the full correct text both times). Cropping to each
+    # column's own x-range and reading top-to-bottom sidesteps that
+    # heuristic entirely -- it can't misattribute a word to the wrong
+    # row/column since only that column's pixels are ever considered.
     import io as _io, pdfplumber
+    mm_to_pt = 72 / 25.4
+    x0 = pdf.l_margin * mm_to_pt
+    col_bounds = []
+    for w in col_widths:
+        x1 = x0 + w * mm_to_pt
+        col_bounds.append((x0, x1))
+        x0 = x1
+    client_x0, client_x1 = col_bounds[_MATTER_AML_HEADERS.index("Client")]
+    matter_x0, matter_x1 = col_bounds[_MATTER_AML_HEADERS.index("Matter")]
+
     with pdfplumber.open(_io.BytesIO(pdf_bytes)) as p:
-        pdf_rows = []
+        client_col_text, matter_col_text = "", ""
         for page in p.pages:
-            for table in page.extract_tables():
-                pdf_rows.extend(table)
-    client_col = _MATTER_AML_HEADERS.index("Client")
-    matter_col = _MATTER_AML_HEADERS.index("Matter")
-    pdf_data_rows = pdf_rows[1:]  # skip header row
+            client_col_text += " " + (page.crop((client_x0, 0, client_x1, page.height)).extract_text() or "")
+            matter_col_text += " " + (page.crop((matter_x0, 0, matter_x1, page.height)).extract_text() or "")
+    client_col_text = " ".join(client_col_text.split())
+    matter_col_text = " ".join(matter_col_text.split())
 
     results = []
-    for r, pdf_row in zip(rows, pdf_data_rows):
+    for r in rows:
+        # _pdf_safe() (the same transform actually applied before
+        # rendering) rather than a hand-rolled "-" join -- matter_name
+        # itself can carry its own em-dash from the real DB text (e.g.
+        # "Mining claim boundary dispute — HC 4521/26"), not just the
+        # number/name join separator, and _pdf_safe() converts every one.
         expected_client = r["client_name"]
-        expected_matter = f"{r['matter_number']} - {r['matter_name']}"  # _pdf_safe() em-dash -> "-"
+        expected_matter = _pdf_safe(f"{r['matter_number']} — {r['matter_name']}")
         if len(expected_client) <= 30 and len(expected_matter) <= 40:
             continue  # short enough the old layout wouldn't have truncated it either
-        actual_client = " ".join((pdf_row[client_col] or "").split())
-        actual_matter = " ".join((pdf_row[matter_col] or "").split())
         results.append({
             "matter_number": r["matter_number"],
             "expected_client": expected_client,
-            "actual_client_in_pdf": actual_client,
-            "client_matches_full_text": actual_client == expected_client,
+            "client_full_text_present": expected_client in client_col_text,
             "expected_matter": expected_matter,
-            "actual_matter_in_pdf": actual_matter,
-            "matter_matches_full_text": actual_matter == expected_matter,
-            "raw_pdf_row": [c if c is not None else "<<NONE>>" for c in pdf_row],
+            "matter_full_text_present": expected_matter in matter_col_text,
         })
 
     return {"total_matters": len(rows), "long_client_or_matter_checked": len(results), "results": results}
