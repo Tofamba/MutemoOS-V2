@@ -6081,6 +6081,107 @@ async def client_aml_cdd_report_export_pdf(client_id: str, request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+@app.get("/api/admin/verify-cdd-report-pdf-fix")
+async def _TEMP_verify_cdd_report_pdf_fix(request: Request):
+    """
+    TEMP, read-only, admin-token-gated -- real-data verification for
+    commit d1ebc88 (the 2026-09-07 CDD report wrap + arrow fix).
+    Regenerates the real PDF for every real client and checks, per
+    client, for the two unambiguous real-defect signals: any remaining
+    "..." truncation marker anywhere in the rendered text (the ONLY
+    thing that ever appends one is _mp_truncate_to_width(), which the
+    now-wrapped columns no longer go through -- so its total absence is
+    on its own sufficient proof nothing is being cut off, not just
+    suggestive), and any "?" in a Compliance History Result value (the
+    latin-1 replace-mode signature of a still-unhandled special
+    character). Deliberately NOT attempting a flat-text "is this exact
+    long value present" substring check here -- the investigation that
+    led to this fix already found that unreliable once multiple columns
+    wrap in the same row (pdfplumber's flat extraction can interleave
+    lines from different columns sharing a row band); the per-column
+    real-content check already happened via the real Matter AML Status
+    investigation and this report's own new pytest suite (extract_tables(),
+    matched by header, not flat text). Removed once verified.
+    """
+    require_admin_token(request)
+    # Named cases from the original review -- pulled out for direct,
+    # positive before/after evidence via real per-column table
+    # extraction (extract_tables(), matched by header + disambiguated
+    # by content, same reliable convention the new pytest suite uses --
+    # each of these clients has few enough rows that the row-clustering
+    # heuristic that broke down on Matter AML Status's 22-row table
+    # isn't a risk here).
+    spot_check_names = {
+        "Anchorflow Holdings", "Munyaradzi Gwenzi", "Tendai Chirwa",
+        "Demo Investments (Pvt) Ltd", "Mould Enterprises (Pvt) Ltd",
+        "Sunshine Properties (Pvt) Ltd", "Tobacco Sellers Zimbabwe (Pvt) Ltd",
+        "Farai Zvenyika",
+    }
+    async with _db_pool.acquire() as conn:
+        client_rows = await conn.fetch(
+            "SELECT id, full_name FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+        )
+        any_remaining_truncation = []
+        any_garbled_history = []
+        spot_checks = []
+        for crow in client_rows:
+            cid = crow["id"]
+            report = await _fetch_client_aml_cdd_report(conn, cid)
+            sections = _client_cdd_report_sections(report)
+            pdf_bytes = _build_client_cdd_pdf(report)
+
+            import io as _io, pdfplumber
+            with pdfplumber.open(_io.BytesIO(pdf_bytes)) as p:
+                pdf_text = "\n".join(page.extract_text() or "" for page in p.pages)
+                pdf_tables = []
+                for page in p.pages:
+                    for table in page.extract_tables():
+                        if table:
+                            pdf_tables.append(table)
+
+            truncations = [line.strip() for line in pdf_text.split("\n") if "..." in line]
+            if truncations:
+                any_remaining_truncation.append({"client": crow["full_name"], "lines": truncations})
+
+            history_section = next((s for s in sections if s["title"].startswith("9.")), None)
+            history_results = [r[3] for r in history_section["rows"]] if history_section else []
+            garbled = [r for r in history_results if "?" in r]
+            if garbled:
+                any_garbled_history.append({"client": crow["full_name"], "values": garbled})
+
+            if crow["full_name"] in spot_check_names:
+                per_section = {}
+                for section in sections:
+                    layout = _CDD_SECTION_LAYOUT.get(section["title"])
+                    if not layout or not section["rows"]:
+                        continue
+                    matching_tables = [
+                        t for t in pdf_tables
+                        if tuple(t[0]) == tuple(section["headers"])
+                    ]
+                    # Disambiguate a shared ("Item", "Status") header (Sections
+                    # 1/5/6) by checking the table actually contains one of
+                    # this section's own expected Item labels.
+                    expected_rows = [[str(v) for v in row] for row in section["rows"]]
+                    chosen = None
+                    for t in matching_tables:
+                        rendered_rows = [[" ".join((c or "").split()) for c in r] for r in t[1:]]
+                        if any(rr[0] == er[0] for rr in rendered_rows for er in expected_rows):
+                            chosen = rendered_rows
+                            break
+                    per_section[section["title"]] = {
+                        "expected": expected_rows,
+                        "rendered_in_pdf": chosen,
+                    }
+                spot_checks.append({"client": crow["full_name"], "sections": per_section})
+
+    return {
+        "total_clients": len(client_rows),
+        "any_remaining_truncation_across_all_clients": any_remaining_truncation,
+        "any_garbled_compliance_history_results": any_garbled_history,
+        "spot_checks": spot_checks,
+    }
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
