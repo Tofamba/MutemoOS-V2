@@ -8209,10 +8209,18 @@ async def matter_aml_status_report_export_pdf(request: Request):
         pdf.cell(0, 6, "No matters on file.", new_x="LMARGIN", new_y="NEXT")
     else:
         usable_width = pdf.w - pdf.l_margin - pdf.r_margin
-        col_pcts = (18, 27, 12, 12, 21, 10)
+        # Reason (index 4) is genuinely open-ended compliance free text --
+        # e.g. "Purchase of mining claims from PEP who declared beneficial
+        # ownership through a trust structure..." -- and was truncating
+        # mid-sentence at the old 21%/single-line layout (2026-09-07 real
+        # formatting bug). Widened at Client/Matter's expense and wrapped
+        # onto multiple lines (wrap_cols) instead of an ellipsis, since an
+        # ellipsis would hide real compliance-relevant text, not just a
+        # long name.
+        col_pcts = (14, 22, 11, 11, 32, 10)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_matter_aml_export_row(r) for r in rows]
-        _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows)
+        _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={4})
 
     filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(
@@ -8510,12 +8518,25 @@ def _mp_truncate_to_width(pdf, text: str, max_width: float) -> str:
         text = text[:-1]
     return text + "..." if text else ""
 
-def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: float = 6.0):
+def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: float = 6.0,
+                   wrap_cols: Optional[set] = None):
     """Small shared table renderer -- header row with a filled background,
-    bordered data rows below, each cell truncated to its column's width.
-    Used for both the Review Status and Billing per-client listings,
-    which are genuinely list-shaped data the redesign's own instructions
-    say should stay tabular rather than become a chart."""
+    bordered data rows below. Used for the Review Status/Billing
+    per-client listings, the Register/Exceptions exports, and Matter AML
+    Status, which are genuinely list-shaped data the redesign's own
+    instructions say should stay tabular rather than become a chart.
+
+    wrap_cols (2026-09-07, real formatting bug -- Matter AML Status's
+    Reason column was truncating genuine compliance text mid-sentence,
+    e.g. "Purchase of mining claims from PEP who ...") is an optional set
+    of 0-based column indices that wrap onto multiple lines instead of
+    truncating with an ellipsis, for columns carrying open-ended free
+    text where an ellipsis would hide real content rather than just a
+    long name. Every column not in wrap_cols, and every existing caller
+    that doesn't pass it at all, keeps the exact original single-line
+    truncated behavior -- this is additive, not a rewrite of the shared
+    renderer's default path."""
+    wrap_cols = wrap_cols or set()
     left = pdf.l_margin
     pdf.set_x(left)
     pdf.set_font("Helvetica", "B", 8)
@@ -8528,10 +8549,46 @@ def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: 
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(0, 0, 0)
     for row in rows:
-        pdf.set_x(left)
-        for cell_text, w in zip(row, col_widths):
-            pdf.cell(w, row_height, _mp_truncate_to_width(pdf, str(cell_text), w - 2), border=1, align="L")
-        pdf.ln(row_height)
+        if not wrap_cols:
+            pdf.set_x(left)
+            for cell_text, w in zip(row, col_widths):
+                pdf.cell(w, row_height, _mp_truncate_to_width(pdf, str(cell_text), w - 2), border=1, align="L")
+            pdf.ln(row_height)
+            continue
+
+        # A wrapped column can make this row taller than row_height --
+        # work out the tallest column first (via fpdf2's own dry-run line
+        # splitting) so every cell in the row gets drawn against a shared
+        # row height and a matching full-height border, rather than
+        # wrapped text overflowing past a fixed-height cell.
+        wrapped_lines = {}
+        line_count = 1
+        for i, (cell_text, w) in enumerate(zip(row, col_widths)):
+            if i in wrap_cols:
+                lines = pdf.multi_cell(w - 2, row_height, _pdf_safe(str(cell_text)),
+                                        dry_run=True, output="LINES") or [""]
+                wrapped_lines[i] = lines
+                line_count = max(line_count, len(lines))
+        this_row_height = row_height * line_count
+
+        # fpdf2's own auto-page-break triggers on cell()/multi_cell() height,
+        # which a manually-drawn rect() bypasses -- check up front so a tall
+        # wrapped row doesn't get sliced across a page boundary.
+        if pdf.get_y() + this_row_height > pdf.page_break_trigger:
+            pdf.add_page(same=True)
+
+        y0 = pdf.get_y()
+        x = left
+        for i, (cell_text, w) in enumerate(zip(row, col_widths)):
+            pdf.rect(x, y0, w, this_row_height)
+            if i in wrap_cols:
+                pdf.set_xy(x + 1, y0 + 1)
+                pdf.multi_cell(w - 2, row_height, "\n".join(wrapped_lines[i]), border=0, align="L")
+            else:
+                pdf.set_xy(x, y0)
+                pdf.cell(w, row_height, _mp_truncate_to_width(pdf, str(cell_text), w - 2), border=0, align="L")
+            x += w
+        pdf.set_xy(left, y0 + this_row_height)
 
 def _build_my_portfolio_pdf(portfolio: dict) -> bytes:
     """

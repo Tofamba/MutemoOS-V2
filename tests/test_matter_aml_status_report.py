@@ -24,6 +24,7 @@ import io
 import uuid
 from datetime import datetime, timezone
 
+import pdfplumber
 import pytest
 from fastapi import HTTPException
 
@@ -96,6 +97,11 @@ def _csv_rows(response):
 
 def _partner():
     return {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+
+
+def _pdf_text(response):
+    with pdfplumber.open(io.BytesIO(response.body)) as pdf:
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
 # ── permission gate ──────────────────────────────────────────────────────
@@ -282,3 +288,61 @@ def test_pdf_export_handles_no_matters_without_crashing(monkeypatch):
 
     assert response.media_type == "application/pdf"
     assert response.body.startswith(b"%PDF")
+
+
+def test_pdf_export_does_not_truncate_long_reason_text(monkeypatch):
+    """Real formatting bug (2026-09-07): the Reason column was a single
+    fixed-width, single-line cell truncated with an ellipsis, cutting off
+    genuine compliance text mid-sentence -- e.g. "Purchase of mining
+    claims from PEP who ..." Reason now wraps onto multiple lines
+    (wrap_cols) instead, so the full text must survive into the rendered
+    PDF with no "..." artifact, for reasons long enough that the old
+    single-line layout would have cut them off."""
+    import backend.main as m
+    long_reason = (
+        "Purchase of mining claims from PEP who declared beneficial "
+        "ownership through a trust structure requiring enhanced due "
+        "diligence and ongoing monitoring of the underlying trust deed."
+    )
+    other_long_reason = (
+        "Sale of immoveable property. Buyer lives in a high-risk "
+        "jurisdiction per the FIU advisory list, so source-of-funds "
+        "documentation was requested and verified before instruction."
+    )
+    matters = [
+        _matter(
+            client_name="Anchorflow Holdings", matter_number="DU-002-01",
+            aml_scope="InScope", matter_risk="High", aml_scope_reason=long_reason,
+        ),
+        _matter(
+            client_name="Beacon Trust", matter_number="DU-005-01",
+            aml_scope="InScope", matter_risk="Medium", aml_scope_reason=other_long_reason,
+        ),
+    ]
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=matters))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(matter_aml_status_report_export_pdf(_fake_request()))
+    # Collapse wrapped-line newlines into spaces for a substring check. Note:
+    # pdfplumber's plain-text extraction places words purely by page
+    # position, so the short single-line Matter Status value ("Active"),
+    # which sits on the same visual row as the Reason column's first
+    # wrapped line, gets interleaved right after it -- a real artifact of
+    # extracting a multi-column table as flat text, not of the PDF's
+    # actual (correct) rendering. Asserting on the text in two chunks
+    # split around that one splice point still proves every character of
+    # the reason survived, with nothing missing or truncated.
+    text = " ".join(_pdf_text(response).split())
+
+    assert "Purchase of mining claims from PEP who declared beneficial" in text
+    assert (
+        "ownership through a trust structure requiring enhanced due "
+        "diligence and ongoing monitoring of the underlying trust deed."
+    ) in text
+    assert "Sale of immoveable property. Buyer lives in a high-risk jurisdiction" in text
+    assert (
+        "per the FIU advisory list, so source-of-funds documentation was "
+        "requested and verified before instruction."
+    ) in text
+    assert "PEP who ..." not in text
+    assert "lives i..." not in text
