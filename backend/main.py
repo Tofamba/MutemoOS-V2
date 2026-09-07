@@ -6040,6 +6040,100 @@ async def client_aml_cdd_report_export_pdf(client_id: str, request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+@app.get("/api/admin/investigate-cdd-report-pdf")
+async def _TEMP_investigate_cdd_report_pdf(request: Request):
+    """
+    TEMP, read-only, admin-token-gated -- full-report review requested
+    2026-09-07: is Section 5/7's truncation an isolated thing, or does
+    the Individual Client AML/CDD Report PDF have the same bug
+    everywhere free text meets a fixed-width, unwrapped _mp_pdf_table()
+    column? Runs the REAL report+PDF+CSV generation for every real
+    client in the firm, and reports, per client:
+      - every section/column where the rendered PDF contains the "..."
+        truncation marker (unambiguous proof _mp_truncate_to_width() cut
+        something off), with the real full text from the untruncated
+        report JSON for comparison
+      - the Compliance History "Result" column compared between the PDF
+        and the CSV, to catch the arrow-character (→) encoding
+        issue -- CSV is real UTF-8, PDF is latin-1-only, so a genuine
+        arrow shows correctly in CSV and degrades to "?" in the PDF
+      - real cdd_reviews rows for this client, to cross-check "Last CDD
+        Review" against the report's own claim
+    Removed once verified.
+    """
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        client_rows = await conn.fetch(
+            "SELECT id, full_name FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+        )
+        results = []
+        for crow in client_rows:
+            cid = crow["id"]
+            report = await _fetch_client_aml_cdd_report(conn, cid)
+            cdd_review_rows = await conn.fetch(
+                "SELECT review_date, risk_rating, changes_identified, further_action, status "
+                "FROM cdd_reviews WHERE firm_id=$1 AND client_id=$2 ORDER BY review_date DESC",
+                FIRM_ID, cid
+            )
+
+            sections = _client_cdd_report_sections(report)
+            pdf_bytes = _build_client_cdd_pdf(report)
+            csv_text = _client_cdd_report_csv(report)
+
+            import io as _io, pdfplumber
+            with pdfplumber.open(_io.BytesIO(pdf_bytes)) as p:
+                pdf_text = "\n".join(page.extract_text() or "" for page in p.pages)
+
+            truncations = []
+            for line in pdf_text.split("\n"):
+                if "..." in line:
+                    truncations.append(line.strip())
+
+            # Every field longer than 45 chars anywhere in the report, as a
+            # code-level "at risk" audit independent of whether it
+            # happens to be visibly truncated in THIS client's own data
+            # -- equal-width, unwrapped columns will truncate any field
+            # this long once a client has data that reaches it.
+            at_risk_fields = []
+            for section in sections:
+                for row in section["rows"]:
+                    for header, value in zip(section["headers"], row):
+                        if isinstance(value, str) and len(value) > 45:
+                            at_risk_fields.append({
+                                "section": section["title"], "column": header,
+                                "length": len(value), "value": value,
+                            })
+
+            # Arrow-character round-trip: compare Compliance History's
+            # "Result" values as they actually appear in the CSV (real
+            # UTF-8) vs a naive search for the literal arrow in the PDF
+            # text (should be ABSENT there if _pdf_safe() degraded it).
+            history_section = next((s for s in sections if s["title"].startswith("9.")), None)
+            arrow_results = [r[3] for r in history_section["rows"]] if history_section else []
+            arrow_values_with_char = [r for r in arrow_results if "→" in r]
+            arrow_survives_in_csv = [r for r in arrow_values_with_char if r in csv_text]
+            arrow_missing_from_pdf = [r for r in arrow_values_with_char if r not in pdf_text]
+
+            if not (truncations or at_risk_fields or arrow_values_with_char or cdd_review_rows or report["overall"].get("last_cdd_review_date")):
+                continue  # nothing interesting for this client -- skip from the report
+
+            results.append({
+                "client": crow["full_name"],
+                "client_id": str(cid),
+                "pdf_truncation_lines": truncations,
+                "at_risk_long_fields": at_risk_fields,
+                "arrow_character_values": arrow_values_with_char,
+                "arrow_survives_in_csv": arrow_survives_in_csv,
+                "arrow_missing_from_pdf": arrow_missing_from_pdf,
+                "report_last_cdd_review_date": report["overall"].get("last_cdd_review_date"),
+                "real_cdd_reviews_rows": [
+                    {k: (str(v) if v is not None else None) for k, v in dict(r).items()}
+                    for r in cdd_review_rows
+                ],
+            })
+
+    return {"total_clients": len(client_rows), "clients_with_findings": len(results), "results": results}
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
