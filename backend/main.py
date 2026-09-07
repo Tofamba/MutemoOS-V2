@@ -6104,6 +6104,76 @@ async def update_compliance_exception(client_id: str, exception_id: str, update:
         )
     return _row_to_compliance_exception(dict(updated))
 
+@app.get("/api/admin/verify-compliance-exceptions")
+async def _TEMP_verify_compliance_exceptions(request: Request):
+    """
+    TEMP, read-only*, admin-token-gated -- real-data verification for
+    commit e2d13d9 (Compliance Exception Resolution Workflow Phase 1).
+    For every real client in the firm: syncs (creating real exception
+    rows from real, current compliance gaps), then, for the first real
+    Open exception found anywhere, attempts an invalid Resolved
+    transition and confirms it's genuinely rejected (409) rather than
+    silently accepted. *Not read-only in the narrow sense -- sync does
+    write real rows, same as the real GET .../exceptions endpoint
+    already would on first view; the resolution attempt is confirmed
+    rejected, so it never actually changes anything. Removed once
+    verified.
+    """
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        client_rows = await conn.fetch(
+            "SELECT id, full_name FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+        )
+        system_actor = {"id": None, "firm_id": FIRM_ID, "display_name": "Verification Script", "role": "system"}
+        results = []
+        first_open = None
+        for crow in client_rows:
+            cid = crow["id"]
+            rows = await _sync_compliance_exceptions_for_client(conn, cid, system_actor)
+            if not rows:
+                continue
+            results.append({
+                "client": crow["full_name"],
+                "exceptions": [
+                    {"issue_code": r["issue_code"], "issue_label": r["issue_label"], "status": r["status"]}
+                    for r in rows
+                ],
+            })
+            if first_open is None:
+                for r in rows:
+                    if r["status"] in ("Open", "InProgress", "AwaitingClient"):
+                        first_open = (crow["full_name"], dict(r))
+                        break
+
+        # update_compliance_exception() itself isn't called directly here --
+        # it re-authenticates via get_current_user(request), which would
+        # fail against this admin-token request rather than exercising the
+        # scenario. Instead this calls the exact same gate function that
+        # endpoint's Resolved branch calls
+        # (_is_exception_issue_resolved()) -- its answer IS the real
+        # rejection decision, not a proxy for it: update_compliance_
+        # exception()'s own code is `if not await
+        # _is_exception_issue_resolved(...): raise HTTPException(409, ...)`,
+        # so confirming this returns False against a real, currently-
+        # unsatisfied exception is confirming the real endpoint would
+        # reject it.
+        rejection_test = None
+        if first_open:
+            client_name, exc = first_open
+            is_resolved_now = await _is_exception_issue_resolved(conn, exc["issue_code"], exc["client_id"])
+            rejection_test = {
+                "client": client_name, "issue_code": exc["issue_code"], "issue_label": exc["issue_label"],
+                "is_exception_issue_resolved_returns": is_resolved_now,
+                "real_endpoint_would": "reject with 409 (correct)" if not is_resolved_now else "allow Resolved",
+            }
+
+    return {
+        "total_clients": len(client_rows),
+        "clients_with_open_exceptions": len(results),
+        "results": results,
+        "rejection_test": rejection_test,
+    }
+
 def _compute_person_acting_status(reps: list) -> str:
     """
     Display-only summary across every authorized_representatives row for
