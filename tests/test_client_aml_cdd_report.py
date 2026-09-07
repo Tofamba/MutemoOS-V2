@@ -38,6 +38,7 @@ function's FakeConnection doesn't need).
 
 import asyncio
 import io
+import json
 import uuid
 from datetime import date, datetime, timezone
 
@@ -65,6 +66,12 @@ class FakeConnection:
         self.users = users if users is not None else []
         self.audit_logs = audit_logs if audit_logs is not None else []
         self.cdd_reviews = cdd_reviews if cdd_reviews is not None else []
+        # Compliance Exception Resolution Workflow (2026-09-07, Phase 2) --
+        # the report now syncs this client's own exceptions (Part D /
+        # "10. Exceptions / Follow-up") via _sync_compliance_exceptions_
+        # for_client(), which issues the real single-client-scoped
+        # queries handled below (fetchrow/fetch) and writes via execute().
+        self.compliance_exceptions = []
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -79,6 +86,17 @@ class FakeConnection:
         if q.startswith("SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2"):
             cid, firm_id = args
             return dict(self.compliance[cid]) if cid in self.compliance else None
+
+        if q.startswith("SELECT review_date, status, changes_identified FROM cdd_reviews"):
+            firm_id, cid = args
+            matching = [r for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid]
+            if not matching:
+                return None
+            latest = max(
+                matching,
+                key=lambda r: (r["review_date"], r.get("created_at") or datetime.min.replace(tzinfo=timezone.utc)),
+            )
+            return {k: latest[k] for k in ("review_date", "status", "changes_identified")}
 
         raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
@@ -129,7 +147,60 @@ class FakeConnection:
             ]
             return sorted(rows, key=lambda r: r["review_date"])
 
+        if q.startswith("SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2"):
+            cid, firm_id = args
+            return [
+                {"verification_status": o["verification_status"]}
+                for o in self.owners if o["client_id"] == cid and o["firm_id"] == firm_id
+            ]
+
+        if q.startswith("SELECT * FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2"):
+            firm_id, cid = args
+            return [dict(e) for e in self.compliance_exceptions if e["firm_id"] == firm_id and e["client_id"] == cid]
+
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+
+        if q.startswith("INSERT INTO audit_logs"):
+            (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details) = args
+            self.audit_logs.append({
+                "firm_id": firm_id, "user_id": user_id, "actor_name": actor_name, "actor_role": actor_role,
+                "action": action, "target_type": target_type, "target_id": target_id,
+                "details": json.loads(details) if details else {},
+                "created_at": datetime.now(timezone.utc),
+            })
+            return "INSERT 0 1"
+
+        if q.startswith("INSERT INTO compliance_exceptions"):
+            firm_id, cid, issue_code, issue_label, responsible_user_id = args
+            self.compliance_exceptions.append({
+                "id": uuid.uuid4(), "firm_id": firm_id, "client_id": cid,
+                "issue_code": issue_code, "issue_label": issue_label, "status": "Open",
+                "responsible_user_id": responsible_user_id, "due_date": None, "notes": None,
+                "closed_reason": None, "resolved_at": None, "closed_at": None,
+                "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+            })
+            return "INSERT 0 1"
+
+        if q.startswith("UPDATE compliance_exceptions SET status='Open'"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["status"] = "Open"
+                    e["issue_label"] = issue_label
+                    e["resolved_at"] = None
+            return "UPDATE 1"
+
+        if q.startswith("UPDATE compliance_exceptions SET issue_label=$1"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["issue_label"] = issue_label
+            return "UPDATE 1"
+
+        raise NotImplementedError(f"FakeConnection.execute: unhandled query: {q}")
 
     async def fetchval(self, query, *args):
         q = " ".join(query.split())
@@ -208,6 +279,24 @@ def _compliance(client_id, **kwargs):
     }
     row.update(kwargs)
     return row
+
+
+def _cleared_compliance(client_id, **kwargs):
+    """A fully "Cleared" compliance row (2026-09-07, Phase 2) -- for tests
+    that care about Compliance History composition, not the Compliance
+    Exception Resolution Workflow: with the default _client_row's Company
+    client_type and no compliance row at all, _sync_compliance_exceptions_
+    for_client() (now called by every report fetch) would open several
+    real "Compliance exception opened" events of its own, polluting these
+    tests' exact-event-list assertions with noise unrelated to what
+    they're testing. See tests/test_compliance_exceptions.py for that
+    workflow's own dedicated tests."""
+    defaults = dict(
+        identity_verification_status="Verified", client_is_beneficial_owner="Yes",
+        is_pep=False, conflict_check_reviewed=True,
+    )
+    defaults.update(kwargs)
+    return _compliance(client_id, **defaults)
 
 
 def _owner(client_id, **kwargs):
@@ -666,7 +755,7 @@ def test_compliance_history_enabled_with_no_events_yet(monkeypatch):
     import backend.main as m
     client_id = uuid.uuid4()
     client = _client_row(client_id)
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}))
     _as_current_user(monkeypatch, m, _partner())
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
@@ -680,7 +769,10 @@ def test_compliance_history_includes_client_level_events(monkeypatch):
     client_id = uuid.uuid4()
     client = _client_row(client_id)
     log = _audit_log("CLIENT", client_id, "BO_VERIFIED", {"owner_name": "Tendai Moyo"})
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[log]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}, audit_logs=[log]),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
@@ -702,7 +794,13 @@ def test_compliance_history_includes_matter_level_events_for_this_clients_matter
     client = _client_row(client_id)
     log = _audit_log("MATTER", matter["id"], "MATTER_RISK_SET", {"old": "NotAssessed", "new": "High"},
                       actor_name="Compliance Officer")
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], matters=[matter], audit_logs=[log]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(
+            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
+            matters=[matter], audit_logs=[log],
+        ),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
@@ -720,7 +818,10 @@ def test_compliance_history_excludes_another_clients_events(monkeypatch):
     other_client_id = uuid.uuid4()
     client = _client_row(client_id)
     log = _audit_log("CLIENT", other_client_id, "PEP_FLAGGED")
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[log]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}, audit_logs=[log]),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
@@ -734,7 +835,13 @@ def test_compliance_history_sorted_chronologically(monkeypatch):
     client = _client_row(client_id)
     later = _audit_log("CLIENT", client_id, "CONFLICT_CHECK_COMPLETED", created_at=datetime(2026, 9, 2, tzinfo=timezone.utc))
     earlier = _audit_log("CLIENT", client_id, "PEP_FLAGGED", created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[later, earlier]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(
+            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
+            audit_logs=[later, earlier],
+        ),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
@@ -766,7 +873,13 @@ def test_cdd_review_event_appears_in_compliance_history(monkeypatch):
     reviewer = _user("P. Chademana", user_id=reviewer_id)
     review = _cdd_review_row(client_id, reviewed_by=reviewer_id, risk_rating="High",
                               changes_identified="Client relocated")
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], users=[reviewer], cdd_reviews=[review]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(
+            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
+            users=[reviewer], cdd_reviews=[review],
+        ),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
@@ -786,7 +899,13 @@ def test_cdd_review_events_interleave_chronologically_with_audit_log_events(monk
     client = _client_row(client_id)
     review = _cdd_review_row(client_id, review_date=date(2026, 9, 2))
     log = _audit_log("CLIENT", client_id, "PEP_FLAGGED", created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], audit_logs=[log], cdd_reviews=[review]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(
+            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
+            audit_logs=[log], cdd_reviews=[review],
+        ),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
@@ -874,7 +993,106 @@ def _table_with_item(tables_for_header, item_label):
     raise AssertionError(f"No ('Item', 'Status') table contains a row for {item_label!r}")
 
 
-def test_csv_export_includes_all_nine_sections(monkeypatch):
+# ── Exceptions / Follow-up (Part D, 2026-09-07, Phase 2) ──────────────────
+# Read-only surfacing of this client's own Compliance Exception Resolution
+# Workflow rows -- see tests/test_compliance_exceptions.py for the
+# workflow's own lifecycle/resolution-validation/auto-reopen tests; these
+# only check this report's composition of already-synced rows.
+
+def test_exceptions_section_surfaces_a_real_outstanding_item(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    # Unverified identity is the one real gap -- everything else Cleared.
+    compliance = _cleared_compliance(client_id, identity_verification_status="Unverified")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance={client_id: compliance}))
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    exceptions = result["exceptions"]
+    assert len(exceptions) == 1
+    assert exceptions[0]["issue_label"] == "Identity not verified"
+    assert exceptions[0]["status_label"] == "Open"
+    assert exceptions[0]["responsible_person_name"] == "Compliance Officer"
+
+
+def test_exceptions_section_empty_for_a_fully_cleared_client(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    monkeypatch.setattr(
+        m, "_db_pool", FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}),
+    )
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    assert result["exceptions"] == []
+
+
+def test_exceptions_section_resolves_responsible_person_name(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    lawyer_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual", created_by=lawyer_id)
+    lawyer = _user("J. Moyo", user_id=lawyer_id)
+    compliance = _cleared_compliance(client_id, identity_verification_status="Unverified")
+    monkeypatch.setattr(
+        m, "_db_pool", FakePool(clients=[client], compliance={client_id: compliance}, users=[lawyer]),
+    )
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
+
+    assert result["exceptions"][0]["responsible_person_name"] == "J. Moyo"
+
+
+def test_exceptions_section_in_csv_export(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _cleared_compliance(client_id, identity_verification_status="Unverified")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance={client_id: compliance}))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export(str(client_id), _fake_request()))
+    rows = _csv_rows(response)
+    flat_rows = [row for row in rows if row]
+
+    idx = next(i for i, row in enumerate(flat_rows) if row[0] == "10. Exceptions / Follow-up")
+    assert flat_rows[idx + 1] == ["Issue", "Status", "Responsible Person", "Due"]
+    assert flat_rows[idx + 2] == ["Identity not verified", "Open", "Compliance Officer", "—"]
+
+
+def test_pdf_export_wraps_long_exception_issue_label(monkeypatch):
+    """CDD_REVIEW_OUTSTANDING's issue_label can carry a lawyer's own
+    unbounded changes_identified text appended to it -- same free-text
+    truncation risk as every other wrapped column in this report."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _cleared_compliance(client_id)
+    long_note = (
+        "Client's registered address changed and a new director was appointed, "
+        "requiring a full re-verification of identity documents and source of funds"
+    )
+    review = _cdd_review_row(client_id, status="Outstanding", changes_identified=long_note)
+    monkeypatch.setattr(
+        m, "_db_pool", FakePool(clients=[client], compliance={client_id: compliance}, cdd_reviews=[review]),
+    )
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+    tables = _pdf_tables_by_header(response)
+    exception_rows = tables[("Issue", "Status", "Responsible Person", "Due")][0]
+
+    assert len(exception_rows) == 1
+    assert long_note in exception_rows[0][0]
+    assert not exception_rows[0][0].endswith("...")
+
+
+def test_csv_export_includes_all_ten_sections(monkeypatch):
     import backend.main as m
     client_id = uuid.uuid4()
     client = _client_row(client_id, client_type="Individual")
@@ -889,6 +1107,7 @@ def test_csv_export_includes_all_nine_sections(monkeypatch):
         "1. Overall Compliance Position", "2. Client Identification", "3. Beneficial Ownership",
         "4. Person Acting for Client", "5. PEP / Risk Assessment", "6. Conflict Check",
         "7. Matters for this Client", "8. Supporting Document Index", "9. Compliance History",
+        "10. Exceptions / Follow-up",
     ]:
         assert expected in section_titles
 
@@ -1080,7 +1299,10 @@ def test_pdf_export_wraps_long_compliance_history_review_note(monkeypatch):
     client = _client_row(client_id)
     long_note = "Client is appointed as director of Fox Mining Group effective 01 September 2026, requiring AML re-assessment"
     review = _cdd_review_row(client_id, risk_rating="Low", changes_identified=long_note)
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], cdd_reviews=[review]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}, cdd_reviews=[review]),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
@@ -1106,7 +1328,13 @@ def test_pdf_export_renders_arrow_as_plain_ascii_not_garbled(monkeypatch):
     client = _client_row(client_id)
     log = _audit_log("MATTER", matter["id"], "MATTER_AML_SCOPE_SET",
                       {"old": "NotAssessed", "new": "InScope"}, actor_name="Compliance Officer")
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], matters=[matter], audit_logs=[log]))
+    monkeypatch.setattr(
+        m, "_db_pool",
+        FakePool(
+            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
+            matters=[matter], audit_logs=[log],
+        ),
+    )
     _as_current_user(monkeypatch, m, _partner())
 
     response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))

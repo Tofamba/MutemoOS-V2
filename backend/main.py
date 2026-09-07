@@ -4612,6 +4612,25 @@ _EXCEPTION_STATUS_LABELS = {
 
 _COMPLIANCE_EXCEPTION_REOPEN_REASON = "Underlying compliance condition is no longer satisfied"
 
+# AML Exceptions report priority (2026-09-07, Phase 2) -- reproduces
+# _priority_for_missing_item()'s own substring-based rule (PEP/beneficial-
+# ownership items are High, everything else is Medium) exactly, but keyed
+# on issue_code rather than the rendered label text. This matters now that
+# CDD_REVIEW_OUTSTANDING's own issue_label carries a lawyer's free-text
+# changes_identified appended to it -- a substring check against that text
+# risks a coincidental "PEP" or "beneficial ownership" mention wrongly
+# bumping priority (confirmed as a real, already-tested guarantee: see
+# tests/test_aml_exceptions_report.py's test_outstanding_review_priority_
+# is_not_bumped_by_free_text_mentioning_pep). issue_code is immune to that
+# by construction -- it's never built from free text.
+_HIGH_PRIORITY_ISSUE_CODES = {
+    "PEP_SCREENING_INCOMPLETE", "PEP_APPROVAL_REQUIRED", "RISK_RATING_REQUIRED",
+    "BENEFICIAL_OWNER_NOT_ASSESSED", "BENEFICIAL_OWNER_NOT_VERIFIED",
+}
+
+def _priority_for_issue_code(issue_code: str) -> str:
+    return "High" if issue_code in _HIGH_PRIORITY_ISSUE_CODES else "Medium"
+
 async def _is_exception_issue_resolved(conn, issue_code: str, cid) -> bool:
     """
     The canonical compliance-state lookup requirement #2 describes:
@@ -6125,7 +6144,7 @@ def _compute_person_acting_status(reps: list) -> str:
         return "Pending"
     return "Unverified"
 
-async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
+async def _fetch_client_aml_cdd_report(conn, cid, user: dict) -> dict:
     """
     Individual Client AML/CDD Report (2026-09-03, partner design review,
     built from a sample report PDF) -- composition of data that already
@@ -6145,6 +6164,14 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
     with every one of its matters' events into one chronological
     timeline, matching the sample report's own mixed client+matter event
     list.
+
+    Part D (Exception/Follow-up, 2026-09-07, Phase 2): syncs and
+    surfaces this client's own persisted compliance_exceptions --
+    `user` (the report's real viewer) is the sync's actor, same
+    convention as GET .../exceptions, since this is a single specific
+    client's report, not a firm-wide sweep like the AML Exceptions
+    report (which uses a "System" actor precisely because it isn't any
+    one person choosing to look at this one client).
     """
     client_row = await _get_client_or_404(conn, cid)
 
@@ -6171,10 +6198,15 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
     )
     matters = [_row_to_matter(r) for r in matter_rows]
 
-    # Resolve two kinds of user references to real names in one batched
-    # lookup (not two round trips): the conflict check reviewer, and
-    # whoever (if anyone) approved this client's PEP status.
+    exception_rows = await _sync_compliance_exceptions_for_client(conn, cid, user)
+    exceptions = [_row_to_compliance_exception(r) for r in exception_rows]
+
+    # Resolve three kinds of user references to real names in one batched
+    # lookup (not three round trips): the conflict check reviewer,
+    # whoever (if anyone) approved this client's PEP status, and each
+    # open exception's responsible person.
     user_ids = [u for u in (compliance.get("conflict_check_reviewed_by"), compliance.get("senior_management_approved_by")) if u]
+    user_ids += [e["responsible_user_id"] for e in exceptions if e.get("responsible_user_id")]
     names_by_user_id = {}
     if user_ids:
         user_rows = await conn.fetch(
@@ -6232,6 +6264,9 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
     bo_status = _compute_bo_status(client_row, compliance, [dict(r) for r in owner_rows])
     last_cdd_review_date = await _fetch_last_cdd_review_date(conn, cid)
 
+    for e in exceptions:
+        e["responsible_person_name"] = names_by_user_id.get(e.get("responsible_user_id")) or "Compliance Officer"
+
     return {
         "client": _row_to_client(client_row),
         "overall": {
@@ -6281,6 +6316,13 @@ async def _fetch_client_aml_cdd_report(conn, cid) -> dict:
             "enabled": True,
             "events": await _fetch_compliance_history(conn, cid, matter_ids),
         },
+        # Part D (2026-09-07, Phase 2) -- every exception this client
+        # has ever had (oldest first, same as GET .../exceptions),
+        # including Resolved/Closed ones: a follow-up section is more
+        # useful showing the client's whole exception history than only
+        # what's currently open, and the report already has "9.
+        # Compliance History" if a reviewer only wants the event log.
+        "exceptions": exceptions,
     }
 
 @app.get("/api/clients/{client_id}/aml-cdd-report")
@@ -6302,7 +6344,7 @@ async def client_aml_cdd_report(client_id: str, request: Request):
     _check_permission(user, "client:read")
     cid = _parse_client_id(client_id)
     async with _db_pool.acquire() as conn:
-        return await _fetch_client_aml_cdd_report(conn, cid)
+        return await _fetch_client_aml_cdd_report(conn, cid, user)
 
 def _client_cdd_report_sections(report: dict) -> list:
     """
@@ -6432,6 +6474,19 @@ def _client_cdd_report_sections(report: dict) -> list:
         "rows": [[ev["date"] or "—", ev["event"], ev["user"], ev["result"]] for ev in history.get("events", [])],
     })
 
+    # 10. Exceptions / Follow-up (2026-09-07, Phase 2) -- this client's
+    # whole Compliance Exception Resolution Workflow history, read-only
+    # here (unlike the compliance modal's own interactive version): a
+    # report export is a point-in-time record, not a place to act from.
+    sections.append({
+        "title": "10. Exceptions / Follow-up",
+        "headers": ["Issue", "Status", "Responsible Person", "Due"],
+        "rows": [
+            [ex["issue_label"], ex["status_label"], ex["responsible_person_name"], ex.get("due_date") or "—"]
+            for ex in report.get("exceptions", [])
+        ],
+    })
+
     return sections
 
 def _client_cdd_report_csv(report: dict) -> str:
@@ -6484,6 +6539,10 @@ _CDD_SECTION_LAYOUT = {
     "7. Matters for this Client":     {"col_pcts": (30, 12, 13, 32, 13), "wrap_cols": {0, 3}},  # Matter, Reason
     "8. Supporting Document Index":   {"col_pcts": (30, 15, 15, 40),     "wrap_cols": {3}},   # File
     "9. Compliance History":          {"col_pcts": (12, 24, 16, 48),     "wrap_cols": {3}},   # Result
+    # 10. Exceptions / Follow-up (2026-09-07, Phase 2): Issue carries
+    # CDD_REVIEW_OUTSTANDING's own free-text changes_identified suffix
+    # (same unbounded-text risk as every other wrapped column above).
+    "10. Exceptions / Follow-up":     {"col_pcts": (46, 16, 22, 16),     "wrap_cols": {0}},   # Issue
 }
 
 def _build_client_cdd_pdf(report: dict) -> bytes:
@@ -6536,7 +6595,7 @@ async def client_aml_cdd_report_export(client_id: str, request: Request):
     _check_permission(user, "client:read")
     cid = _parse_client_id(client_id)
     async with _db_pool.acquire() as conn:
-        report = await _fetch_client_aml_cdd_report(conn, cid)
+        report = await _fetch_client_aml_cdd_report(conn, cid, user)
     csv_text = _client_cdd_report_csv(report)
     filename = f"client_aml_cdd_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(csv_text, filename)
@@ -6549,7 +6608,7 @@ async def client_aml_cdd_report_export_pdf(client_id: str, request: Request):
     _check_permission(user, "client:read")
     cid = _parse_client_id(client_id)
     async with _db_pool.acquire() as conn:
-        report = await _fetch_client_aml_cdd_report(conn, cid)
+        report = await _fetch_client_aml_cdd_report(conn, cid, user)
     pdf_bytes = _build_client_cdd_pdf(report)
     filename = f"client_aml_cdd_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(
@@ -8484,78 +8543,67 @@ _CDD_REVIEW_OUTSTANDING_LABEL = "CDD Review Outstanding"
 
 async def _fetch_aml_exceptions_rows(conn) -> list:
     """
-    One row per outstanding compliance item, firm-wide, sorted High
-    priority first (then by client name for a stable order within a
-    priority tier). Responsible Person defaults to the client's own
-    created_by lawyer (resolved via a batched users lookup, not N+1);
-    "Compliance Officer" when that lawyer can't be resolved (no
-    created_by recorded, or the user row is gone) -- a real name to
-    action against wherever one exists, a role to fall back to
-    otherwise.
-    """
-    client_rows, compliance_by_client, owners_by_client = await _fetch_clients_with_compliance(conn)
-    client_ids = [c["id"] for c in client_rows]
+    One row per currently-actionable compliance exception (Open/
+    InProgress/AwaitingClient -- Resolved and ClosedNoFurtherAction are
+    no longer "what do I need to deal with?", this report's own
+    purpose), firm-wide, sorted High priority first (then by client name
+    for a stable order within a priority tier).
 
-    creator_ids = [c["created_by"] for c in client_rows if c.get("created_by")]
+    2026-09-07, Phase 2: reads the PERSISTED compliance_exceptions rows
+    (via _sync_compliance_exceptions_for_client(), which materializes/
+    reopens them from the exact same missing[]/CDD-review-outstanding
+    signals this report always computed live) instead of building
+    ephemeral rows fresh every time -- so Status/Responsible Person/Due
+    now reflect whatever a lawyer has actually done with a given
+    exception (moved it to In Progress, reassigned it, set a due date),
+    not always a freshly-guessed "Open"/created_by. On a client's very
+    first sync, a new exception's responsible_user_id defaults to
+    created_by and status defaults to Open -- identical to this
+    function's old hardcoded behavior, which is why the existing test
+    suite's expectations mostly carry over unchanged.
+
+    Calls sync once per client (N+1), not the previous single batched
+    fetch -- a real, accepted trade-off for reusing the one true sync
+    path rather than a second, parallel read implementation; firm-wide
+    client counts here are small enough (tens, not thousands) for this
+    not to matter in practice, same reasoning GET .../exceptions itself
+    already accepts per client.
+    """
+    client_rows = await conn.fetch(
+        "SELECT id, full_name, client_number FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+    )
+    system_actor = {"id": None, "firm_id": FIRM_ID, "display_name": "System", "role": "system"}
+
+    actionable = []
+    for c in client_rows:
+        exceptions = await _sync_compliance_exceptions_for_client(conn, c["id"], system_actor)
+        for e in exceptions:
+            if e["status"] in ("Open", "InProgress", "AwaitingClient"):
+                actionable.append((c, e))
+
+    responsible_ids = [e.get("responsible_user_id") for _, e in actionable if e.get("responsible_user_id")]
     names_by_user_id = {}
-    if creator_ids:
+    if responsible_ids:
         user_rows = await conn.fetch(
             "SELECT id, display_name FROM users WHERE id = ANY($1) AND firm_id=$2",
-            creator_ids, FIRM_ID
+            responsible_ids, FIRM_ID
         )
         names_by_user_id = {u["id"]: u["display_name"] for u in user_rows}
 
-    # Reuses the exact same cdd_reviews query/join shape Phase 1 already
-    # established (_fetch_compliance_history()) -- one batched fetch, not
-    # a second way of reading review data. "First per client_id wins ==
-    # most recent" on a DESC-ordered fetch is the same idiom
-    # _fetch_matter_review_status_rows() already uses for its own
-    # most-recent-note/document lookups.
-    latest_review_by_client = {}
-    if client_ids:
-        review_rows = await conn.fetch(
-            "SELECT client_id, review_date, status, changes_identified FROM cdd_reviews "
-            "WHERE firm_id=$1 AND client_id = ANY($2) "
-            "ORDER BY client_id, review_date DESC, created_at DESC",
-            FIRM_ID, client_ids
-        )
-        for r in review_rows:
-            latest_review_by_client.setdefault(r["client_id"], r)
-
     rows = []
-    for c in client_rows:
-        compliance = compliance_by_client.get(c["id"]) or dict(_DEFAULT_CLIENT_COMPLIANCE)
-        owners = owners_by_client.get(c["id"], [])
-        status = _compute_compliance_status(dict(c), compliance, owners)
-        responsible = names_by_user_id.get(c.get("created_by")) or "Compliance Officer"
-
-        for item in status["missing"]:
-            rows.append({
-                "priority": _priority_for_missing_item(item),
-                "client_id": str(c["id"]),
-                "client_name": c["full_name"],
-                "client_number": c["client_number"],
-                "matter": "",  # client-level only -- see section header comment
-                "issue": item,
-                "responsible_person": responsible,
-                "status": "Open",
-            })
-
-        latest_review = latest_review_by_client.get(c["id"])
-        if latest_review and latest_review["status"] == "Outstanding":
-            issue = _CDD_REVIEW_OUTSTANDING_LABEL
-            if latest_review.get("changes_identified"):
-                issue += f": {latest_review['changes_identified']}"
-            rows.append({
-                "priority": _priority_for_missing_item(_CDD_REVIEW_OUTSTANDING_LABEL),
-                "client_id": str(c["id"]),
-                "client_name": c["full_name"],
-                "client_number": c["client_number"],
-                "matter": "",
-                "issue": issue,
-                "responsible_person": responsible,
-                "status": "Open",
-            })
+    for c, e in actionable:
+        rows.append({
+            "exception_id": str(e["id"]),
+            "priority": _priority_for_issue_code(e["issue_code"]),
+            "client_id": str(c["id"]),
+            "client_name": c["full_name"],
+            "client_number": c["client_number"],
+            "matter": "",  # client-level only -- see section header comment
+            "issue": e["issue_label"],
+            "responsible_person": names_by_user_id.get(e.get("responsible_user_id")) or "Compliance Officer",
+            "status": _EXCEPTION_STATUS_LABELS.get(e["status"], e["status"]),
+            "due": str(e["due_date"]) if e.get("due_date") else "",
+        })
 
     priority_order = {"High": 0, "Medium": 1, "Low": 2}
     rows.sort(key=lambda r: (priority_order.get(r["priority"], 9), r["client_name"] or ""))
@@ -8568,8 +8616,7 @@ async def aml_exceptions_report(request: Request):
     across every client, prioritized -- "what do I need to deal with?",
     the third of the three management questions this report family
     answers (alongside the Register's "where do we stand?" and the
-    not-yet-built individual client drill-down's "show me everything for
-    this client").
+    Individual Client report's "show me everything for this client").
     """
     user = await get_current_user(request)
     _check_permission(user, "reports:client_compliance_status")
@@ -8577,10 +8624,33 @@ async def aml_exceptions_report(request: Request):
         rows = await _fetch_aml_exceptions_rows(conn)
     return rows
 
-_AML_EXCEPTIONS_HEADERS = ["Priority", "Client", "Matter", "Issue", "Responsible Person", "Status"]
+@app.get("/api/reports/aml-exceptions-summary")
+async def aml_exceptions_summary(request: Request):
+    """
+    Status-count summary for the AML Exceptions report (2026-09-07,
+    Phase 2) -- a separate endpoint rather than folding this into
+    GET .../aml-exceptions, same convention as the AML/Client Compliance
+    Register's own summary endpoint just above, so that endpoint's
+    existing bare-list response shape stays untouched. Counts every
+    actionable status (Open/In Progress/Awaiting Client) this report's
+    own rows already carry, so the two can never disagree.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_aml_exceptions_rows(conn)
+    counts = {"Open": 0, "In Progress": 0, "Awaiting Client": 0}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return {"total": len(rows), "by_status": counts}
+
+_AML_EXCEPTIONS_HEADERS = ["Priority", "Client", "Matter", "Issue", "Responsible Person", "Status", "Due"]
 
 def _aml_exceptions_export_row(r: dict) -> list:
-    return [r["priority"], r["client_name"] or "", r["matter"], r["issue"], r["responsible_person"], r["status"]]
+    return [
+        r["priority"], r["client_name"] or "", r["matter"], r["issue"],
+        r["responsible_person"], r["status"], r["due"],
+    ]
 
 @app.get("/api/reports/aml-exceptions-export")
 async def aml_exceptions_report_export(request: Request):
@@ -8605,7 +8675,12 @@ async def aml_exceptions_report_export(request: Request):
 async def aml_exceptions_report_export_pdf(request: Request):
     """Same data/permission as the JSON report and CSV export above --
     PDF download, reusing _mp_pdf_table() same as the Register's own PDF
-    export just above."""
+    export just above. Issue (2026-09-07) wraps instead of truncating --
+    same real formatting-review family as the Matter AML Status and
+    Individual Client CDD reports: this column carries the same
+    genuinely open-ended text (a raw missing[] label, or CDD Review
+    Outstanding with a lawyer's own changes_identified appended), which
+    was truncating under the old equal-width layout."""
     user = await get_current_user(request)
     _check_permission(user, "reports:client_compliance_status")
     async with _db_pool.acquire() as conn:
@@ -8627,10 +8702,13 @@ async def aml_exceptions_report_export_pdf(request: Request):
         pdf.cell(0, 6, "No outstanding items -- every client is Cleared.", new_x="LMARGIN", new_y="NEXT")
     else:
         usable_width = pdf.w - pdf.l_margin - pdf.r_margin
-        col_pcts = (10, 20, 15, 30, 15, 10)
+        # Headers: Priority, Client, Matter, Issue, Responsible Person,
+        # Status, Due. Issue (index 3) wraps; Matter is always blank
+        # (client-level only) so it stays narrow.
+        col_pcts = (8, 17, 6, 32, 17, 12, 8)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_aml_exceptions_export_row(r) for r in rows]
-        _mp_pdf_table(pdf, _AML_EXCEPTIONS_HEADERS, col_widths, table_rows)
+        _mp_pdf_table(pdf, _AML_EXCEPTIONS_HEADERS, col_widths, table_rows, wrap_cols={3})
 
     filename = f"aml_exceptions_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(

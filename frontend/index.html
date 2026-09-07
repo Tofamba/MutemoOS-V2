@@ -2002,6 +2002,9 @@ select{cursor:pointer}
       <button class="btn btn-outline btn-sm" onclick="submitCddReview()">Save CDD Review</button>
     </div>
 
+    <div class="form-section-label">COMPLIANCE EXCEPTIONS <span style="font-weight:400;text-transform:none;color:var(--ink3)">(auto-tracked from this client's real compliance state — see Compliance History for the audit trail)</span></div>
+    <div id="cc-exceptions-list" style="margin-bottom:1rem;font-size:0.82rem;color:var(--ink3)">Loading…</div>
+
     <div class="form-section-label">RETENTION — s24 <span style="font-weight:400;text-transform:none;color:var(--ink3)">(flag only, no automatic deletion)</span></div>
     <div class="form-row">
       <div class="form-group">
@@ -2369,6 +2372,10 @@ select{cursor:pointer}
       <div style="margin-top:0.5rem">
         <button class="btn btn-primary" onclick="loadAmlExceptions()">▶ Generate</button>
       </div>
+      <!-- Status-count summary (2026-09-07, Phase 2) -- same
+           fetched-alongside-the-roster-on-Generate pattern as the AML/
+           Client Compliance Register's own ccs-summary above. -->
+      <div id="ae-summary" style="display:none;margin-top:0.75rem"></div>
       <div id="ae-results" style="display:none;margin-top:0.75rem">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <input type="text" id="ae-search" placeholder="🔍 Search client or issue…" oninput="_aeSetSearch(this.value)"
@@ -3506,6 +3513,12 @@ let _complianceClientId = null;
 let _complianceOwners = [];
 let _complianceReps = [];
 let _complianceData = null;
+// Compliance Exception Resolution Workflow (2026-09-07, Phase 2) --
+// fetched fresh every time the modal opens (see openComplianceModal),
+// same as owners/reps above; _complianceUsers backs the Responsible
+// Person dropdown, same GET /api/users pattern as loadMatterReviewStatusFilters().
+let _complianceExceptions = [];
+let _complianceUsers = [];
 
 async function openComplianceModal(clientId) {
   _complianceClientId = clientId;
@@ -3519,16 +3532,22 @@ async function openComplianceModal(clientId) {
   document.getElementById('compliance-modal').style.display = 'flex';
 
   try {
-    const [clientRes, complianceRes, ownersRes, repsRes] = await Promise.all([
+    const [clientRes, complianceRes, ownersRes, repsRes, exceptionsRes, usersRes] = await Promise.all([
       fetch(`${API}/api/clients/${clientId}`),
       fetch(`${API}/api/clients/${clientId}/compliance`),
       fetch(`${API}/api/clients/${clientId}/beneficial-owners`),
       fetch(`${API}/api/clients/${clientId}/authorized-representatives`),
+      fetch(`${API}/api/clients/${clientId}/exceptions`),
+      fetch(`${API}/api/users`),
     ]);
     const client = await clientRes.json();
     _complianceData = await complianceRes.json();
     _complianceOwners = await ownersRes.json();
     _complianceReps = await repsRes.json();
+    // Exceptions/users degrade independently -- a failure here shouldn't
+    // block the rest of the compliance form from loading and being usable.
+    _complianceExceptions = exceptionsRes.ok ? await exceptionsRes.json() : [];
+    _complianceUsers = usersRes.ok ? await usersRes.json() : [];
 
     document.getElementById('compliance-badge-row').innerHTML =
       complianceStatusChipHtml(_complianceData.compliance_status) +
@@ -3595,6 +3614,7 @@ async function openComplianceModal(clientId) {
     renderOwnersList();
     renderRepsList();
     renderConflictReviewedNote();
+    renderComplianceExceptionsList();
   } catch(e) {
     document.getElementById('compliance-modal-status').className = 'status show error';
     document.getElementById('compliance-modal-status').textContent = `Error loading compliance data: ${e.message}`;
@@ -3807,6 +3827,133 @@ function renderConflictReviewedNote() {
   const note = document.getElementById('cc-conflict-reviewed-note');
   note.textContent = _complianceData.conflict_check_reviewed
     ? `✓ Reviewed ${_complianceData.conflict_check_reviewed_date || ''}` : 'Not yet reviewed';
+}
+
+// ── Compliance Exceptions (2026-09-07, Phase 2) ─────────────────────────────
+// The one interactive view of this client's Compliance Exception
+// Resolution Workflow rows -- backend/main.py's GET/PATCH .../exceptions.
+// Every row here is auto-tracked (opened/reopened by the server, never by
+// this UI); the only actions a lawyer can take are move its status,
+// reassign its responsible person, set a due date, and add notes -- see
+// saveComplianceException() below, which mirrors update_compliance_
+// exception()'s own field set exactly. Resolved/Closed rows stay listed
+// (this client's whole exception history, same as the CDD report's own
+// read-only section), not just the currently-open ones.
+const EXCEPTION_STATUS_OPTIONS = [
+  ['Open', 'Open'], ['InProgress', 'In Progress'], ['AwaitingClient', 'Awaiting Client'],
+  ['Resolved', 'Resolved'], ['ClosedNoFurtherAction', 'Closed — No Further Action'],
+];
+
+function renderComplianceExceptionsList() {
+  const el = document.getElementById('cc-exceptions-list');
+  if (!el) return;
+  if (!_complianceExceptions.length) {
+    el.innerHTML = '<em style="color:var(--green)">No exceptions — every tracked compliance requirement for this client is currently satisfied.</em>';
+    return;
+  }
+  const userOptionsFor = (selectedId) => _complianceUsers.map(u =>
+    `<option value="${u.id}" ${String(u.id) === String(selectedId) ? 'selected' : ''}>${escHtml(u.display_name)}</option>`
+  ).join('');
+
+  el.innerHTML = _complianceExceptions.map(ex => {
+    const chip = CDD_EXCEPTION_STATUS_CHIP[ex.status] || 'chip-gray';
+    const showCloseReason = ex.status === 'ClosedNoFurtherAction';
+    return `
+      <div class="cc-exception-row" data-exception-id="${ex.id}"
+           style="border:1px solid var(--border);border-radius:8px;padding:0.6rem 0.75rem;margin-bottom:0.5rem;background:var(--paper2)">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+          <div style="font-weight:600;font-size:0.83rem">${escHtml(ex.issue_label)}</div>
+          <span class="chip ${chip}">${escHtml(ex.status_label)}</span>
+        </div>
+        <div class="form-row" style="margin-top:0.5rem">
+          <div class="form-group">
+            <label style="font-size:0.72rem">Status</label>
+            <select class="cce-status" onchange="_onExceptionStatusChange(this)">
+              ${EXCEPTION_STATUS_OPTIONS.map(([v, label]) =>
+                `<option value="${v}" ${v === ex.status ? 'selected' : ''}>${label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="font-size:0.72rem">Responsible Person</label>
+            <select class="cce-responsible">
+              <option value="">— Leave unchanged (Compliance Officer default) —</option>
+              ${userOptionsFor(ex.responsible_user_id)}
+            </select>
+          </div>
+          <div class="form-group">
+            <label style="font-size:0.72rem">Due Date</label>
+            <input type="date" class="cce-due" value="${ex.due_date || ''}"/>
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:0.4rem">
+          <label style="font-size:0.72rem">Notes</label>
+          <textarea class="cce-notes" rows="2" style="font-size:0.8rem">${escHtml(ex.notes || '')}</textarea>
+        </div>
+        <div class="cce-close-reason-wrap" style="display:${showCloseReason ? 'block' : 'none'};margin-top:0.4rem">
+          <label style="font-size:0.72rem">Reason for Closing — No Further Action <span style="color:var(--red)">(required)</span></label>
+          <textarea class="cce-close-reason" rows="2" style="font-size:0.8rem">${escHtml(ex.closed_reason || '')}</textarea>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:0.5rem">
+          <span class="cce-error" style="font-size:0.75rem;color:var(--red)"></span>
+          <button class="btn btn-outline btn-sm" style="width:auto" onclick="saveComplianceException('${ex.id}', this)">Save</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function _onExceptionStatusChange(selectEl) {
+  const row = selectEl.closest('.cc-exception-row');
+  const wrap = row.querySelector('.cce-close-reason-wrap');
+  wrap.style.display = selectEl.value === 'ClosedNoFurtherAction' ? 'block' : 'none';
+}
+
+async function saveComplianceException(exceptionId, btnEl) {
+  const row = btnEl.closest('.cc-exception-row');
+  const errEl = row.querySelector('.cce-error');
+  errEl.textContent = '';
+
+  const status = row.querySelector('.cce-status').value;
+  const responsibleUserId = row.querySelector('.cce-responsible').value;
+  const dueDate = row.querySelector('.cce-due').value;
+  const notes = row.querySelector('.cce-notes').value;
+  const closeReason = row.querySelector('.cce-close-reason').value.trim();
+
+  // Requirement #3: a written reason is mandatory to close with no
+  // further action -- caught here too (not just server-side) so the
+  // lawyer sees it immediately instead of a round-trip 422.
+  if (status === 'ClosedNoFurtherAction' && !closeReason) {
+    errEl.textContent = 'A reason is required to close with no further action.';
+    return;
+  }
+
+  const payload = { status, due_date: dueDate, notes };
+  if (responsibleUserId) payload.responsible_user_id = responsibleUserId;
+  if (status === 'ClosedNoFurtherAction') payload.closed_reason = closeReason;
+
+  btnEl.disabled = true;
+  btnEl.textContent = 'Saving…';
+  try {
+    const res = await fetch(`${API}/api/clients/${_complianceClientId}/exceptions/${exceptionId}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // Requirement #2 surfaces here: a 409 means the underlying
+      // compliance requirement isn't actually satisfied yet -- shown
+      // verbatim, not silently swallowed or retried.
+      errEl.textContent = data.detail || 'Failed to save.';
+      return;
+    }
+    const idx = _complianceExceptions.findIndex(e => e.id === exceptionId);
+    if (idx !== -1) _complianceExceptions[idx] = data;
+    renderComplianceExceptionsList();
+  } catch(e) {
+    errEl.textContent = `Error: ${e.message}`;
+  } finally {
+    btnEl.disabled = false;
+    btnEl.textContent = 'Save';
+  }
 }
 
 async function runClientConflictCheck() {
@@ -8618,12 +8765,13 @@ const AE_PRIORITY_ORDER = { 'High': 0, 'Medium': 1, 'Low': 2 };
 const AE_PRIORITY_CHIP = { 'High': 'chip-red', 'Medium': 'chip-gold', 'Low': 'chip-gray' };
 
 const AE_COLUMNS = [
-  { key: 'priority', label: 'Priority', width: '10%' },
-  { key: 'client_name', label: 'Client', width: '20%' },
-  { key: 'matter', label: 'Matter', width: '12%' },
-  { key: 'issue', label: 'Issue', width: '30%' },
-  { key: 'responsible_person', label: 'Responsible Person', width: '18%' },
+  { key: 'priority', label: 'Priority', width: '9%' },
+  { key: 'client_name', label: 'Client', width: '18%' },
+  { key: 'matter', label: 'Matter', width: '10%' },
+  { key: 'issue', label: 'Issue', width: '27%' },
+  { key: 'responsible_person', label: 'Responsible Person', width: '16%' },
   { key: 'status', label: 'Status', width: '10%' },
+  { key: 'due', label: 'Due', width: '10%' },
 ];
 
 function _aeSetSearch(value) {
@@ -8690,6 +8838,7 @@ function _aeRenderTable() {
               <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(r.issue)}</td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.responsible_person)}</td>
               <td style="padding:6px 8px">${escHtml(r.status)}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.due || '—')}</td>
             </tr>
           `;
         }).join('')}
@@ -8701,14 +8850,45 @@ function _aeRenderTable() {
   statusEl.style.color = 'var(--ink3)';
 }
 
+// Status-count summary (2026-09-07, Phase 2) -- Total/Open/In Progress/
+// Awaiting Client, fetched from its own endpoint (same convention as the
+// AML/Client Compliance Register's _ccsRenderSummary() above) so the
+// bare-list shape of GET .../aml-exceptions itself stays untouched.
+function _aeRenderSummary(s) {
+  const el = document.getElementById('ae-summary');
+  if (!el) return;
+  if (!s) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const byStatus = s.by_status || {};
+  const tile = (label, value, color) => `
+    <div style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;min-width:120px;background:var(--paper2)">
+      <div style="font-size:0.68rem;color:var(--ink3);font-family:var(--font-sans);text-transform:uppercase;letter-spacing:0.02em">${label}</div>
+      <div style="font-size:1.15rem;font-weight:700;font-family:var(--font-sans);${color ? `color:${color}` : ''}">${value}</div>
+    </div>`;
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      ${tile('Total Outstanding', s.total ?? 0, (s.total ? 'var(--danger)' : 'var(--success)'))}
+      ${tile('Open', byStatus['Open'] ?? 0)}
+      ${tile('In Progress', byStatus['In Progress'] ?? 0)}
+      ${tile('Awaiting Client', byStatus['Awaiting Client'] ?? 0)}
+    </div>
+  `;
+}
+
 async function loadAmlExceptions() {
   document.getElementById('ae-results').style.display = 'block';
   const el = document.getElementById('aml-exceptions-list');
   const statusEl = document.getElementById('ae-status');
   try {
-    const res = await fetch(`${API}/api/reports/aml-exceptions`);
-    if (!res.ok) { el.innerHTML = '<em>Could not load AML exceptions.</em>'; return; }
-    _aeRows = await res.json();
+    const [rowsRes, summaryRes] = await Promise.all([
+      fetch(`${API}/api/reports/aml-exceptions`),
+      fetch(`${API}/api/reports/aml-exceptions-summary`),
+    ]);
+    if (!rowsRes.ok) { el.innerHTML = '<em>Could not load AML exceptions.</em>'; return; }
+    _aeRows = await rowsRes.json();
+    // Summary degrades independently -- a summary-endpoint failure
+    // shouldn't block the table itself from rendering.
+    _aeRenderSummary(summaryRes.ok ? await summaryRes.json() : null);
     _aeRenderTable();
   } catch(e) { el.innerHTML = '<em>Error loading AML exceptions.</em>'; }
 }
@@ -9013,6 +9193,15 @@ function _cddTable(headers, rows) {
 const CDD_PEP_CHIP_TEXT = (v) => v === true ? '<span style="color:var(--red);font-weight:600">Yes</span>'
   : v === false ? 'No' : '<span style="color:var(--ink3)">Not yet assessed</span>';
 
+// Compliance Exception Resolution Workflow (2026-09-07, Phase 2) status
+// chip colors -- same PascalCase storage keys as backend/main.py's
+// EXCEPTION_STATUSES/_EXCEPTION_STATUS_LABELS, shared by this report's
+// read-only section and the compliance modal's interactive one below.
+const CDD_EXCEPTION_STATUS_CHIP = {
+  'Open': 'chip-red', 'InProgress': 'chip-gold', 'AwaitingClient': 'chip-gold',
+  'Resolved': 'chip-green', 'ClosedNoFurtherAction': 'chip-gray',
+};
+
 let _cddReportClientId = null;
 
 async function openClientCddReportModal(clientId) {
@@ -9188,8 +9377,22 @@ function _renderCddReport(r) {
         [escHtml(ev.date), escHtml(ev.event), escHtml(ev.user), escHtml(ev.result)]))
     : `<p style="color:var(--ink3);font-style:italic">${escHtml(history.message)}</p>`);
 
+  // 10. Exceptions / Follow-up (2026-09-07, Phase 2) -- read-only here,
+  // unlike the compliance modal's own interactive Compliance Exceptions
+  // section: this report is a point-in-time record, not a place to act
+  // from. Shows this client's whole exception history (Resolved/Closed
+  // included), same as GET .../exceptions.
+  const exceptionRows = (r.exceptions || []).map(ex => [
+    escHtml(ex.issue_label),
+    `<span class="chip ${CDD_EXCEPTION_STATUS_CHIP[ex.status] || 'chip-gray'}">${escHtml(ex.status_label)}</span>`,
+    escHtml(ex.responsible_person_name || 'Compliance Officer'),
+    escHtml(ex.due_date || '—'),
+  ]);
+  const exceptionsSection = _cddSection('10. Exceptions / Follow-up',
+    _cddTable(['Issue', 'Status', 'Responsible Person', 'Due'], exceptionRows));
+
   return header + overallSection + idSection + boSection + repSection + pepSection
-    + conflictSection + mattersSection + docsSection + historySection;
+    + conflictSection + mattersSection + docsSection + historySection + exceptionsSection;
 }
 
 // SMS Usage by Firm's own render function (loadSmsUsageByFirm) was removed

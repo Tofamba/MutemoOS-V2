@@ -29,6 +29,7 @@ AND firm_id=$2).
 """
 
 import asyncio
+import json
 import uuid
 from datetime import date, datetime, timezone
 
@@ -40,6 +41,7 @@ from backend.main import (
     aml_exceptions_report,
     aml_exceptions_report_export,
     aml_exceptions_report_export_pdf,
+    aml_exceptions_summary,
 )
 
 
@@ -50,11 +52,54 @@ class FakeConnection:
         self.owners = owners if owners is not None else []
         self.users = users if users is not None else []
         self.cdd_reviews = cdd_reviews if cdd_reviews is not None else []
+        # Compliance Exception Resolution Workflow (2026-09-07, Phase 2) --
+        # _fetch_aml_exceptions_rows() now reads PERSISTED compliance_
+        # exceptions rows via _sync_compliance_exceptions_for_client(),
+        # called once per client, so this fixture needs to answer that
+        # function's real single-client-scoped queries (see fetchrow/
+        # execute below), not just the old firm-wide batched ones.
+        self.compliance_exceptions = []
+        self.audit_logs = []
+
+    async def fetchrow(self, query, *args):
+        q = " ".join(query.split())
+
+        if q.startswith("SELECT * FROM clients WHERE id=$1 AND firm_id=$2"):
+            cid, firm_id = args
+            for c in self.clients:
+                if c["id"] == cid and c["firm_id"] == firm_id:
+                    return dict(c)
+            return None
+
+        if q.startswith("SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2"):
+            cid, firm_id = args
+            for c in self.compliance:
+                if c["client_id"] == cid and c["firm_id"] == firm_id:
+                    return dict(c)
+            return None
+
+        if q.startswith("SELECT review_date, status, changes_identified FROM cdd_reviews"):
+            firm_id, cid = args
+            matching = [r for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] == cid]
+            if not matching:
+                return None
+            latest = max(
+                matching,
+                key=lambda r: (r["review_date"], r.get("created_at") or datetime.min.replace(tzinfo=timezone.utc)),
+            )
+            return {k: latest[k] for k in ("review_date", "status", "changes_identified")}
+
+        raise NotImplementedError(f"FakeConnection.fetchrow: unhandled query: {q}")
 
     async def fetch(self, query, *args):
         q = " ".join(query.split())
 
         if q.startswith("SELECT * FROM clients WHERE firm_id=$1 ORDER BY full_name ASC"):
+            firm_id, = args
+            rows = [c for c in self.clients if c["firm_id"] == firm_id]
+            return sorted(rows, key=lambda c: c["full_name"])
+
+        if q.startswith("SELECT id, full_name, client_number FROM clients WHERE firm_id=$1 ORDER BY full_name ASC"):
             firm_id, = args
             rows = [c for c in self.clients if c["firm_id"] == firm_id]
             return sorted(rows, key=lambda c: c["full_name"])
@@ -67,6 +112,13 @@ class FakeConnection:
             client_ids, firm_id = args
             return [o for o in self.owners if o["client_id"] in client_ids and o["firm_id"] == firm_id]
 
+        if q.startswith("SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2"):
+            cid, firm_id = args
+            return [
+                {"verification_status": o["verification_status"]}
+                for o in self.owners if o["client_id"] == cid and o["firm_id"] == firm_id
+            ]
+
         if q.startswith("SELECT id, display_name FROM users WHERE id = ANY($1) AND firm_id=$2"):
             user_ids, firm_id = args
             return [u for u in self.users if u["id"] in user_ids and u["firm_id"] == firm_id]
@@ -76,7 +128,52 @@ class FakeConnection:
             rows = [r for r in self.cdd_reviews if r["firm_id"] == firm_id and r["client_id"] in client_ids]
             return sorted(rows, key=lambda r: (r["client_id"], r["review_date"], r.get("created_at")), reverse=True)
 
+        if q.startswith("SELECT * FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2"):
+            firm_id, cid = args
+            return [dict(e) for e in self.compliance_exceptions if e["firm_id"] == firm_id and e["client_id"] == cid]
+
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+
+        if q.startswith("INSERT INTO audit_logs"):
+            (firm_id, user_id, actor_name, actor_role, action, target_type, target_id, details) = args
+            self.audit_logs.append({
+                "firm_id": firm_id, "user_id": user_id, "actor_name": actor_name, "actor_role": actor_role,
+                "action": action, "target_type": target_type, "target_id": target_id,
+                "details": json.loads(details) if details else {},
+            })
+            return "INSERT 0 1"
+
+        if q.startswith("INSERT INTO compliance_exceptions"):
+            firm_id, cid, issue_code, issue_label, responsible_user_id = args
+            self.compliance_exceptions.append({
+                "id": uuid.uuid4(), "firm_id": firm_id, "client_id": cid,
+                "issue_code": issue_code, "issue_label": issue_label, "status": "Open",
+                "responsible_user_id": responsible_user_id, "due_date": None, "notes": None,
+                "closed_reason": None, "resolved_at": None, "closed_at": None,
+                "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+            })
+            return "INSERT 0 1"
+
+        if q.startswith("UPDATE compliance_exceptions SET status='Open'"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["status"] = "Open"
+                    e["issue_label"] = issue_label
+                    e["resolved_at"] = None
+            return "UPDATE 1"
+
+        if q.startswith("UPDATE compliance_exceptions SET issue_label=$1"):
+            issue_label, eid = args
+            for e in self.compliance_exceptions:
+                if e["id"] == eid:
+                    e["issue_label"] = issue_label
+            return "UPDATE 1"
+
+        raise NotImplementedError(f"FakeConnection.execute: unhandled query: {q}")
 
 
 class _FakeAcquireCtx:
@@ -575,7 +672,7 @@ def test_csv_export_columns_and_content(monkeypatch):
     response = asyncio.run(aml_exceptions_report_export(_fake_request()))
     rows = _csv_rows(response)
 
-    assert rows[0] == ["Priority", "Client", "Matter", "Issue", "Responsible Person", "Status"]
+    assert rows[0] == ["Priority", "Client", "Matter", "Issue", "Responsible Person", "Status", "Due"]
     data_rows = {r[3]: r for r in rows[1:]}
     assert "Identity not verified" in data_rows
     row = data_rows["Identity not verified"]
@@ -584,6 +681,7 @@ def test_csv_export_columns_and_content(monkeypatch):
     assert row[2] == ""
     assert row[4] == "J. Moyo"
     assert row[5] == "Open"
+    assert row[6] == ""
 
 
 # ── PDF export ────────────────────────────────────────────────────────────
@@ -619,3 +717,68 @@ def test_pdf_export_handles_no_exceptions_without_crashing(monkeypatch):
 
     assert response.media_type == "application/pdf"
     assert response.body.startswith(b"%PDF")
+
+
+# ── Phase 2 (2026-09-07): persisted exceptions -- Due/Status/Responsible
+# reflect real workflow state, not always a freshly-guessed "Open" ────────
+
+def test_status_and_due_reflect_persisted_exception_state_not_always_open(monkeypatch):
+    """Once a lawyer has actually moved an exception along (e.g. via
+    PATCH .../exceptions/{id}, tested in test_compliance_exceptions.py),
+    this report must show that real state -- not silently reset it back
+    to "Open" with no due date. The first report call triggers the sync
+    that materializes the row; we then simulate what
+    update_compliance_exception() would have persisted and confirm a
+    second read reflects it."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Munyaradzi Gwenzi", client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    asyncio.run(aml_exceptions_report(_fake_request()))  # first call: materializes the rows
+    assert pool.conn.compliance_exceptions
+    for e in pool.conn.compliance_exceptions:
+        e["status"] = "InProgress"
+        e["due_date"] = date(2026, 10, 1)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert rows
+    assert all(r["status"] == "In Progress" for r in rows)
+    assert all(r["due"] == "2026-10-01" for r in rows)
+
+
+def test_aml_exceptions_summary_counts_by_status(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    open_client = _client("Munyaradzi Gwenzi", client_type="Individual")
+    other_client = _client("Panashe Madziva", client_type="Individual")
+    other_compliance = _compliance(other_client["id"], is_pep=False, conflict_check_reviewed=True)  # identity only
+    pool = FakePool(clients=[open_client, other_client], compliance=[other_compliance])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    asyncio.run(aml_exceptions_report(_fake_request()))  # materialize
+    other_id = str(other_client["id"])
+    for e in pool.conn.compliance_exceptions:
+        if str(e["client_id"]) == other_id:
+            e["status"] = "AwaitingClient"
+
+    summary = asyncio.run(aml_exceptions_summary(_fake_request()))
+
+    assert summary["total"] == summary["by_status"]["Open"] + summary["by_status"]["Awaiting Client"]
+    assert summary["by_status"]["Awaiting Client"] == 1
+    assert summary["by_status"]["Open"] == summary["total"] - 1
+
+
+def test_summary_associate_gets_403(monkeypatch):
+    import backend.main as m
+    associate = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "associate", "display_name": "Assoc"}
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    _as_current_user(monkeypatch, m, associate)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(aml_exceptions_summary(_fake_request()))
+    assert exc_info.value.status_code == 403
