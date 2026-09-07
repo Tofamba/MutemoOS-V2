@@ -8234,8 +8234,8 @@ async def _TEMP_verify_matter_aml_client_matter_wrap(request: Request):
         expected_matter = f"{r['matter_number']} - {r['matter_name']}"  # _pdf_safe() em-dash -> "-"
         if len(expected_client) <= 30 and len(expected_matter) <= 40:
             continue  # short enough the old layout wouldn't have truncated it either
-        actual_client = " ".join(pdf_row[client_col].split())
-        actual_matter = " ".join(pdf_row[matter_col].split())
+        actual_client = " ".join((pdf_row[client_col] or "").split())
+        actual_matter = " ".join((pdf_row[matter_col] or "").split())
         results.append({
             "matter_number": r["matter_number"],
             "expected_client": expected_client,
@@ -8244,6 +8244,7 @@ async def _TEMP_verify_matter_aml_client_matter_wrap(request: Request):
             "expected_matter": expected_matter,
             "actual_matter_in_pdf": actual_matter,
             "matter_matches_full_text": actual_matter == expected_matter,
+            "raw_pdf_row": [c if c is not None else "<<NONE>>" for c in pdf_row],
         })
 
     return {"total_matters": len(rows), "long_client_or_matter_checked": len(results), "results": results}
