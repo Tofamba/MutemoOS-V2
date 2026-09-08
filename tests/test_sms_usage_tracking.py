@@ -220,9 +220,11 @@ class _ReportConn:
         raise NotImplementedError(f"unhandled query: {q}")
 
 
-def _usage_row(month, status, cost_amount=None, cost_currency=None, firm_id=FIRM_ID, firm_name="Sawyer & Mkushi"):
+def _usage_row(month, status, cost_amount=None, cost_currency=None, firm_id=FIRM_ID,
+               firm_name="Sawyer & Mkushi", dlr_status=None):
     return {"firm_id": firm_id, "firm_name": firm_name, "month": month,
-            "status": status, "cost_amount": cost_amount, "cost_currency": cost_currency}
+            "status": status, "cost_amount": cost_amount, "cost_currency": cost_currency,
+            "dlr_status": dlr_status}
 
 
 def test_rejects_without_a_valid_admin_token(monkeypatch):
@@ -289,6 +291,35 @@ def test_separates_currencies_rather_than_blending_them(monkeypatch):
         {"currency": "USD", "total_cost": 0.05},
         {"currency": "ZWL", "total_cost": 0.5},
     ]
+
+
+def test_carrier_delivery_counts_from_dlr_status(monkeypatch):
+    """Of the AT-accepted sends, the delivery report splits them into
+    carrier-confirmed / carrier-failed / still-unconfirmed. A failed row
+    (rejected at the API, never dispatched) doesn't count toward any of
+    them."""
+    import backend.main as m
+    monkeypatch.setattr(m, "ADMIN_TOKEN", "real-admin-token")
+    aug = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    rows = [
+        _usage_row(aug, "delivered", 0.05, "USD", dlr_status="Success"),
+        _usage_row(aug, "delivered", 0.05, "USD", dlr_status="Success"),
+        _usage_row(aug, "delivered", 0.05, "USD", dlr_status="Failed"),
+        _usage_row(aug, "delivered", 0.05, "USD", dlr_status="Rejected"),
+        _usage_row(aug, "delivered", 0.05, "USD", dlr_status="Buffered"),  # not final
+        _usage_row(aug, "delivered", 0.05, "USD", dlr_status=None),        # no DLR yet
+        _usage_row(aug, "failed"),  # rejected at API -- never dispatched
+    ]
+    monkeypatch.setattr(m, "_db_pool", FakePool(_ReportConn(rows)))
+
+    result = asyncio.run(sms_usage_by_firm_report(FakeRequest(headers={"X-Admin-Token": "real-admin-token"})))
+
+    entry = result[0]
+    assert entry["delivered_count"] == 6
+    assert entry["failed_count"] == 1
+    assert entry["carrier_confirmed_count"] == 2
+    assert entry["carrier_failed_count"] == 2
+    assert entry["carrier_unconfirmed_count"] == 2
 
 
 def test_no_usage_returns_empty_list(monkeypatch):
