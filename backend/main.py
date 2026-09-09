@@ -4627,14 +4627,21 @@ def _row_to_compliance_event(row) -> dict:
 
 async def _fetch_compliance_history(conn, cid, matter_ids: list) -> list:
     """
-    Real compliance-event timeline for the Individual Client AML/CDD
-    Report's Compliance History section (2026-09-03, Part C -- built
-    after confirming with the user this was a small, contained addition:
-    audit_logs needed no schema change, only ~6 new inline INSERT call
-    sites). Combines this client's own events with every one of its
-    matters' events into one chronological timeline, matching the sample
-    report's own mixed client+matter event list (e.g. "Matter risk
-    reviewed" alongside "BO verification completed").
+    Real compliance-event timeline, originally built 2026-09-03 (Part C)
+    for the Individual Client AML/CDD Report's own "Compliance History"
+    section: audit_logs needed no schema change, only ~6 new inline
+    INSERT call sites. Combines this client's own events with every one
+    of its matters' events into one chronological timeline, matching the
+    sample report's own mixed client+matter event list (e.g. "Matter
+    risk reviewed" alongside "BO verification completed").
+
+    2026-09-09: that report section was removed entirely per direct
+    partner feedback, so nothing currently calls this function -- left
+    in place, working and tested history intact, in case this timeline
+    needs to be surfaced somewhere again later. The logging half
+    (_log_compliance_event(), called from every BO/PEP/conflict-check/
+    exception mutation site) is untouched and keeps writing to
+    audit_logs regardless of whether anything reads it back.
 
     2026-09-04: also merges in cdd_reviews rows (via
     _row_to_cdd_review_event(), same {"date","event","user","result"}
@@ -6297,12 +6304,15 @@ async def _fetch_client_aml_cdd_report(conn, cid, user: dict) -> dict:
     listed here per-matter -- the same client can have differently-
     scoped matters (see MatterUpdate.aml_scope's own docstring).
 
-    Part C (compliance history, 2026-09-03): real event log via
-    audit_logs -- see _log_compliance_event()/_fetch_compliance_history()
-    for the logging/reading halves. Combines this client's own events
-    with every one of its matters' events into one chronological
-    timeline, matching the sample report's own mixed client+matter event
-    list.
+    Part C (compliance history, added 2026-09-03, REMOVED from this
+    report 2026-09-09 per direct partner feedback -- not needed here):
+    this report no longer builds or returns a "compliance_history" key
+    at all. The underlying logging (_log_compliance_event(), called at
+    every BO/PEP/conflict-check/exception mutation site) is completely
+    untouched -- audit_logs keeps recording exactly as before, this
+    report just no longer reads it back. _fetch_compliance_history()/
+    _row_to_compliance_event() are left in place for a possible future
+    reuse, but nothing currently calls them.
 
     Part D (Exception/Follow-up, 2026-09-07, Phase 2): syncs and
     surfaces this client's own persisted compliance_exceptions --
@@ -6445,22 +6455,23 @@ async def _fetch_client_aml_cdd_report(conn, cid, user: dict) -> dict:
         },
         "matters": matters,
         "documents": document_index,
-        # Part C (2026-09-03) -- real event history via audit_logs, see
-        # _fetch_compliance_history()'s own docstring. "events" is
-        # legitimately empty for a client with no logged events yet
-        # (predates this feature, or genuinely nothing's happened) --
-        # the frontend already renders "None recorded." for an empty
-        # list, no separate placeholder needed now that this is real.
-        "compliance_history": {
-            "enabled": True,
-            "events": await _fetch_compliance_history(conn, cid, matter_ids),
-        },
+        # Part C's own "Compliance History" section (real event history
+        # via audit_logs, built 2026-09-03) was removed from this report
+        # entirely 2026-09-09, per direct partner feedback -- not needed
+        # here. The underlying data and logging (_log_compliance_event(),
+        # called at every BO/PEP/conflict-check/exception mutation site)
+        # are completely untouched by this -- audit_logs keeps recording
+        # exactly as before. _fetch_compliance_history()/_row_to_
+        # compliance_event() are left in place, just no longer called
+        # from anywhere: there is currently no other view that reads this
+        # data back, so it isn't visible in the UI right now, only in
+        # this table if someone queries it directly.
+        #
         # Part D (2026-09-07, Phase 2) -- every exception this client
         # has ever had (oldest first, same as GET .../exceptions),
         # including Resolved/Closed ones: a follow-up section is more
         # useful showing the client's whole exception history than only
-        # what's currently open, and the report already has "9.
-        # Compliance History" if a reviewer only wants the event log.
+        # what's currently open.
         "exceptions": exceptions,
     }
 
@@ -6502,7 +6513,6 @@ def _client_cdd_report_sections(report: dict) -> list:
     overall = report["overall"]
     pep = report["pep_risk"]
     cc = report["conflict_check"]
-    history = report["compliance_history"]
     pep_text = "Yes" if overall["is_pep"] is True else ("No" if overall["is_pep"] is False else "Not yet assessed")
 
     sections = []
@@ -6607,18 +6617,16 @@ def _client_cdd_report_sections(report: dict) -> list:
         ],
     })
 
+    # 9. Exceptions / Follow-up (2026-09-07, Phase 2; renumbered 2026-09-09
+    # when Compliance History -- the old Section 9 -- was removed from this
+    # report entirely per direct partner feedback; see _fetch_client_aml_
+    # cdd_report()'s own docstring for where that data still lives) --
+    # this client's whole Compliance Exception Resolution Workflow
+    # history, read-only here (unlike the compliance modal's own
+    # interactive version): a report export is a point-in-time record,
+    # not a place to act from.
     sections.append({
-        "title": "9. Compliance History",
-        "headers": ["Date", "Event", "User", "Result"],
-        "rows": [[ev["date"] or "—", ev["event"], ev["user"], ev["result"]] for ev in history.get("events", [])],
-    })
-
-    # 10. Exceptions / Follow-up (2026-09-07, Phase 2) -- this client's
-    # whole Compliance Exception Resolution Workflow history, read-only
-    # here (unlike the compliance modal's own interactive version): a
-    # report export is a point-in-time record, not a place to act from.
-    sections.append({
-        "title": "10. Exceptions / Follow-up",
+        "title": "9. Exceptions / Follow-up",
         "headers": ["Issue", "Status", "Responsible Person", "Due"],
         "rows": [
             [ex["issue_label"], ex["status_label"], ex["responsible_person_name"], ex.get("due_date") or "—"]
@@ -6657,11 +6665,10 @@ def _client_cdd_report_csv(report: dict) -> str:
 # real client data (not just theoretically): Beneficial Ownership's
 # Basis (4 clients), PEP/Risk's Source of Wealth/Funds (3 clients),
 # Matters' Matter name and Reason for AML Scope (most clients with any
-# matter), Supporting Document Index's File, and Compliance History's
-# Result (both the arrow-based change strings -- see _pdf_safe()'s own
-# 2026-09-07 note -- and long CDD-review change notes, independently).
-# Each gets its free-text column(s) wrapped (wrap_cols) instead of
-# truncated, widened at its own short/fixed-enum columns' expense.
+# matter), and Supporting Document Index's File. Each gets its free-text
+# column(s) wrapped (wrap_cols) instead of truncated, widened at its own
+# short/fixed-enum columns' expense. (Compliance History, formerly
+# listed here too, was removed from this report entirely 2026-09-09.)
 #
 # DEFERRED, not fixed here: Sections 1 (Overall Compliance Position --
 # the "Outstanding" row joins multiple missing-item labels with "; ",
@@ -6677,11 +6684,11 @@ _CDD_SECTION_LAYOUT = {
     "5. PEP / Risk Assessment":       {"col_pcts": (25, 75),             "wrap_cols": {1}},   # Status
     "7. Matters for this Client":     {"col_pcts": (30, 12, 13, 32, 13), "wrap_cols": {0, 3}},  # Matter, Reason
     "8. Supporting Document Index":   {"col_pcts": (30, 15, 15, 40),     "wrap_cols": {3}},   # File
-    "9. Compliance History":          {"col_pcts": (12, 24, 16, 48),     "wrap_cols": {3}},   # Result
-    # 10. Exceptions / Follow-up (2026-09-07, Phase 2): Issue carries
+    # 9. Exceptions / Follow-up (2026-09-07, Phase 2; was Section 10 until
+    # Compliance History's removal renumbered it): Issue carries
     # CDD_REVIEW_OUTSTANDING's own free-text changes_identified suffix
     # (same unbounded-text risk as every other wrapped column above).
-    "10. Exceptions / Follow-up":     {"col_pcts": (46, 16, 22, 16),     "wrap_cols": {0}},   # Issue
+    "9. Exceptions / Follow-up":      {"col_pcts": (46, 16, 22, 16),     "wrap_cols": {0}},   # Issue
 }
 
 def _build_client_cdd_pdf(report: dict) -> bytes:

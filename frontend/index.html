@@ -2002,7 +2002,7 @@ select{cursor:pointer}
       <button class="btn btn-outline btn-sm" onclick="submitCddReview()">Save CDD Review</button>
     </div>
 
-    <div class="form-section-label">COMPLIANCE EXCEPTIONS <span style="font-weight:400;text-transform:none;color:var(--ink3)">(auto-tracked from this client's real compliance state — see Compliance History for the audit trail)</span></div>
+    <div class="form-section-label">COMPLIANCE EXCEPTIONS <span style="font-weight:400;text-transform:none;color:var(--ink3)">(auto-tracked from this client's real compliance state)</span></div>
     <div id="cc-exceptions-list" style="margin-bottom:1rem;font-size:0.82rem;color:var(--ink3)">Loading…</div>
 
     <div class="form-section-label">RETENTION — s24 <span style="font-weight:400;text-transform:none;color:var(--ink3)">(flag only, no automatic deletion)</span></div>
@@ -9371,28 +9371,26 @@ function _renderCddReport(r) {
   const docsSection = _cddSection('8. Supporting Document Index',
     _cddTable(['Document', 'Category', 'Status', 'File'], docRows));
 
-  const history = r.compliance_history;
-  const historySection = _cddSection('9. Compliance History', history.enabled
-    ? _cddTable(['Date', 'Event', 'User', 'Result'], (history.events || []).map(ev =>
-        [escHtml(ev.date), escHtml(ev.event), escHtml(ev.user), escHtml(ev.result)]))
-    : `<p style="color:var(--ink3);font-style:italic">${escHtml(history.message)}</p>`);
-
-  // 10. Exceptions / Follow-up (2026-09-07, Phase 2) -- read-only here,
-  // unlike the compliance modal's own interactive Compliance Exceptions
-  // section: this report is a point-in-time record, not a place to act
-  // from. Shows this client's whole exception history (Resolved/Closed
-  // included), same as GET .../exceptions.
+  // 9. Exceptions / Follow-up (2026-09-07, Phase 2; renumbered 2026-09-09
+  // when Compliance History -- the old Section 9 -- was removed from
+  // this report entirely per direct partner feedback; the underlying
+  // audit_logs event log is untouched, just no longer read back here or
+  // shown anywhere in the UI). Read-only here, unlike the compliance
+  // modal's own interactive Compliance Exceptions section: this report
+  // is a point-in-time record, not a place to act from. Shows this
+  // client's whole exception history (Resolved/Closed included), same
+  // as GET .../exceptions.
   const exceptionRows = (r.exceptions || []).map(ex => [
     escHtml(ex.issue_label),
     `<span class="chip ${CDD_EXCEPTION_STATUS_CHIP[ex.status] || 'chip-gray'}">${escHtml(ex.status_label)}</span>`,
     escHtml(ex.responsible_person_name || 'Compliance Officer'),
     escHtml(ex.due_date || '—'),
   ]);
-  const exceptionsSection = _cddSection('10. Exceptions / Follow-up',
+  const exceptionsSection = _cddSection('9. Exceptions / Follow-up',
     _cddTable(['Issue', 'Status', 'Responsible Person', 'Due'], exceptionRows));
 
   return header + overallSection + idSection + boSection + repSection + pepSection
-    + conflictSection + mattersSection + docsSection + historySection + exceptionsSection;
+    + conflictSection + mattersSection + docsSection + exceptionsSection;
 }
 
 // SMS Usage by Firm's own render function (loadSmsUsageByFirm) was removed
