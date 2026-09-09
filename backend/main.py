@@ -10540,7 +10540,7 @@ async def _TEMP_verify_legal_update_ingestion(item_id: str, request: Request, qu
                     "source_name": r["source_name"],
                     "legal_source_type": r["legal_source_type"],
                     "authority_strength": r["authority_strength"],
-                    "text_excerpt": r["text"][:300],
+                    "text_excerpt": r["text"][:1200],
                 }
                 for r in this_doc_hits
             ],
