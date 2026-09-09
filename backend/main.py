@@ -8379,41 +8379,6 @@ async def matter_review_status_report(
         )
     return rows
 
-@app.get("/api/admin/verify-next-deadline-note")
-async def _TEMP_verify_next_deadline_note(request: Request):
-    """
-    TEMP, read-only, admin-token-gated -- real-data verification for
-    commit 7ef2c5d/0583e20 (next_deadline_note surfaced in the Matter
-    Review Status report). Runs the real report row-builder against
-    every real matter and reports every one whose real, stored
-    next_deadline_note is non-null, alongside what the report row
-    actually returns for that same field -- confirms the two agree
-    (the fix), rather than the field going missing/None despite a real
-    value being on file (the bug). Removed once verified.
-    """
-    require_admin_token(request)
-    async with _db_pool.acquire() as conn:
-        rows = await _fetch_matter_review_status_rows(conn, lawyer_id=None, client_id=None, status=None)
-        raw_notes = await conn.fetch(
-            "SELECT id, name, next_deadline_note FROM matters "
-            "WHERE firm_id=$1 AND next_deadline_note IS NOT NULL", FIRM_ID
-        )
-    rows_by_id = {r["matter_id"]: r for r in rows}
-    matched = [
-        {
-            "matter": raw["name"],
-            "stored_next_deadline_note": raw["next_deadline_note"],
-            "report_next_deadline_note": rows_by_id[str(raw["id"])]["next_deadline_note"]
-                if str(raw["id"]) in rows_by_id else "<matter missing from report rows>",
-        }
-        for raw in raw_notes
-    ]
-    return {
-        "real_matters_with_a_next_deadline_note": len(raw_notes),
-        "matched": matched,
-        "all_agree": all(m["stored_next_deadline_note"] == m["report_next_deadline_note"] for m in matched),
-    }
-
 @app.get("/api/reports/matter-review-status-export")
 async def matter_review_status_report_export(
     request: Request,
