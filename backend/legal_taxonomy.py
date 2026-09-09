@@ -109,7 +109,8 @@ def classify_firm_document(document_type) -> LegalSourceType:
 
 
 # legal_updates.source_type values, as written by upload_legal_update()
-# (main.py) — "legislation" | "news" | "press_statement" | "zlhr" | others.
+# (main.py) — "legislation" | "news" | "press_statement" | "guidance" |
+# "zlhr" | others.
 def classify_legal_update(source_type, reference=None) -> LegalSourceType:
     if source_type == "legislation":
         ref = (reference or "").lower()
@@ -120,7 +121,21 @@ def classify_legal_update(source_type, reference=None) -> LegalSourceType:
         if "constitution" in ref:
             return LegalSourceType.CONSTITUTION
         return LegalSourceType.STATUTE
-    if source_type == "press_statement":
+    if source_type in ("press_statement", "guidance"):
+        # "guidance" (2026-09-10, FIU AML/CFT risk-based-approach guidance)
+        # -- regulator/government guidance to practitioners, e.g. an FIU,
+        # RBZ, or Law Society circular explaining how to apply a statute,
+        # not the statute itself. Same GOVERNMENT_PUBLICATION type (and
+        # CONTEXTUAL authority strength) as a press statement -- neither is
+        # binding law or judicial precedent, so this taxonomy's existing
+        # 3-tier scheme (BINDING = law/top courts, PERSUASIVE = other
+        # courts/tribunals, CONTEXTUAL = everything else) already has the
+        # right bucket for it; deliberately NOT reusing "legislation" (that
+        # would wrongly grant it BINDING/STATUTE-tier authority) and
+        # deliberately a distinct source_type from "press_statement" (a
+        # 77-page technical implementation guidance document is not
+        # honestly a "press statement", even though both share the same
+        # authority tier).
         return LegalSourceType.GOVERNMENT_PUBLICATION
     return LegalSourceType.UNKNOWN
 

@@ -1163,6 +1163,24 @@ async def run_migrations():
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_sms_usage_log_firm ON sms_usage_log(firm_id, created_at DESC);
+
+        -- Delivery-report (DLR) columns (2026-09-08): the send-time
+        -- columns above only record whether Africa's Talking *accepted*
+        -- the message (statusCode 100 = "queued for delivery"), NOT
+        -- whether it reached the handset. Zimbabwe carriers (Econet /
+        -- NetOne) silently filter a meaningful share of OTP traffic sent
+        -- from the shared "AFRICASTKNG" alphanumeric sender, and AT's HTTP
+        -- response can't see that -- only its asynchronous delivery report
+        -- can. These columns hold that final status, POSTed back later by
+        -- AT to /api/webhooks/africas-talking/delivery-report and matched
+        -- to this row by message_id. NULL dlr_status = no delivery report
+        -- received yet (or the send predates this callback being wired up).
+        ALTER TABLE sms_usage_log ADD COLUMN IF NOT EXISTS dlr_status         TEXT;  -- AT's final status: Success | Sent | Submitted | Buffered | Rejected | Failed
+        ALTER TABLE sms_usage_log ADD COLUMN IF NOT EXISTS dlr_failure_reason TEXT;  -- AT's failureReason on Rejected/Failed, e.g. InsufficientCredit / UserInBlackList / DeliveryFailure
+        ALTER TABLE sms_usage_log ADD COLUMN IF NOT EXISTS dlr_network_code   TEXT;  -- AT's networkCode for the delivering carrier, when supplied
+        ALTER TABLE sms_usage_log ADD COLUMN IF NOT EXISTS dlr_updated_at     TIMESTAMPTZ;  -- when the most recent delivery report for this row was processed
+        -- The DLR callback looks rows up by message_id, not (firm_id, created_at).
+        CREATE INDEX IF NOT EXISTS idx_sms_usage_log_message_id ON sms_usage_log(message_id);
         """)
 
         # Seed this deployment's firm row from its own env vars -- NOT
@@ -1602,6 +1620,13 @@ _TWILIO_SMS_CONFIGURED = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILI
 AFRICAS_TALKING_USERNAME = os.environ.get("AFRICAS_TALKING_USERNAME")
 AFRICAS_TALKING_API_KEY  = os.environ.get("AFRICAS_TALKING_API_KEY")
 AFRICAS_TALKING_FROM     = os.environ.get("AFRICAS_TALKING_FROM")  # optional registered sender ID
+# Optional shared secret for the delivery-report webhook. Africa's Talking
+# DLR callbacks can't send custom headers, so the secret rides in the query
+# string (?token=...). If set, /api/webhooks/africas-talking/delivery-report
+# rejects any callback without an exact match; if unset the endpoint still
+# works (same no-op-when-unset stance as require_admin_token) -- the handler
+# only ever updates an existing row it can match by AT's opaque ATXid.
+AFRICAS_TALKING_DLR_TOKEN = os.environ.get("AFRICAS_TALKING_DLR_TOKEN")
 _AFRICAS_TALKING_CONFIGURED = bool(AFRICAS_TALKING_USERNAME and AFRICAS_TALKING_API_KEY)
 # Inlined rather than calling is_email_configured() (defined later in this
 # file) — this line runs at import time, before that function exists yet.
@@ -1930,6 +1955,115 @@ async def _log_sms_usage(conn, *, phone: str, provider: str, attempt: dict) -> N
     attempt.get("provider_status"), attempt.get("status_code"),
     cost_amount, cost_currency, attempt.get("message_id"), attempt.get("error"))
 
+# Africa's Talking DLR statuses that are final. Once a row reaches one of
+# these, later callbacks for the same message (AT sends progressive ones:
+# Sent -> Submitted -> Buffered -> Success/Failed/Rejected, and can repeat
+# or arrive out of order) are ignored rather than allowed to walk the row
+# back to a transient state.
+_AT_DLR_TERMINAL_STATUSES = ("Success", "Failed", "Rejected")
+
+async def _record_sms_delivery_report(
+    conn, *, message_id: str, status: Optional[str],
+    failure_reason: Optional[str], network_code: Optional[str],
+) -> int:
+    """
+    Applies one Africa's Talking delivery report to its sms_usage_log row,
+    matched by message_id (AT's ATXid_...). Returns rows updated: 1 on a
+    fresh match, 0 when the message_id is unknown to THIS database (a send
+    from another deployment sharing the same AT app, or one predating this
+    callback) or the row is already in a final state. A normal no-match is
+    not an error -- the caller still has to 200 or AT retries for hours.
+    """
+    if not message_id:
+        return 0
+    result = await conn.execute("""
+        UPDATE sms_usage_log
+           SET dlr_status = $1,
+               dlr_failure_reason = $2,
+               dlr_network_code = $3,
+               dlr_updated_at = NOW()
+         WHERE message_id = $4
+           AND (dlr_status IS NULL OR dlr_status <> ALL($5::text[]))
+    """, status, failure_reason, network_code, message_id, list(_AT_DLR_TERMINAL_STATUSES))
+    try:
+        return int(result.split()[-1])  # asyncpg returns e.g. "UPDATE 1"
+    except (AttributeError, ValueError):
+        return 0
+
+@app.post("/api/webhooks/africas-talking/delivery-report")
+async def africas_talking_delivery_report(request: Request):
+    """
+    Africa's Talking delivery-report (DLR) callback. AT POSTs here once a
+    carrier confirms or rejects each SMS -- the only way to see the FINAL
+    delivery outcome, since the send-time API response only ever says
+    "accepted for delivery" (statusCode 100). Set as the Delivery Report
+    URL on the AT app in their dashboard.
+
+    The AT app is shared across deployments and AT allows exactly one DLR
+    URL per app, so callbacks for another environment's messages will
+    arrive here too -- _record_sms_delivery_report() simply no-ops on a
+    message_id it doesn't recognise.
+
+    Always returns 200 (unless the optional ?token= shared-secret check
+    fails) -- AT retries a non-200 aggressively for hours. Form-encoded
+    fields AT sends:
+      id             AT's ATXid_... message id   (-> sms_usage_log.message_id)
+      status         Success | Sent | Submitted | Buffered | Rejected | Failed
+      failureReason  InsufficientCredit | UserInBlackList | DeliveryFailure | ...
+      networkCode    delivering carrier's code, when supplied
+      phoneNumber, retryCount   (logged, not stored)
+    """
+    if AFRICAS_TALKING_DLR_TOKEN:
+        supplied = request.query_params.get("token", "")
+        if not hmac.compare_digest(supplied, AFRICAS_TALKING_DLR_TOKEN):
+            raise HTTPException(status_code=403, detail="Invalid delivery-report token")
+
+    # AT sends application/x-www-form-urlencoded; tolerate JSON or a
+    # query-only ping too so a format surprise never becomes a retry storm.
+    data: dict = {}
+    try:
+        form = await request.form()
+        data = {k: form[k] for k in form}
+    except Exception:
+        data = {}
+    if not data:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                data = body
+        except Exception:
+            data = {}
+    if not data:
+        data = dict(request.query_params)
+
+    def _clean(v):
+        v = ("" if v is None else str(v)).strip()
+        return v or None
+
+    message_id = _clean(data.get("id")) or ""
+    status = _clean(data.get("status"))
+    failure_reason = _clean(data.get("failureReason"))
+    network_code = _clean(data.get("networkCode"))
+    phone = _clean(data.get("phoneNumber")) or "?"
+
+    matched = 0
+    if message_id:
+        try:
+            async with _db_pool.acquire() as conn:
+                matched = await _record_sms_delivery_report(
+                    conn, message_id=message_id, status=status,
+                    failure_reason=failure_reason, network_code=network_code,
+                )
+        except Exception as e:
+            # Log and still 200 -- a transient DB blip must not turn AT's
+            # callback into a multi-hour retry loop.
+            print(f"[otp-dlr] error recording {message_id!r}: {e}")
+
+    print(f"[otp-dlr] id={message_id or '?'} status={status or '?'} "
+          f"failureReason={failure_reason or '-'} network={network_code or '-'} "
+          f"phone={phone} matched={matched}")
+    return Response(status_code=200)
+
 class OTPRequestBody(BaseModel):
     phone: str
 
@@ -2175,7 +2309,12 @@ async def session_auth_middleware(request, call_next):
         return await call_next(request)
     open_paths = (
         "/api/health", "/api/auth/request-otp", "/api/auth/verify-otp",
-        "/api/auth/status", "/api/matters/template", "/api/matters/template-excel"
+        "/api/auth/status", "/api/matters/template", "/api/matters/template-excel",
+        # Africa's Talking's delivery-report callback -- a third-party
+        # machine-to-machine POST that can't carry a session cookie. It
+        # does its own optional shared-secret check (?token=) against
+        # AFRICAS_TALKING_DLR_TOKEN; see africas_talking_delivery_report().
+        "/api/webhooks/africas-talking/delivery-report",
     )
     if request.url.path in open_paths or not request.url.path.startswith("/api/"):
         return await call_next(request)
@@ -9526,11 +9665,21 @@ async def _fetch_sms_usage_by_firm(conn) -> list:
     toward total_sends/failed_count -- doing that split cleanly in one
     SQL GROUP BY would need FILTER gymnastics for little benefit over a
     straightforward per-row pass here.
+
+    delivered_count / failed_count reflect whether Africa's Talking
+    *accepted* the send (its synchronous API response). The carrier_*
+    counts layer on the asynchronous delivery report (see
+    africas_talking_delivery_report): of the accepted sends,
+    carrier_confirmed reached the handset, carrier_failed were dropped or
+    rejected downstream (a silent carrier filter shows up here), and
+    carrier_unconfirmed have no final delivery report yet -- NULL for
+    every send that predates the DLR callback being wired up, so a high
+    unconfirmed count on older months is expected, not a red flag.
     """
     rows = await conn.fetch("""
         SELECT f.id AS firm_id, f.name AS firm_name,
                date_trunc('month', s.created_at) AS month,
-               s.status, s.cost_amount, s.cost_currency
+               s.status, s.cost_amount, s.cost_currency, s.dlr_status
         FROM sms_usage_log s
         JOIN firms f ON f.id = s.firm_id
         WHERE s.firm_id = $1
@@ -9543,11 +9692,20 @@ async def _fetch_sms_usage_by_firm(conn) -> list:
         key = (str(r["firm_id"]), month_str)
         g = grouped.setdefault(key, {
             "firm_id": str(r["firm_id"]), "firm_name": r["firm_name"], "month": month_str,
-            "total_sends": 0, "delivered_count": 0, "failed_count": 0, "_cost_by_currency": {},
+            "total_sends": 0, "delivered_count": 0, "failed_count": 0,
+            "carrier_confirmed_count": 0, "carrier_failed_count": 0, "carrier_unconfirmed_count": 0,
+            "_cost_by_currency": {},
         })
         g["total_sends"] += 1
         if r["status"] == "delivered":
             g["delivered_count"] += 1
+            dlr = r.get("dlr_status")
+            if dlr == "Success":
+                g["carrier_confirmed_count"] += 1
+            elif dlr in ("Failed", "Rejected"):
+                g["carrier_failed_count"] += 1
+            else:  # NULL / Sent / Submitted / Buffered -- no final confirmation
+                g["carrier_unconfirmed_count"] += 1
         else:
             g["failed_count"] += 1
         if r["cost_amount"] is not None and r["cost_currency"]:
@@ -10288,6 +10446,110 @@ async def delete_legal_update(item_id: str, request: Request):
     if chunk_ids:
         await asyncio.to_thread(remove_chunks_from_chroma, chunk_ids, "legal")
     return {"deleted": True}
+
+@app.get("/api/admin/verify-legal-update-ingestion/{item_id}")
+async def _TEMP_verify_legal_update_ingestion(item_id: str, request: Request, query: str = ""):
+    """
+    TEMP, read-only, admin-token-gated -- real-data verification for a
+    single legal_updates ingestion, same discipline as the Constitution
+    fix (commit bf9bd5e's own verify-v1-migrated-legal-updates endpoint,
+    mirrored here): confirms the claimed chunk_count in Postgres matches
+    ACTUAL chunks rows AND ACTUAL Chroma vectors -- "status: complete,
+    chunk_count: N" alone is exactly what looked fine for the v1-migrated
+    rows before that bug was found, so it's never trusted on its own.
+
+    If `query` is passed, also runs the exact real semantic search
+    function (_semantic_search_legal(), the same one /api/search's real
+    endpoint calls for AI-cited answers -- not a reimplementation) over
+    every currently-indexed legal chunk, and reports whether/where this
+    specific document's own chunks show up in the results, with what
+    attribution. Removed once verified.
+    """
+    require_admin_token(request)
+    doc_id = _uuid_mod.UUID(item_id)
+    async with _db_pool.acquire() as conn:
+        item = await conn.fetchrow("SELECT * FROM legal_updates WHERE id=$1 AND firm_id=$2", doc_id, FIRM_ID)
+        if not item:
+            raise HTTPException(status_code=404, detail="No such legal_updates row")
+        chunk_rows = await conn.fetch(
+            "SELECT id, chunk_index, page_number, text FROM chunks "
+            "WHERE document_id=$1 AND chunk_source='legal' ORDER BY chunk_index",
+            doc_id
+        )
+    actual_chunk_count = len(chunk_rows)
+
+    _, legal_col, _ = get_chroma_collections()
+    try:
+        chroma_hit = legal_col.get(where={"document_id": str(doc_id)})
+        actual_vector_ids = chroma_hit.get("ids", [])
+    except Exception as e:
+        actual_vector_ids = f"error: {e}"
+
+    chunk_ids_in_postgres = {str(r["id"]) for r in chunk_rows}
+    vectors_match_chunks = (
+        isinstance(actual_vector_ids, list)
+        and set(actual_vector_ids) == chunk_ids_in_postgres
+    )
+
+    result = {
+        "document_id": str(doc_id),
+        "filename": item["filename"],
+        "reference": item["reference"],
+        "status": item["status"],
+        "legal_source_type": item["legal_source_type"],
+        "authority_strength": item["authority_strength"],
+        "claimed_chunk_count": item["chunk_count"],
+        "actual_chunks_rows_in_postgres": actual_chunk_count,
+        "actual_chroma_vector_count": len(actual_vector_ids) if isinstance(actual_vector_ids, list) else actual_vector_ids,
+        "chunk_count_matches_actual_rows": item["chunk_count"] == actual_chunk_count,
+        "chroma_vector_ids_exactly_match_postgres_chunk_ids": vectors_match_chunks,
+        "sample_chunk_text_first_120_chars": chunk_rows[0]["text"][:120] if chunk_rows else None,
+    }
+
+    if query:
+        from types import SimpleNamespace
+        async with _db_pool.acquire() as conn:
+            # Same LEFT JOIN the real /api/search job uses (main.py's
+            # search_documents_job) before calling _semantic_search_legal()
+            # -- chunks itself carries no legal_source_type/authority_
+            # strength columns (only legal_updates does), so a plain
+            # SELECT * FROM chunks here would show every result's
+            # legal_source_type/authority_strength as null, which isn't
+            # what a real query actually sees.
+            all_legal_chunk_rows = await conn.fetch(
+                """
+                SELECT c.*, lu.legal_source_type, lu.authority_strength
+                FROM chunks c
+                LEFT JOIN legal_updates lu ON lu.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='legal'
+                """,
+                FIRM_ID
+            )
+        all_chunks = [dict(r) for r in all_legal_chunk_rows]
+        search_req = SimpleNamespace(query=query, limit=10)
+        search_results = _semantic_search_legal(search_req, all_chunks)
+        this_doc_hits = [r for r in search_results if r["document_id"] == str(doc_id)]
+        result["search_verification"] = {
+            "query": query,
+            "total_results_returned": len(search_results),
+            "this_documents_hits": [
+                {
+                    "rank": search_results.index(r) + 1,
+                    "similarity": r["similarity"],
+                    "reference": r["reference"],
+                    "source_name": r["source_name"],
+                    "legal_source_type": r["legal_source_type"],
+                    "authority_strength": r["authority_strength"],
+                    "text_excerpt": r["text"][:1200],
+                }
+                for r in this_doc_hits
+            ],
+            "other_top_3_hits": [
+                {"rank": i + 1, "reference": r["reference"], "similarity": r["similarity"]}
+                for i, r in enumerate(search_results[:3])
+            ],
+        }
+    return result
 
 @app.post("/api/legal-updates/search")
 async def search_legal_updates(req: LegalUpdateSearchRequest, request: Request):
