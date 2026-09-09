@@ -1907,12 +1907,15 @@ select{cursor:pointer}
       </div>
       <div class="form-group">
         <label>Risk Rating</label>
-        <select id="cc-risk-rating">
-          <option value="NotAssessed">Not Assessed</option>
-          <option value="Low">Low</option>
-          <option value="Medium">Medium</option>
-          <option value="High">High</option>
-        </select>
+        <div style="display:flex;align-items:center;gap:8px">
+          <select id="cc-risk-rating" onchange="_syncRiskChip(this, document.getElementById('cc-risk-rating-chip'))">
+            <option value="NotAssessed">Not Assessed</option>
+            <option value="Low">Low</option>
+            <option value="Medium">Medium</option>
+            <option value="High">High</option>
+          </select>
+          <span id="cc-risk-rating-chip" class="chip chip-gray">Not Assessed</span>
+        </div>
       </div>
     </div>
     <div class="form-group">
@@ -3580,6 +3583,7 @@ async function openComplianceModal(clientId) {
     document.getElementById('cc-is-beneficial-owner').value = _complianceData.client_is_beneficial_owner || '';
     document.getElementById('cc-identity-status').value = _complianceData.identity_verification_status || 'Unverified';
     document.getElementById('cc-risk-rating').value = _complianceData.risk_rating || 'NotAssessed';
+    _syncRiskChip(document.getElementById('cc-risk-rating'), document.getElementById('cc-risk-rating-chip'));
     document.getElementById('cc-aml-scope').value = _complianceData.aml_scope || 'NotAssessed';
     document.getElementById('cc-is-pep').value = _complianceData.is_pep === true ? 'true' : _complianceData.is_pep === false ? 'false' : '';
     document.getElementById('cc-pep-basis').value = _complianceData.pep_basis || '';
@@ -4749,6 +4753,7 @@ async function renderMatterPanel(id) {
                 `<option value="${v}" ${(matter.matter_risk || 'NotAssessed')===v?'selected':''}>${label}</option>`
               ).join('')}
             </select>
+            <span class="chip ${CCS_RISK_CHIP[matter.matter_risk || 'NotAssessed'] || 'chip-gray'}">${escHtml(_ccsLabel(matter.matter_risk || 'NotAssessed'))}</span>
           </div>
         </div>
         <div style="display:flex;align-items:center;gap:6px">
@@ -8486,6 +8491,24 @@ const CCS_BO_STATUS_CHIP = { 'Verified': 'chip-green', 'Pending': 'chip-gold', '
 const CCS_ENUM_LABELS = { 'NotAssessed': 'Not Assessed', 'InScope': 'In Scope', 'OutOfScope': 'Out of Scope' };
 function _ccsLabel(v) { return CCS_ENUM_LABELS[v] || v; }
 
+// Shared helper (2026-09-09, Risk Rating color-coding everywhere it's
+// displayed) for the two places Risk Rating is an EDITABLE <select>
+// rather than a report's own read-only rendered chip (the client
+// compliance modal's Risk Rating field, and a matter panel's own
+// Matter Risk field): keeps a small chip next to the dropdown in sync
+// with its current value, using the exact same CCS_RISK_CHIP palette
+// the reports above already use, so a select and a report chip for the
+// same value are never two different colors. `function` (not const), so
+// it's fully hoisted and safe to reference from code textually earlier
+// in this file, same as CCS_RISK_CHIP/_ccsLabel just above -- this
+// script runs top-to-bottom once at page load, well before any select's
+// onchange or modal-populate call can actually invoke it.
+function _syncRiskChip(selectEl, chipEl) {
+  const v = selectEl.value;
+  chipEl.className = 'chip ' + (CCS_RISK_CHIP[v] || 'chip-gray');
+  chipEl.textContent = _ccsLabel(v);
+}
+
 // The Outstanding column is the one long, variable-length, list-shaped
 // field here (same role Last Activity plays in Matter Review Status) --
 // reuses _mrsTruncate() directly rather than duplicating it, just with its
@@ -9282,7 +9305,7 @@ function _renderCddReport(r) {
   const overallSection = _cddSection('1. Overall Compliance Position', _cddKV([
     ['Overall CDD Status', `<span class="chip ${statusChip}">${escHtml(overall.compliance_status)}</span>`],
     ['AML Scope', escHtml(_ccsLabel(overall.aml_scope))],
-    ['Client Risk', escHtml(_ccsLabel(overall.risk_rating))],
+    ['Client Risk', `<span class="chip ${CCS_RISK_CHIP[overall.risk_rating] || 'chip-gray'}">${escHtml(_ccsLabel(overall.risk_rating))}</span>`],
     ['PEP', CDD_PEP_CHIP_TEXT(overall.is_pep)],
     ['Beneficial Ownership', escHtml(_ccsLabel(overall.bo_status))],
     ['Person Acting for Client', escHtml(overall.person_acting_status)],
@@ -9339,7 +9362,7 @@ function _renderCddReport(r) {
         ? `${escHtml(pep.senior_management_approved_by_name)}${pep.senior_management_approved_date ? ' — ' + escHtml(pep.senior_management_approved_date) : ''}`
         : '<span style="color:var(--red)">Not yet approved</span>'],
     ] : []),
-    ['Client Risk Rating', escHtml(_ccsLabel(pep.risk_rating))],
+    ['Client Risk Rating', `<span class="chip ${CCS_RISK_CHIP[pep.risk_rating] || 'chip-gray'}">${escHtml(_ccsLabel(pep.risk_rating))}</span>`],
     ['Source of Wealth', escHtml(pep.source_of_wealth || 'Not recorded')],
     ['Source of Funds', escHtml(pep.source_of_funds || 'Not recorded')],
     ['Enhanced Monitoring', pep.enhanced_monitoring_required ? 'Required' : 'Not required'],
