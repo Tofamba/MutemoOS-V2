@@ -6762,6 +6762,46 @@ async def client_aml_cdd_report_export_pdf(client_id: str, request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+@app.get("/api/admin/verify-cdd-report-section-removal")
+async def _TEMP_verify_cdd_report_section_removal(request: Request):
+    """
+    TEMP, read-only, admin-token-gated -- real-data verification that
+    Section 9 "Compliance History" is genuinely gone from the Individual
+    Client AML/CDD Report (JSON/CSV/PDF) and that Section 10 "Exceptions
+    / Follow-up" correctly renumbered down to 9, with Section 8
+    "Supporting Document Index" left untouched -- run against every real
+    client in the firm, not just one, so a client-specific edge case
+    (e.g. no exceptions at all) can't hide a real numbering mistake.
+    Removed once verified.
+    """
+    require_admin_token(request)
+    system_actor = {"id": None, "firm_id": FIRM_ID, "display_name": "Verification Script", "role": "system"}
+    async with _db_pool.acquire() as conn:
+        client_rows = await conn.fetch(
+            "SELECT id, full_name FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+        )
+        results = []
+        for crow in client_rows:
+            report = await _fetch_client_aml_cdd_report(conn, crow["id"], system_actor)
+            sections = _client_cdd_report_sections(report)
+            titles = [s["title"] for s in sections]
+            results.append({
+                "client": crow["full_name"],
+                "has_compliance_history_key_in_json": "compliance_history" in report,
+                "section_titles": titles,
+                "has_a_compliance_history_section": any("Compliance History" in t for t in titles),
+                "has_section_8_supporting_document_index": "8. Supporting Document Index" in titles,
+                "has_section_9_exceptions_follow_up": "9. Exceptions / Follow-up" in titles,
+            })
+    all_clean = all(
+        not r["has_compliance_history_key_in_json"]
+        and not r["has_a_compliance_history_section"]
+        and r["has_section_8_supporting_document_index"]
+        and r["has_section_9_exceptions_follow_up"]
+        for r in results
+    )
+    return {"total_clients_checked": len(results), "all_clean": all_clean, "results": results}
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
