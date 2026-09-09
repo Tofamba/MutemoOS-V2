@@ -8183,6 +8183,10 @@ async def _fetch_matter_review_status_rows(
             "next_review_date": r["next_review_date"].isoformat() if r["next_review_date"] else None,
             "last_reviewed_date": r["last_reviewed_date"].isoformat() if r["last_reviewed_date"] else None,
             "next_deadline": r.get("next_deadline").isoformat() if r.get("next_deadline") else None,
+            # What the critical date is for -- free text, not a litigation
+            # assumption (a settlement date, a lease renewal, a filing dies).
+            # .get() for the same fake-fixture reason as next_deadline above.
+            "next_deadline_note": r.get("next_deadline_note"),
             "created_by_name": r["created_by_name"],
             "last_activity_kind": last_activity_kind,
             "last_activity_text": last_activity_text,
