@@ -10509,8 +10509,21 @@ async def _TEMP_verify_legal_update_ingestion(item_id: str, request: Request, qu
     if query:
         from types import SimpleNamespace
         async with _db_pool.acquire() as conn:
+            # Same LEFT JOIN the real /api/search job uses (main.py's
+            # search_documents_job) before calling _semantic_search_legal()
+            # -- chunks itself carries no legal_source_type/authority_
+            # strength columns (only legal_updates does), so a plain
+            # SELECT * FROM chunks here would show every result's
+            # legal_source_type/authority_strength as null, which isn't
+            # what a real query actually sees.
             all_legal_chunk_rows = await conn.fetch(
-                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
+                """
+                SELECT c.*, lu.legal_source_type, lu.authority_strength
+                FROM chunks c
+                LEFT JOIN legal_updates lu ON lu.id = c.document_id
+                WHERE c.firm_id=$1 AND c.chunk_source='legal'
+                """,
+                FIRM_ID
             )
         all_chunks = [dict(r) for r in all_legal_chunk_rows]
         search_req = SimpleNamespace(query=query, limit=10)
