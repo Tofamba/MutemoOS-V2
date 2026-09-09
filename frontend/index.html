@@ -1230,6 +1230,7 @@ select{cursor:pointer}
               <select id="lu-source-type">
                 <option value="legislation">Legislation (Act / SI)</option>
                 <option value="case_law">Case Law (Judgment)</option>
+                <option value="guidance">Guidance (Regulatory)</option>
               </select>
             </div>
             <div class="form-group">
@@ -1238,6 +1239,7 @@ select{cursor:pointer}
                 <option value="ZimLII">ZimLII</option>
                 <option value="Veritas">Veritas</option>
                 <option value="Government Gazette">Government Gazette</option>
+                <option value="FIU">FIU (Financial Intelligence Unit)</option>
                 <option value="Other">Other</option>
               </select>
             </div>
@@ -6813,6 +6815,7 @@ window._luGroups = { legislation: [], judgments: [], news: [] };
 
 function renderLuItem(item) {
   const icon = item.source_type === 'legislation' ? '📜' :
+               item.source_type === 'guidance' ? '📋' :
                (item.source_type === 'news' || item.source_type === 'legal_update' || item.source_type === 'press_statement') ? '📰' : '⚖';
   return `
     <div class="doc-item" style="align-items:flex-start">
@@ -6859,11 +6862,19 @@ async function renderLegalUpdates() {
       el.innerHTML = '<div class="empty-state" style="padding:1.5rem"><p style="font-size:0.82rem;color:var(--ink3)">No items uploaded yet.</p></div>';
       return;
     }
-    // Group items into three categories — sorted most recent first
+    // Group items into three categories — sorted most recent first.
+    // "guidance" (2026-09-10, regulator/government guidance -- e.g. FIU's
+    // AML/CFT risk-based-approach guidance) rides in the News bucket
+    // rather than getting a 4th tab of its own: it's not legislation or
+    // a judgment, and without a group of its own it would upload/index
+    // fine but never show up here to browse or delete -- an invisible,
+    // unmanageable row. renderLuItem() still gives it its own icon (📋,
+    // not 📰) so it doesn't read as an actual press statement once inside
+    // that tab.
     const sortByDate = arr => [...arr].sort((a,b) => (b.doc_date||b.uploaded_at||'').localeCompare(a.doc_date||a.uploaded_at||''));
     window._luGroups.legislation = sortByDate(items.filter(i => i.source_type === 'legislation'));
     window._luGroups.judgments   = sortByDate(items.filter(i => i.source_type === 'case_law' || i.source_type === 'judgment'));
-    window._luGroups.news        = sortByDate(items.filter(i => i.source_type === 'news' || i.source_type === 'legal_update' || i.source_type === 'press_statement'));
+    window._luGroups.news        = sortByDate(items.filter(i => i.source_type === 'news' || i.source_type === 'legal_update' || i.source_type === 'press_statement' || i.source_type === 'guidance'));
     const { legislation, judgments, news } = window._luGroups;
 
     // PLACEHOLDER — replaced by global functions above
