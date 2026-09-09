@@ -8634,18 +8634,15 @@ async def client_compliance_status_report_export(request: Request):
     filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
 
-@app.get("/api/reports/client-compliance-status-export-pdf")
-async def client_compliance_status_report_export_pdf(request: Request):
-    """Same data/permission as the JSON report and CSV export above --
-    PDF download (2026-09-03, partner design review asked to match a
-    sample report's layout). Reuses _mp_pdf_table(), the same bordered-
-    table renderer My Portfolio's PDF export already uses for its own
-    per-client listings -- not a second table-drawing implementation."""
-    user = await get_current_user(request)
-    _check_permission(user, "reports:client_compliance_status")
-    async with _db_pool.acquire() as conn:
-        rows = await _fetch_client_compliance_roster_rows(conn)
-
+def _build_client_compliance_status_pdf(rows: list) -> bytes:
+    """PDF export for the AML/Client Compliance Register (2026-09-03,
+    partner design review asked to match a sample report's layout;
+    factored out of the endpoint 2026-09-09 so a real-data verification
+    check can call this exact function directly, same convention as the
+    CDD report's own _build_client_cdd_pdf()). Reuses _mp_pdf_table(),
+    the same bordered-table renderer My Portfolio's PDF export already
+    uses for its own per-client listings -- not a second table-drawing
+    implementation."""
     from fpdf import FPDF
     pdf = FPDF(orientation="L", unit="mm", format="A4")  # landscape -- 10 columns
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -8679,10 +8676,21 @@ async def client_compliance_status_report_export_pdf(request: Request):
             pdf, _CCS_EXPORT_HEADERS, col_widths, table_rows,
             cell_colors=lambda ri, ci: _pdf_color_for_risk_rating(rows[ri]["risk_rating"]) if ci == 5 else None,
         )
+    return bytes(pdf.output())
 
+@app.get("/api/reports/client-compliance-status-export-pdf")
+async def client_compliance_status_report_export_pdf(request: Request):
+    """Same data/permission as the JSON report and CSV export above --
+    PDF download."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_client_compliance_roster_rows(conn)
+
+    pdf_bytes = _build_client_compliance_status_pdf(rows)
     filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(
-        content=bytes(pdf.output()),
+        content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
@@ -8971,15 +8979,10 @@ async def matter_aml_status_report_export(request: Request):
     filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
 
-@app.get("/api/reports/matter-aml-status-export-pdf")
-async def matter_aml_status_report_export_pdf(request: Request):
-    """Same data/permission as the JSON report and CSV export above --
-    PDF download, reusing _mp_pdf_table()."""
-    user = await get_current_user(request)
-    _check_permission(user, "reports:client_compliance_status")
-    async with _db_pool.acquire() as conn:
-        rows = await _fetch_matter_aml_status_rows(conn)
-
+def _build_matter_aml_status_pdf(rows: list) -> bytes:
+    """PDF export for Matter AML Status (factored out of the endpoint
+    2026-09-09, same reason/convention as _build_client_compliance_
+    status_pdf() above), reusing _mp_pdf_table()."""
     from fpdf import FPDF
     pdf = FPDF(orientation="L", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -9024,10 +9027,21 @@ async def matter_aml_status_report_export_pdf(request: Request):
             pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4},
             cell_colors=lambda ri, ci: _pdf_color_for_risk_rating(rows[ri]["matter_risk"]) if ci == 3 else None,
         )
+    return bytes(pdf.output())
 
+@app.get("/api/reports/matter-aml-status-export-pdf")
+async def matter_aml_status_report_export_pdf(request: Request):
+    """Same data/permission as the JSON report and CSV export above --
+    PDF download."""
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await _fetch_matter_aml_status_rows(conn)
+
+    pdf_bytes = _build_matter_aml_status_pdf(rows)
     filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(
-        content=bytes(pdf.output()),
+        content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
