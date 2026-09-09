@@ -10447,6 +10447,97 @@ async def delete_legal_update(item_id: str, request: Request):
         await asyncio.to_thread(remove_chunks_from_chroma, chunk_ids, "legal")
     return {"deleted": True}
 
+@app.get("/api/admin/verify-legal-update-ingestion/{item_id}")
+async def _TEMP_verify_legal_update_ingestion(item_id: str, request: Request, query: str = ""):
+    """
+    TEMP, read-only, admin-token-gated -- real-data verification for a
+    single legal_updates ingestion, same discipline as the Constitution
+    fix (commit bf9bd5e's own verify-v1-migrated-legal-updates endpoint,
+    mirrored here): confirms the claimed chunk_count in Postgres matches
+    ACTUAL chunks rows AND ACTUAL Chroma vectors -- "status: complete,
+    chunk_count: N" alone is exactly what looked fine for the v1-migrated
+    rows before that bug was found, so it's never trusted on its own.
+
+    If `query` is passed, also runs the exact real semantic search
+    function (_semantic_search_legal(), the same one /api/search's real
+    endpoint calls for AI-cited answers -- not a reimplementation) over
+    every currently-indexed legal chunk, and reports whether/where this
+    specific document's own chunks show up in the results, with what
+    attribution. Removed once verified.
+    """
+    require_admin_token(request)
+    doc_id = _uuid_mod.UUID(item_id)
+    async with _db_pool.acquire() as conn:
+        item = await conn.fetchrow("SELECT * FROM legal_updates WHERE id=$1 AND firm_id=$2", doc_id, FIRM_ID)
+        if not item:
+            raise HTTPException(status_code=404, detail="No such legal_updates row")
+        chunk_rows = await conn.fetch(
+            "SELECT id, chunk_index, page_number, text FROM chunks "
+            "WHERE document_id=$1 AND chunk_source='legal' ORDER BY chunk_index",
+            doc_id
+        )
+    actual_chunk_count = len(chunk_rows)
+
+    _, legal_col, _ = get_chroma_collections()
+    try:
+        chroma_hit = legal_col.get(where={"document_id": str(doc_id)})
+        actual_vector_ids = chroma_hit.get("ids", [])
+    except Exception as e:
+        actual_vector_ids = f"error: {e}"
+
+    chunk_ids_in_postgres = {str(r["id"]) for r in chunk_rows}
+    vectors_match_chunks = (
+        isinstance(actual_vector_ids, list)
+        and set(actual_vector_ids) == chunk_ids_in_postgres
+    )
+
+    result = {
+        "document_id": str(doc_id),
+        "filename": item["filename"],
+        "reference": item["reference"],
+        "status": item["status"],
+        "legal_source_type": item["legal_source_type"],
+        "authority_strength": item["authority_strength"],
+        "claimed_chunk_count": item["chunk_count"],
+        "actual_chunks_rows_in_postgres": actual_chunk_count,
+        "actual_chroma_vector_count": len(actual_vector_ids) if isinstance(actual_vector_ids, list) else actual_vector_ids,
+        "chunk_count_matches_actual_rows": item["chunk_count"] == actual_chunk_count,
+        "chroma_vector_ids_exactly_match_postgres_chunk_ids": vectors_match_chunks,
+        "sample_chunk_text_first_120_chars": chunk_rows[0]["text"][:120] if chunk_rows else None,
+    }
+
+    if query:
+        from types import SimpleNamespace
+        async with _db_pool.acquire() as conn:
+            all_legal_chunk_rows = await conn.fetch(
+                "SELECT * FROM chunks WHERE firm_id=$1 AND chunk_source='legal'", FIRM_ID
+            )
+        all_chunks = [dict(r) for r in all_legal_chunk_rows]
+        search_req = SimpleNamespace(query=query, limit=10)
+        search_results = _semantic_search_legal(search_req, all_chunks)
+        this_doc_hits = [r for r in search_results if r["document_id"] == str(doc_id)]
+        result["search_verification"] = {
+            "query": query,
+            "total_results_returned": len(search_results),
+            "this_documents_hits": [
+                {
+                    "rank": search_results.index(r) + 1,
+                    "similarity": r["similarity"],
+                    "reference": r["reference"],
+                    "source_name": r["source_name"],
+                    "legal_source_type": r["legal_source_type"],
+                    "authority_strength": r["authority_strength"],
+                    "text_excerpt": r["text"][:300],
+                }
+                for r in this_doc_hits
+            ],
+            "other_top_3_hits": [
+                {"rank": i + 1, "reference": r["reference"], "similarity": r["similarity"]}
+                for i, r in enumerate(search_results[:3])
+            ],
+        }
+    return result
+
 @app.post("/api/legal-updates/search")
 async def search_legal_updates(req: LegalUpdateSearchRequest, request: Request):
     user = await get_current_user(request)
