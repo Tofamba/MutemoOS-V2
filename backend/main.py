@@ -6691,6 +6691,26 @@ _CDD_SECTION_LAYOUT = {
     "9. Exceptions / Follow-up":      {"col_pcts": (46, 16, 22, 16),     "wrap_cols": {0}},   # Issue
 }
 
+def _cdd_section_cell_color(report: dict, section_title: str, row_index: int, col_index: int, row: list):
+    """Risk Rating cell shading for the CDD report PDF (2026-09-09) --
+    same convention as the Register/Matter AML Status PDFs, but this
+    report's sections are a mix of KV ("Item"/"Status") tables and real
+    multi-row tables, so a single fixed column index isn't enough: two
+    of the three colored spots are specific ROWS (matched by their own
+    label text, since _cddKV rows aren't at a stable index -- e.g.
+    "Client Risk Rating" only appears after the optional PEP-only rows
+    when is_pep is true) inside sections that share their ("Item",
+    "Status") header/shape with other, uncolored rows in the same
+    section. The third (Matters' own Matter Risk column) is a genuine
+    per-row table column, colored for every row the same way."""
+    if section_title == "1. Overall Compliance Position" and col_index == 1 and row[0] == "Client Risk":
+        return _pdf_color_for_risk_rating(report["overall"]["risk_rating"])
+    if section_title == "5. PEP / Risk Assessment" and col_index == 1 and row[0] == "Client Risk Rating":
+        return _pdf_color_for_risk_rating(report["pep_risk"]["risk_rating"])
+    if section_title == "7. Matters for this Client" and col_index == 4:
+        return _pdf_color_for_risk_rating(report["matters"][row_index]["matter_risk"])
+    return None
+
 def _build_client_cdd_pdf(report: dict) -> bytes:
     """Reuses _mp_pdf_table() for every section -- same bordered-table
     renderer every other AML report's PDF export already uses. Sections
@@ -6724,8 +6744,12 @@ def _build_client_cdd_pdf(report: dict) -> bytes:
             else:
                 col_widths = [usable_width / len(section["headers"])] * len(section["headers"])
                 wrap_cols = None
-            _mp_pdf_table(pdf, section["headers"], col_widths, [[str(v) for v in row] for row in section["rows"]],
-                          wrap_cols=wrap_cols)
+            section_rows = section["rows"]
+            _mp_pdf_table(
+                pdf, section["headers"], col_widths, [[str(v) for v in row] for row in section_rows],
+                wrap_cols=wrap_cols,
+                cell_colors=lambda ri, ci, _t=section["title"], _r=section_rows: _cdd_section_cell_color(report, _t, ri, ci, _r[ri]),
+            )
         else:
             pdf.set_font("Helvetica", "I", 9)
             pdf.cell(0, 6, "None recorded.", new_x="LMARGIN", new_y="NEXT")
@@ -8648,7 +8672,13 @@ async def client_compliance_status_report_export_pdf(request: Request):
         col_pcts = (7, 15, 7, 8, 9, 6, 5, 7, 5, 8, 23)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_ccs_export_row(r) for r in rows]
-        _mp_pdf_table(pdf, _CCS_EXPORT_HEADERS, col_widths, table_rows)
+        # Risk (col 5) shaded by risk_rating (2026-09-09) -- same
+        # High/Medium/Low/Not Assessed color convention as the on-screen
+        # Register and every other Risk Rating display in the app.
+        _mp_pdf_table(
+            pdf, _CCS_EXPORT_HEADERS, col_widths, table_rows,
+            cell_colors=lambda ri, ci: _pdf_color_for_risk_rating(rows[ri]["risk_rating"]) if ci == 5 else None,
+        )
 
     filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(
@@ -8988,7 +9018,12 @@ async def matter_aml_status_report_export_pdf(request: Request):
         col_pcts = (16, 24, 11, 11, 28, 10)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_matter_aml_export_row(r) for r in rows]
-        _mp_pdf_table(pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4})
+        # Matter Risk (col 3) shaded by matter_risk (2026-09-09) -- same
+        # convention as Risk in the Register PDF above.
+        _mp_pdf_table(
+            pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4},
+            cell_colors=lambda ri, ci: _pdf_color_for_risk_rating(rows[ri]["matter_risk"]) if ci == 3 else None,
+        )
 
     filename = f"matter_aml_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
     return Response(
@@ -9272,7 +9307,35 @@ _MP_PDF_COLORS = {
     "green": (22, 101, 52), "green_bg": (220, 245, 225),
     "red": (153, 27, 27), "red_bg": (253, 232, 232),
     "gold": (180, 140, 40), "gray": (110, 110, 110),
+    # gold_bg/gray_bg (2026-09-09, Risk Rating cell shading) -- added
+    # alongside the Medium/Not Assessed cases _pdf_color_for_risk_rating()
+    # below needs; same light-tint-of-the-dark-color pattern as green_bg/
+    # red_bg above, not a new palette.
+    "gold_bg": (250, 240, 212), "gray_bg": (232, 232, 232),
 }
+
+# Risk Rating color convention (2026-09-09) -- reuses the exact same
+# High=red/Medium=gold/Low=green/NotAssessed=gray mapping the frontend's
+# own CCS_RISK_CHIP already established (frontend/index.html), not a new
+# color scheme invented for PDF -- just fpdf2's own tint/text pair from
+# _MP_PDF_COLORS instead of a CSS class. Used to shade Risk/Matter Risk
+# cells across the Register, Matter AML Status, and Individual Client
+# AML/CDD Report PDF exports (see _mp_pdf_table()'s own cell_colors
+# param).
+_RISK_RATING_PDF_COLOR_KEYS = {
+    "Low": ("green_bg", "green"),
+    "Medium": ("gold_bg", "gold"),
+    "High": ("red_bg", "red"),
+    "NotAssessed": ("gray_bg", "gray"),
+}
+
+def _pdf_color_for_risk_rating(risk_rating: Optional[str]) -> tuple:
+    """Returns (bg_rgb, fg_rgb) for a risk_rating value, defaulting to
+    the Not Assessed/gray treatment for None or any value outside the
+    4 real ratings (defensive -- RISK_RATINGS is a closed enum, but a
+    cell_colors callback runs on live report rows, not validated input)."""
+    bg_key, fg_key = _RISK_RATING_PDF_COLOR_KEYS.get(risk_rating, _RISK_RATING_PDF_COLOR_KEYS["NotAssessed"])
+    return _MP_PDF_COLORS[bg_key], _MP_PDF_COLORS[fg_key]
 
 def _mp_truncate_to_width(pdf, text: str, max_width: float) -> str:
     """fpdf2 doesn't auto-truncate cell() text that overflows a fixed
@@ -9287,7 +9350,7 @@ def _mp_truncate_to_width(pdf, text: str, max_width: float) -> str:
     return text + "..." if text else ""
 
 def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: float = 6.0,
-                   wrap_cols: Optional[set] = None):
+                   wrap_cols: Optional[set] = None, cell_colors=None):
     """Small shared table renderer -- header row with a filled background,
     bordered data rows below. Used for the Review Status/Billing
     per-client listings, the Register/Exceptions exports, and Matter AML
@@ -9303,7 +9366,17 @@ def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: 
     long name. Every column not in wrap_cols, and every existing caller
     that doesn't pass it at all, keeps the exact original single-line
     truncated behavior -- this is additive, not a rewrite of the shared
-    renderer's default path."""
+    renderer's default path.
+
+    cell_colors (2026-09-09, Risk Rating color-coding) -- an optional
+    callable (row_index, col_index) -> (bg_rgb, fg_rgb) or None, checked
+    for every data cell. Returning None (the default for every existing
+    caller, which doesn't pass this at all) draws that cell exactly as
+    before -- white background, black text. A callback lets each caller
+    decide which column(s) and which specific rows get shaded (e.g. only
+    the Risk column, or only a KV row whose label is "Client Risk"),
+    using its own raw data rather than the already-stringified cell
+    text this function receives -- see _pdf_color_for_risk_rating()."""
     wrap_cols = wrap_cols or set()
     left = pdf.l_margin
     pdf.set_x(left)
@@ -9316,11 +9389,18 @@ def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: 
 
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(0, 0, 0)
-    for row in rows:
+    for row_index, row in enumerate(rows):
         if not wrap_cols:
             pdf.set_x(left)
-            for cell_text, w in zip(row, col_widths):
-                pdf.cell(w, row_height, _mp_truncate_to_width(pdf, str(cell_text), w - 2), border=1, align="L")
+            for i, (cell_text, w) in enumerate(zip(row, col_widths)):
+                colors = cell_colors(row_index, i) if cell_colors else None
+                if colors:
+                    pdf.set_fill_color(*colors[0])
+                    pdf.set_text_color(*colors[1])
+                pdf.cell(w, row_height, _mp_truncate_to_width(pdf, str(cell_text), w - 2),
+                         border=1, align="L", fill=bool(colors))
+                if colors:
+                    pdf.set_text_color(0, 0, 0)
             pdf.ln(row_height)
             continue
 
@@ -9348,13 +9428,21 @@ def _mp_pdf_table(pdf, headers: list, col_widths: list, rows: list, row_height: 
         y0 = pdf.get_y()
         x = left
         for i, (cell_text, w) in enumerate(zip(row, col_widths)):
-            pdf.rect(x, y0, w, this_row_height)
+            colors = cell_colors(row_index, i) if cell_colors else None
+            if colors:
+                pdf.set_fill_color(*colors[0])
+                pdf.rect(x, y0, w, this_row_height, style="FD")
+                pdf.set_text_color(*colors[1])
+            else:
+                pdf.rect(x, y0, w, this_row_height)
             if i in wrap_cols:
                 pdf.set_xy(x + 1, y0 + 1)
                 pdf.multi_cell(w - 2, row_height, "\n".join(wrapped_lines[i]), border=0, align="L")
             else:
                 pdf.set_xy(x, y0)
                 pdf.cell(w, row_height, _mp_truncate_to_width(pdf, str(cell_text), w - 2), border=0, align="L")
+            if colors:
+                pdf.set_text_color(0, 0, 0)
             x += w
         pdf.set_xy(left, y0 + this_row_height)
 

@@ -39,11 +39,13 @@ import uuid
 from collections import Counter
 from datetime import date
 
+import pdfplumber
 import pytest
 from fastapi import HTTPException
 
 from backend.main import (
     FIRM_ID,
+    _MP_PDF_COLORS,
     client_compliance_status_report,
     client_compliance_status_report_export,
     client_compliance_status_report_export_pdf,
@@ -634,6 +636,95 @@ def test_pdf_export_handles_no_clients_without_crashing(monkeypatch):
 
     assert response.media_type == "application/pdf"
     assert response.body.startswith(b"%PDF")
+
+
+def _colors_close(a, b, tolerance=0.01) -> bool:
+    return all(abs(x - y) < tolerance for x, y in zip(a, b))
+
+
+def _filled_rect_colors(pdf_bytes, exclude_color=None, tolerance=0.01):
+    """Every fpdf2 fill=True/rect(style="FD") cell shows up in pdfplumber
+    as a `rect` with fill=True and its own non_stroking_color (0-1 floats,
+    not 0-255) -- this pulls out just those, for asserting on Risk Rating
+    cell shading (2026-09-09) without hand-decoding raw PDF content
+    streams. exclude_color (e.g. the header row's navy_bg) filters out
+    colored rects that aren't the ones under test. Left unrounded (float
+    equality on independently-computed 255ths is too fragile -- see
+    _assert_colors_match(), which does the actual comparison with a
+    tolerance instead)."""
+    colors = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            for rect in page.rects:
+                if not rect.get("fill"):
+                    continue
+                color = tuple(rect["non_stroking_color"])
+                if exclude_color and _colors_close(color, exclude_color, tolerance):
+                    continue
+                colors.append(color)
+    return colors
+
+
+def _rgb_255_to_float(rgb) -> tuple:
+    return tuple(c / 255 for c in rgb)
+
+
+def _assert_colors_match(actual: list, expected: list, tolerance=0.01):
+    """Asserts `actual` and `expected` are the same multiset of colors up
+    to floating-point tolerance -- a plain set/tuple equality is too
+    fragile here since `actual` comes from decoding a real PDF's content
+    stream (fpdf2's own float formatting) while `expected` comes from a
+    fresh 255ths division in this test file; both round to the same
+    displayed value but aren't bit-for-bit equal floats."""
+    remaining = list(actual)
+    unmatched_expected = []
+    for exp in expected:
+        match = next((c for c in remaining if _colors_close(c, exp, tolerance)), None)
+        if match is None:
+            unmatched_expected.append(exp)
+        else:
+            remaining.remove(match)
+    assert not unmatched_expected, f"expected colors not found: {unmatched_expected}; actual was: {actual}"
+    assert not remaining, f"unexpected extra colors found: {remaining}"
+
+
+def test_pdf_export_shades_risk_rating_cells_by_rating(monkeypatch):
+    """Risk (col 5) gets a colored background matching each client's real
+    risk_rating -- same High=red/Medium=gold/Low=green/NotAssessed=gray
+    convention as the on-screen Register (CCS_RISK_CHIP, frontend/
+    index.html)."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    high = _client("High Risk Client", client_type="Individual")
+    medium = _client("Medium Risk Client", client_type="Individual")
+    low = _client("Low Risk Client", client_type="Individual")
+    not_assessed = _client("Unassessed Client", client_type="Individual")
+    compliance = [
+        _compliance(high["id"], risk_rating="High"),
+        _compliance(medium["id"], risk_rating="Medium"),
+        _compliance(low["id"], risk_rating="Low"),
+        _compliance(not_assessed["id"], risk_rating="NotAssessed"),
+    ]
+    monkeypatch.setattr(
+        m, "_db_pool", FakePool(clients=[high, medium, low, not_assessed], compliance=compliance),
+    )
+    _as_current_user(monkeypatch, m, partner)
+
+    response = asyncio.run(client_compliance_status_report_export_pdf(_fake_request()))
+
+    header_navy_bg = _rgb_255_to_float(_MP_PDF_COLORS["navy_bg"])
+    colors = _filled_rect_colors(response.body, exclude_color=header_navy_bg)
+
+    expected = [
+        _rgb_255_to_float(_MP_PDF_COLORS["red_bg"]),
+        _rgb_255_to_float(_MP_PDF_COLORS["gold_bg"]),
+        _rgb_255_to_float(_MP_PDF_COLORS["green_bg"]),
+        _rgb_255_to_float(_MP_PDF_COLORS["gray_bg"]),
+    ]
+    # Exactly one shaded cell per client (the Risk column only -- every
+    # other column, including the Outstanding text, stays unshaded).
+    assert len(colors) == 4
+    _assert_colors_match(colors, expected)
 
 
 # ── Summary endpoint (2026-09-03 design review) ──────────────────────────

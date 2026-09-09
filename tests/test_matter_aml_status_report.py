@@ -31,6 +31,7 @@ from fastapi import HTTPException
 from backend.main import (
     FIRM_ID,
     _MATTER_AML_HEADERS,
+    _MP_PDF_COLORS,
     matter_aml_status_report,
     matter_aml_status_report_export,
     matter_aml_status_report_export_pdf,
@@ -306,6 +307,82 @@ def test_pdf_export_handles_no_matters_without_crashing(monkeypatch):
 
     assert response.media_type == "application/pdf"
     assert response.body.startswith(b"%PDF")
+
+
+def _colors_close(a, b, tolerance=0.01) -> bool:
+    return all(abs(x - y) < tolerance for x, y in zip(a, b))
+
+
+def _filled_rect_colors(pdf_bytes, exclude_color=None, tolerance=0.01):
+    """Every fpdf2 fill=True/rect(style="FD") cell shows up in pdfplumber
+    as a `rect` with fill=True and its own non_stroking_color (0-1
+    floats) -- pulls out just those, for asserting on Matter Risk cell
+    shading (2026-09-09). exclude_color (the header row's navy_bg)
+    filters out colored rects that aren't the ones under test."""
+    colors = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            for rect in page.rects:
+                if not rect.get("fill"):
+                    continue
+                color = tuple(rect["non_stroking_color"])
+                if exclude_color and _colors_close(color, exclude_color, tolerance):
+                    continue
+                colors.append(color)
+    return colors
+
+
+def _rgb_255_to_float(rgb) -> tuple:
+    return tuple(c / 255 for c in rgb)
+
+
+def _assert_colors_match(actual: list, expected: list, tolerance=0.01):
+    """Same-multiset-up-to-tolerance check -- plain equality is too
+    fragile between a real PDF's own decoded floats and a fresh 255ths
+    division here (see the Register PDF test's own copy of this)."""
+    remaining = list(actual)
+    unmatched_expected = []
+    for exp in expected:
+        match = next((c for c in remaining if _colors_close(c, exp, tolerance)), None)
+        if match is None:
+            unmatched_expected.append(exp)
+        else:
+            remaining.remove(match)
+    assert not unmatched_expected, f"expected colors not found: {unmatched_expected}; actual was: {actual}"
+    assert not remaining, f"unexpected extra colors found: {remaining}"
+
+
+def test_pdf_export_shades_matter_risk_cells_by_rating(monkeypatch):
+    """Matter Risk (col 3) gets a colored background matching each
+    matter's real matter_risk -- same High=red/Medium=gold/Low=green/
+    NotAssessed=gray convention as the on-screen report (CCS_RISK_CHIP,
+    frontend/index.html). This report's PDF uses wrap_cols (Client/
+    Matter/Reason all wrap), so this also confirms cell shading works on
+    the manual rect()-drawn path, not just the simple single-line one
+    (see the Register PDF's own version of this test for that path)."""
+    import backend.main as m
+    matters = [
+        _matter(client_name="High Risk Co", matter_risk="High"),
+        _matter(client_name="Medium Risk Co", matter_risk="Medium"),
+        _matter(client_name="Low Risk Co", matter_risk="Low"),
+        _matter(client_name="Unassessed Co", matter_risk="NotAssessed"),
+    ]
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=matters))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(matter_aml_status_report_export_pdf(_fake_request()))
+
+    header_navy_bg = _rgb_255_to_float(_MP_PDF_COLORS["navy_bg"])
+    colors = _filled_rect_colors(response.body, exclude_color=header_navy_bg)
+
+    expected = [
+        _rgb_255_to_float(_MP_PDF_COLORS["red_bg"]),
+        _rgb_255_to_float(_MP_PDF_COLORS["gold_bg"]),
+        _rgb_255_to_float(_MP_PDF_COLORS["green_bg"]),
+        _rgb_255_to_float(_MP_PDF_COLORS["gray_bg"]),
+    ]
+    assert len(colors) == 4
+    _assert_colors_match(colors, expected)
 
 
 def test_pdf_export_does_not_truncate_long_reason_text(monkeypatch):

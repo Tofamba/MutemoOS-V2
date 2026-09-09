@@ -1151,3 +1151,81 @@ def test_pdf_export_wraps_long_document_filename(monkeypatch):
 # _pdf_safe() (that string shape came only from _row_to_compliance_
 # event(), which nothing calls anymore), so _pdf_safe()'s own arrow
 # substitution is untested for now too -- flagged, not silently dropped.
+
+
+# ── Risk Rating cell shading (2026-09-09) ──────────────────────────────────
+
+def _colors_close(a, b, tolerance=0.01) -> bool:
+    return all(abs(x - y) < tolerance for x, y in zip(a, b))
+
+
+def _filled_rect_colors(pdf_bytes, exclude_color=None, tolerance=0.01):
+    """Every fpdf2 fill=True/rect(style="FD") cell shows up in pdfplumber
+    as a `rect` with fill=True and its own non_stroking_color (0-1
+    floats) -- pulls out just those. exclude_color (the header row's
+    navy_bg) filters out colored rects that aren't the ones under test."""
+    colors = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            for rect in page.rects:
+                if not rect.get("fill"):
+                    continue
+                color = tuple(rect["non_stroking_color"])
+                if exclude_color and _colors_close(color, exclude_color, tolerance):
+                    continue
+                colors.append(color)
+    return colors
+
+
+def _rgb_255_to_float(rgb) -> tuple:
+    return tuple(c / 255 for c in rgb)
+
+
+def _assert_colors_match(actual: list, expected: list, tolerance=0.01):
+    """Same-multiset-up-to-tolerance check -- plain equality is too
+    fragile between a real PDF's own decoded floats and a fresh 255ths
+    division here (see the Register PDF test's own copy of this)."""
+    remaining = list(actual)
+    unmatched_expected = []
+    for exp in expected:
+        match = next((c for c in remaining if _colors_close(c, exp, tolerance)), None)
+        if match is None:
+            unmatched_expected.append(exp)
+        else:
+            remaining.remove(match)
+    assert not unmatched_expected, f"expected colors not found: {unmatched_expected}; actual was: {actual}"
+    assert not remaining, f"unexpected extra colors found: {remaining}"
+
+
+def test_pdf_export_shades_risk_rating_cells_in_overall_pep_and_matters_sections(monkeypatch):
+    """Risk Rating is colored in three places in this one PDF -- Section
+    1's "Client Risk" row, Section 5's "Client Risk Rating" row (both
+    sourced from the same client_compliance.risk_rating, so both should
+    be the SAME color here), and Section 7's per-matter Matter Risk
+    column (a genuinely different value) -- same High=red/Medium=gold/
+    Low=green/NotAssessed=gray convention as CCS_RISK_CHIP
+    (frontend/index.html). Confirms _cdd_section_cell_color() correctly
+    targets only these specific rows/column, not every ("Item","Status")
+    row in Sections 1/5/6."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _compliance(client_id, risk_rating="High")
+    matter = _matter(client_id, matter_risk="Low")
+    monkeypatch.setattr(
+        m, "_db_pool", FakePool(clients=[client], compliance={client_id: compliance}, matters=[matter]),
+    )
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+
+    header_navy_bg = _rgb_255_to_float(m._MP_PDF_COLORS["navy_bg"])
+    colors = _filled_rect_colors(response.body, exclude_color=header_navy_bg)
+
+    red_bg = _rgb_255_to_float(m._MP_PDF_COLORS["red_bg"])
+    green_bg = _rgb_255_to_float(m._MP_PDF_COLORS["green_bg"])
+    # Two red (client risk, shown twice) + one green (the one matter's
+    # own, different, matter_risk) -- three shaded cells total, nothing
+    # else in the whole report picks up a color.
+    assert len(colors) == 3
+    _assert_colors_match(colors, [red_bg, red_bg, green_bg])
