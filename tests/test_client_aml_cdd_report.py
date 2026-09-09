@@ -68,7 +68,8 @@ class FakeConnection:
         self.cdd_reviews = cdd_reviews if cdd_reviews is not None else []
         # Compliance Exception Resolution Workflow (2026-09-07, Phase 2) --
         # the report now syncs this client's own exceptions (Part D /
-        # "10. Exceptions / Follow-up") via _sync_compliance_exceptions_
+        # "9. Exceptions / Follow-up", renumbered 2026-09-09 when
+        # Compliance History was removed) via _sync_compliance_exceptions_
         # for_client(), which issues the real single-client-scoped
         # queries handled below (fetchrow/fetch) and writes via execute().
         self.compliance_exceptions = []
@@ -282,15 +283,16 @@ def _compliance(client_id, **kwargs):
 
 
 def _cleared_compliance(client_id, **kwargs):
-    """A fully "Cleared" compliance row (2026-09-07, Phase 2) -- for tests
-    that care about Compliance History composition, not the Compliance
-    Exception Resolution Workflow: with the default _client_row's Company
-    client_type and no compliance row at all, _sync_compliance_exceptions_
-    for_client() (now called by every report fetch) would open several
-    real "Compliance exception opened" events of its own, polluting these
-    tests' exact-event-list assertions with noise unrelated to what
-    they're testing. See tests/test_compliance_exceptions.py for that
-    workflow's own dedicated tests."""
+    """A fully "Cleared" compliance row (2026-09-07, Phase 2) -- lets a
+    test pin down exactly one real gap (via an override kwarg) rather
+    than the default _client_row's Company client_type + no compliance
+    row at all, which would leave every one of _compute_compliance_
+    status()'s missing[] items open and _sync_compliance_exceptions_
+    for_client() (now called by every report fetch) creating a real
+    "Compliance exception opened" event for each -- noise unrelated to
+    what the Exceptions/Follow-up section tests below are each checking.
+    See tests/test_compliance_exceptions.py for that workflow's own
+    dedicated tests."""
     defaults = dict(
         identity_verification_status="Verified", client_is_beneficial_owner="Yes",
         is_pep=False, conflict_check_reviewed=True,
@@ -736,124 +738,18 @@ def test_no_documents_at_all_gives_an_empty_index(monkeypatch):
     assert result["documents"] == []
 
 
-# ── Compliance History (Part C, 2026-09-03) ────────────────────────────────
-# Real event log via audit_logs -- see tests/test_compliance_event_logging.py
-# for the logging-side tests (create_beneficial_owner/update_beneficial_
-# owner/update_client_compliance/update_matter each calling
-# _log_compliance_event() correctly). These tests cover only the reading
-# side: _fetch_compliance_history()'s composition into this report.
-
-def _audit_log(target_type, target_id, action, details=None, actor_name="J. Moyo", created_at=None):
-    return {
-        "firm_id": FIRM_ID, "target_type": target_type, "target_id": target_id,
-        "action": action, "actor_name": actor_name,
-        "details": details or {}, "created_at": created_at or datetime.now(timezone.utc),
-    }
-
-
-def test_compliance_history_enabled_with_no_events_yet(monkeypatch):
-    import backend.main as m
-    client_id = uuid.uuid4()
-    client = _client_row(client_id)
-    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}))
-    _as_current_user(monkeypatch, m, _partner())
-
-    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
-
-    assert result["compliance_history"]["enabled"] is True
-    assert result["compliance_history"]["events"] == []
-
-
-def test_compliance_history_includes_client_level_events(monkeypatch):
-    import backend.main as m
-    client_id = uuid.uuid4()
-    client = _client_row(client_id)
-    log = _audit_log("CLIENT", client_id, "BO_VERIFIED", {"owner_name": "Tendai Moyo"})
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}, audit_logs=[log]),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
-
-    events = result["compliance_history"]["events"]
-    assert len(events) == 1
-    assert events[0]["event"] == "Beneficial owner verified"
-    assert events[0]["user"] == "J. Moyo"
-    assert events[0]["result"] == "Tendai Moyo"
-
-
-def test_compliance_history_includes_matter_level_events_for_this_clients_matters(monkeypatch):
-    """Mirrors the sample report's own mixed timeline -- a matter-level
-    event ("Matter risk reviewed") appears alongside client-level events
-    for the same client."""
-    import backend.main as m
-    client_id = uuid.uuid4()
-    matter = _matter(client_id)
-    client = _client_row(client_id)
-    log = _audit_log("MATTER", matter["id"], "MATTER_RISK_SET", {"old": "NotAssessed", "new": "High"},
-                      actor_name="Compliance Officer")
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(
-            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
-            matters=[matter], audit_logs=[log],
-        ),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
-
-    events = result["compliance_history"]["events"]
-    assert len(events) == 1
-    assert events[0]["event"] == "Matter risk set"
-    assert events[0]["user"] == "Compliance Officer"
-    assert events[0]["result"] == "Not Assessed → High"
-
-
-def test_compliance_history_excludes_another_clients_events(monkeypatch):
-    import backend.main as m
-    client_id = uuid.uuid4()
-    other_client_id = uuid.uuid4()
-    client = _client_row(client_id)
-    log = _audit_log("CLIENT", other_client_id, "PEP_FLAGGED")
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}, audit_logs=[log]),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
-
-    assert result["compliance_history"]["events"] == []
-
-
-def test_compliance_history_sorted_chronologically(monkeypatch):
-    import backend.main as m
-    client_id = uuid.uuid4()
-    client = _client_row(client_id)
-    later = _audit_log("CLIENT", client_id, "CONFLICT_CHECK_COMPLETED", created_at=datetime(2026, 9, 2, tzinfo=timezone.utc))
-    earlier = _audit_log("CLIENT", client_id, "PEP_FLAGGED", created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(
-            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
-            audit_logs=[later, earlier],
-        ),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
-
-    events = result["compliance_history"]["events"]
-    assert [e["event"] for e in events] == ["PEP flagged", "Conflict check completed"]
-
-
-# ── CDD Review events merged into the same timeline (2026-09-04) ──────────
-# Per the user's own instruction: CDD Review events join this ONE
-# timeline, not a separate section -- see _row_to_cdd_review_event() and
-# _fetch_compliance_history()'s own merge.
+# ── Compliance History (Part C, 2026-09-03; REMOVED from this report
+# 2026-09-09 per direct partner feedback) ──────────────────────────────────
+# This report no longer returns a "compliance_history" key or renders a
+# Compliance History section in any format. The underlying logging
+# (_log_compliance_event(), see tests/test_compliance_event_logging.py)
+# is untouched -- audit_logs keeps recording exactly as before, this
+# report just doesn't read it back. _fetch_compliance_history() itself
+# is left in place but is no longer exercised by any test in this file
+# (it has no other caller either); its own composition logic (event
+# ordering, CDD-review merging, cross-client exclusion) is consequently
+# untested for now -- flagged, not silently dropped, in case it's
+# resurfaced somewhere later.
 
 def _cdd_review_row(client_id, **overrides):
     row = {
@@ -863,55 +759,6 @@ def _cdd_review_row(client_id, **overrides):
     }
     row.update(overrides)
     return row
-
-
-def test_cdd_review_event_appears_in_compliance_history(monkeypatch):
-    import backend.main as m
-    client_id = uuid.uuid4()
-    client = _client_row(client_id)
-    reviewer_id = uuid.uuid4()
-    reviewer = _user("P. Chademana", user_id=reviewer_id)
-    review = _cdd_review_row(client_id, reviewed_by=reviewer_id, risk_rating="High",
-                              changes_identified="Client relocated")
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(
-            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
-            users=[reviewer], cdd_reviews=[review],
-        ),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
-
-    events = result["compliance_history"]["events"]
-    assert len(events) == 1
-    assert events[0]["event"] == "CDD Review"
-    assert events[0]["date"] == "2026-09-04"
-    assert events[0]["user"] == "P. Chademana"
-    assert "High" in events[0]["result"]
-    assert "Client relocated" in events[0]["result"]
-
-
-def test_cdd_review_events_interleave_chronologically_with_audit_log_events(monkeypatch):
-    import backend.main as m
-    client_id = uuid.uuid4()
-    client = _client_row(client_id)
-    review = _cdd_review_row(client_id, review_date=date(2026, 9, 2))
-    log = _audit_log("CLIENT", client_id, "PEP_FLAGGED", created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(
-            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
-            audit_logs=[log], cdd_reviews=[review],
-        ),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    result = asyncio.run(client_aml_cdd_report(str(client_id), _fake_request()))
-
-    events = result["compliance_history"]["events"]
-    assert [e["event"] for e in events] == ["PEP flagged", "CDD Review"]
 
 
 # ── Last CDD Review (2026-09-04) ────────────────────────────────────────────
@@ -1060,7 +907,7 @@ def test_exceptions_section_in_csv_export(monkeypatch):
     rows = _csv_rows(response)
     flat_rows = [row for row in rows if row]
 
-    idx = next(i for i, row in enumerate(flat_rows) if row[0] == "10. Exceptions / Follow-up")
+    idx = next(i for i, row in enumerate(flat_rows) if row[0] == "9. Exceptions / Follow-up")
     assert flat_rows[idx + 1] == ["Issue", "Status", "Responsible Person", "Due"]
     assert flat_rows[idx + 2] == ["Identity not verified", "Open", "Compliance Officer", "—"]
 
@@ -1092,7 +939,10 @@ def test_pdf_export_wraps_long_exception_issue_label(monkeypatch):
     assert not exception_rows[0][0].endswith("...")
 
 
-def test_csv_export_includes_all_ten_sections(monkeypatch):
+def test_csv_export_includes_all_nine_sections(monkeypatch):
+    """Compliance History (formerly Section 9) was removed 2026-09-09
+    per direct partner feedback -- Exceptions/Follow-up renumbered from
+    10 down to 9, nothing else shifted."""
     import backend.main as m
     client_id = uuid.uuid4()
     client = _client_row(client_id, client_type="Individual")
@@ -1106,10 +956,11 @@ def test_csv_export_includes_all_ten_sections(monkeypatch):
     for expected in [
         "1. Overall Compliance Position", "2. Client Identification", "3. Beneficial Ownership",
         "4. Person Acting for Client", "5. PEP / Risk Assessment", "6. Conflict Check",
-        "7. Matters for this Client", "8. Supporting Document Index", "9. Compliance History",
-        "10. Exceptions / Follow-up",
+        "7. Matters for this Client", "8. Supporting Document Index",
+        "9. Exceptions / Follow-up",
     ]:
         assert expected in section_titles
+    assert "Compliance History" not in "".join(section_titles)
 
 
 def test_csv_export_reflects_real_data(monkeypatch):
@@ -1174,14 +1025,18 @@ def test_pdf_export_handles_empty_sections_without_crashing(monkeypatch):
     assert response.body.startswith(b"%PDF")
 
 
-# ── PDF formatting fixes (2026-09-07, full-report review) ──────────────────
-# Sections 3, 5, 7, 8 and 9 carried genuinely open-ended free text
-# squeezed into equal-width, unwrapped _mp_pdf_table() columns --
-# confirmed truncating with an ellipsis on real staging data (20 real
-# clients), not just theoretically. Each now wraps its own free-text
-# column(s) via _CDD_SECTION_LAYOUT instead. Sections 1, 2, 4 are a
-# known, deferred follow-up (see _CDD_SECTION_LAYOUT's own comment) --
-# not covered here since they weren't touched.
+# ── PDF formatting fixes (2026-09-07, full-report review; Section 9 was
+# Compliance History at review time, removed 2026-09-09 and its number
+# reused by Exceptions/Follow-up -- see test_pdf_export_wraps_long_
+# exception_issue_label below for that section's own, separate wrap
+# coverage, added with the section itself in Phase 2) ─────────────────────
+# Sections 3, 5, 7 and 8 carried genuinely open-ended free text squeezed
+# into equal-width, unwrapped _mp_pdf_table() columns -- confirmed
+# truncating with an ellipsis on real staging data (20 real clients), not
+# just theoretically. Each now wraps its own free-text column(s) via
+# _CDD_SECTION_LAYOUT instead. Sections 1, 2, 4 are a known, deferred
+# follow-up (see _CDD_SECTION_LAYOUT's own comment) -- not covered here
+# since they weren't touched.
 
 def test_pdf_export_wraps_long_beneficial_ownership_basis(monkeypatch):
     """Real bug: Basis (ownership_or_control_basis) is unbounded free
@@ -1288,59 +1143,11 @@ def test_pdf_export_wraps_long_document_filename(monkeypatch):
     assert doc_rows[0][3].replace(" ", "") == long_filename
     assert not doc_rows[0][3].endswith("...")
 
-
-def test_pdf_export_wraps_long_compliance_history_review_note(monkeypatch):
-    """Confirmed on real data (Farai Zvenyika, Mould Enterprises): a CDD
-    review's changes_identified text, appended to the Result column by
-    _row_to_cdd_review_event(), truncating independently of the
-    arrow-character issue covered below."""
-    import backend.main as m
-    client_id = uuid.uuid4()
-    client = _client_row(client_id)
-    long_note = "Client is appointed as director of Fox Mining Group effective 01 September 2026, requiring AML re-assessment"
-    review = _cdd_review_row(client_id, risk_rating="Low", changes_identified=long_note)
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(clients=[client], compliance={client_id: _cleared_compliance(client_id)}, cdd_reviews=[review]),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
-    tables = _pdf_tables_by_header(response)
-    history_rows = tables[("Date", "Event", "User", "Result")][0]
-
-    assert len(history_rows) == 1
-    assert history_rows[0][3] == f"Complete - risk Low; {long_note}"
-    assert not history_rows[0][3].endswith("...")
-
-
-def test_pdf_export_renders_arrow_as_plain_ascii_not_garbled(monkeypatch):
-    """Real encoding bug found across all 20 real staging clients (59
-    arrow-bearing values, 100% garbled): _row_to_compliance_event()
-    builds "old -> new" strings with a real right-arrow character (→),
-    which fpdf2's latin-1-only Helvetica can't render -- _pdf_safe()
-    degraded it to "?" with no plain-ASCII substitute. Fixed at the
-    source (_pdf_safe()'s own substitution table) rather than patched
-    at this one call site."""
-    import backend.main as m
-    client_id = uuid.uuid4()
-    matter = _matter(client_id)
-    client = _client_row(client_id)
-    log = _audit_log("MATTER", matter["id"], "MATTER_AML_SCOPE_SET",
-                      {"old": "NotAssessed", "new": "InScope"}, actor_name="Compliance Officer")
-    monkeypatch.setattr(
-        m, "_db_pool",
-        FakePool(
-            clients=[client], compliance={client_id: _cleared_compliance(client_id)},
-            matters=[matter], audit_logs=[log],
-        ),
-    )
-    _as_current_user(monkeypatch, m, _partner())
-
-    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
-    tables = _pdf_tables_by_header(response)
-    history_rows = tables[("Date", "Event", "User", "Result")][0]
-
-    assert len(history_rows) == 1
-    assert history_rows[0][3] == "Not Assessed -> In Scope"
-    assert "?" not in history_rows[0][3]
+# test_pdf_export_wraps_long_compliance_history_review_note and
+# test_pdf_export_renders_arrow_as_plain_ascii_not_garbled (Compliance
+# History PDF wrapping/arrow-substitution coverage) were removed
+# 2026-09-09 along with the report section they exercised. No other
+# live code path currently builds a "old → new" string that reaches
+# _pdf_safe() (that string shape came only from _row_to_compliance_
+# event(), which nothing calls anymore), so _pdf_safe()'s own arrow
+# substitution is untested for now too -- flagged, not silently dropped.
