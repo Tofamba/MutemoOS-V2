@@ -399,6 +399,34 @@ def test_matter_review_status_flags_an_imminent_deadline_amber(monkeypatch):
     assert any("Deadline in 10 day(s)" in r for r in rows[0]["matter_health"]["reasons"])
 
 
+def test_next_deadline_note_is_surfaced_in_the_report_row(monkeypatch):
+    """next_deadline_note is already fetched by this function's own SQL
+    and already used everywhere else a matter's deadline shows up (the
+    New Matter form, the deadline chip's tooltip) -- confirms it's not
+    silently dropped here too, on its way into the report row."""
+    import backend.main as m
+    today = date.today()
+    matter = _matter(
+        "Conveyancing Transfer", next_deadline=today + timedelta(days=10),
+        next_deadline_note="Transfer registration deadline -- Deeds Office",
+    )
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
+
+    rows = asyncio.run(matter_review_status_report(_fake_request()))
+
+    assert rows[0]["next_deadline_note"] == "Transfer registration deadline -- Deeds Office"
+
+
+def test_next_deadline_note_is_none_when_not_set(monkeypatch):
+    import backend.main as m
+    matter = _matter("No Deadline Matter")
+    monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
+
+    rows = asyncio.run(matter_review_status_report(_fake_request()))
+
+    assert rows[0]["next_deadline_note"] is None
+
+
 # ── client name resolution ────────────────────────────────────────────────
 
 def test_client_name_resolved_from_linked_client(monkeypatch):
