@@ -1836,6 +1836,17 @@ select{cursor:pointer}
       <div class="form-group"><label>Beneficiaries</label><textarea id="cc-beneficiaries" rows="3" placeholder="Name | ID number | Role"></textarea></div>
     </div>
 
+    <!-- Shown instead of #cc-beneficial-ownership-section when the client
+         type isn't a legal person -- so the absence reads as "not
+         applicable yet", not "broken". Toggled in onComplianceClientTypeChange(). -->
+    <div id="cc-beneficial-ownership-na" style="display:none;margin-top:0.5rem">
+      <div class="form-section-label">BENEFICIAL OWNERSHIP — s15 / s17(b)</div>
+      <p style="font-size:0.8rem;color:var(--ink3);margin:0.25rem 0 0;line-height:1.45">
+        Beneficial ownership applies to companies, trusts, and similar legal entities —
+        set the client's type above to record owners.
+      </p>
+    </div>
+
     <div id="cc-beneficial-ownership-section" style="display:none;margin-top:0.5rem">
       <div class="form-section-label">BENEFICIAL OWNERSHIP — s15 / s17(b)</div>
       <div class="form-group">
@@ -3722,8 +3733,11 @@ function onComplianceClientTypeChange() {
   document.getElementById('cc-entity-fields').style.display = (type && LEGAL_PERSON_CLIENT_TYPES.includes(type)) ? 'block' : 'none';
   document.getElementById('cc-trust-fields').style.display = TRUST_CLIENT_TYPES.includes(type) ? 'block' : 'none';
   // Part 6: beneficial ownership prompt only for a legal-person client.
-  document.getElementById('cc-beneficial-ownership-section').style.display =
-    (type && LEGAL_PERSON_CLIENT_TYPES.includes(type)) ? 'block' : 'none';
+  // When it doesn't apply, show the "not applicable yet" hint in its
+  // place rather than nothing at all (see #cc-beneficial-ownership-na).
+  const isLegalPerson = !!(type && LEGAL_PERSON_CLIENT_TYPES.includes(type));
+  document.getElementById('cc-beneficial-ownership-section').style.display = isLegalPerson ? 'block' : 'none';
+  document.getElementById('cc-beneficial-ownership-na').style.display = isLegalPerson ? 'none' : 'block';
 }
 
 function onComplianceIsBoChange() {
