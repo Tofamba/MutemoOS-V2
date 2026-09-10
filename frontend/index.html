@@ -1957,6 +1957,19 @@ select{cursor:pointer}
         <div id="cc-sm-approval-status" style="font-size:0.8rem;font-weight:600"></div>
         <button class="btn btn-gold btn-sm" style="width:auto;margin-top:6px" onclick="approveSeniorManagement()" id="cc-sm-approve-btn">✓ I approve as Senior Management</button>
       </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>PEP Ceased Public Function <span style="font-weight:400;color:var(--ink3)">(date, if applicable)</span></label>
+          <input type="date" id="cc-pep-ceased-date" onchange="onPepCeasedDateChange()"/>
+        </div>
+        <div class="form-group">
+          <label>PEP Review Due</label>
+          <input type="date" id="cc-pep-review-due"/>
+        </div>
+      </div>
+      <p style="font-size:0.72rem;color:var(--ink3);margin-top:-6px;margin-bottom:0.6rem">
+        FIU guidance s.119-122: PEP status is NOT automatically cleared when a public role ends — Review Due only flags that a risk-based reassessment (s.122) is now needed, defaulting to 12 months after the ceased date (s.78's own review cadence). "Is this client a PEP?" above stays the actual decision.
+      </p>
     </div>
     <div class="form-row">
       <div class="form-group"><label>Source of Wealth</label><textarea id="cc-source-of-wealth" rows="2"></textarea></div>
@@ -3591,6 +3604,8 @@ async function openComplianceModal(clientId) {
     document.getElementById('cc-pep-basis').value = _complianceData.pep_basis || '';
     document.getElementById('cc-pep-position').value = _complianceData.pep_position || '';
     document.getElementById('cc-pep-country').value = _complianceData.pep_country || '';
+    document.getElementById('cc-pep-ceased-date').value = _complianceData.pep_ceased_date || '';
+    document.getElementById('cc-pep-review-due').value = _complianceData.pep_review_due || '';
     document.getElementById('cc-source-of-wealth').value = _complianceData.source_of_wealth || '';
     document.getElementById('cc-source-of-funds').value = _complianceData.source_of_funds || '';
     document.getElementById('cc-enhanced-monitoring').checked = !!_complianceData.enhanced_monitoring_required;
@@ -3724,6 +3739,30 @@ function onComplianceIsPepChange() {
     btn.style.display = window._userId ? 'inline-flex' : 'none';
     if (!window._userId) box.textContent += ' (Sign in to approve.)';
   }
+}
+
+// PEP Review Due (2026-09-10, FIU guidance s.119-122) -- client-side echo
+// of the backend's own default (update_client_compliance()'s _add_12_
+// months(), main.py): a lawyer sees the real default immediately rather
+// than only after saving, but the backend recomputes/validates this
+// itself regardless, so this is a UX convenience, not the source of
+// truth. Editing the Review Due field afterward (before saving) simply
+// overrides this, same as the backend's own "explicit value always
+// wins" rule.
+function onPepCeasedDateChange() {
+  const ceasedInput = document.getElementById('cc-pep-ceased-date');
+  const dueInput = document.getElementById('cc-pep-review-due');
+  if (!ceasedInput.value) return;
+  const ceased = new Date(ceasedInput.value + 'T00:00:00');
+  const due = new Date(ceased);
+  due.setFullYear(due.getFullYear() + 1);
+  // setFullYear rolls Feb 29 -> Mar 1 in a non-leap target year (JS Date
+  // auto-normalizes out-of-range days) -- pull it back to Feb 28 to
+  // match the backend's own _add_12_months() fallback exactly.
+  if (ceased.getMonth() === 1 && ceased.getDate() === 29 && due.getMonth() === 2) {
+    due.setDate(0); // last day of the previous month (Feb) in `due`'s year
+  }
+  dueInput.value = due.toISOString().slice(0, 10);
 }
 
 function renderOwnersList() {
@@ -4058,6 +4097,13 @@ async function submitComplianceForm() {
     compliancePayload.pep_basis = document.getElementById('cc-pep-basis').value || null;
     compliancePayload.pep_position = document.getElementById('cc-pep-position').value.trim() || null;
     compliancePayload.pep_country = document.getElementById('cc-pep-country').value.trim() || null;
+    // PEP Review Due (FIU guidance s.119-122) -- pep_review_due is sent
+    // whenever it has a value (whether auto-filled by onPepCeasedDateChange()
+    // or hand-edited after an actual s.122 review) so an explicit push-out
+    // is never silently dropped; the backend only applies its own +12
+    // months default when pep_review_due is absent from the request.
+    compliancePayload.pep_ceased_date = document.getElementById('cc-pep-ceased-date').value || null;
+    compliancePayload.pep_review_due = document.getElementById('cc-pep-review-due').value || null;
   }
   Object.keys(compliancePayload).forEach(k => compliancePayload[k] === null && delete compliancePayload[k]);
 

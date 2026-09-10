@@ -665,6 +665,29 @@ async def run_migrations():
         ALTER TABLE client_compliance ADD CONSTRAINT client_compliance_aml_scope_check
             CHECK (aml_scope IN ('NotAssessed', 'InScope', 'OutOfScope'));
 
+        -- PEP Review Due (2026-09-10, FIU "Guidance for Legal Professionals
+        -- on the Risk Based Approach to Implementation of AML/CFT/CPF
+        -- Obligations", Version 3, s.119-122 "Time Limits of PEP Status")
+        -- -- s.121 is explicit that FATF Recommendation 12's own framing is
+        -- open-ended ("once a PEP could always remain a PEP") and that
+        -- handling a client who is no longer entrusted with a prominent
+        -- public function "should be based on an assessment of risk and not
+        -- on prescribed time limits" (s.122 lists the actual risk factors:
+        -- residual informal influence, seniority held, continuity with a
+        -- successor). So this deliberately does NOT auto-clear is_pep --
+        -- it only adds a "the public role has ended, go make that
+        -- risk-based reassessment call" checkpoint, same "manual trigger
+        -- date, separate manual/computed deadline" shape as relationship_
+        -- ended_date/retained_until above: pep_ceased_date is entered by a
+        -- lawyer (the trigger); pep_review_due defaults to pep_ceased_date
+        -- + 12 months (see update_client_compliance()) -- that default
+        -- interval is borrowed from s.78's OWN minimum cadence for a
+        -- firm's general risk-assessment review, not because s.119-122
+        -- itself prescribes a number -- and can be pushed out again by
+        -- hand after an actual review.
+        ALTER TABLE client_compliance ADD COLUMN IF NOT EXISTS pep_ceased_date DATE;
+        ALTER TABLE client_compliance ADD COLUMN IF NOT EXISTS pep_review_due DATE;
+
         -- CDD Review (2026-09-04) -- a loggable EVENT, not a field: each row
         -- is one lawyer actually sitting down and re-checking a client's
         -- file, distinct from client_compliance's own current-state fields
@@ -3632,6 +3655,14 @@ class ClientComplianceUpdate(BaseModel):
     pep_basis: Optional[str] = None
     pep_position: Optional[str] = None
     pep_country: Optional[str] = None
+    # PEP Review Due (FIU guidance s.119-122) -- pep_ceased_date is the
+    # manual trigger ("this client is no longer entrusted with the
+    # prominent public function that flagged them"); pep_review_due
+    # defaults to pep_ceased_date + 12 months when not passed explicitly
+    # (see update_client_compliance()) but can also be set/pushed out
+    # directly, e.g. after an actual risk-based review per s.122.
+    pep_ceased_date: Optional[str] = None
+    pep_review_due: Optional[str] = None
     senior_management_approved_by: Optional[str] = None
     senior_management_approved_date: Optional[str] = None
     source_of_wealth: Optional[str] = None
@@ -4266,7 +4297,8 @@ def _row_to_client_compliance(row) -> dict:
     for k in ("created_at", "updated_at"):
         if d.get(k):
             d[k] = d[k].isoformat()
-    for k in ("senior_management_approved_date", "relationship_ended_date", "retained_until", "conflict_check_reviewed_date"):
+    for k in ("senior_management_approved_date", "relationship_ended_date", "retained_until",
+              "conflict_check_reviewed_date", "pep_ceased_date", "pep_review_due"):
         if d.get(k):
             d[k] = str(d[k])
     return d
@@ -4291,6 +4323,8 @@ _DEFAULT_CLIENT_COMPLIANCE = {
     "conflict_check_reviewed": False,
     "conflict_check_reviewed_by": None,
     "conflict_check_reviewed_date": None,
+    "pep_ceased_date": None,
+    "pep_review_due": None,
 }
 
 def _compute_compliance_status(client: dict, compliance: Optional[dict], beneficial_owners: list) -> dict:
@@ -4574,6 +4608,51 @@ def _cdd_review_outstanding_issue(latest_review) -> Optional[tuple]:
         return ("CDD_REVIEW_OUTSTANDING", label)
     return None
 
+def _add_12_months(d: date) -> date:
+    """Plain calendar +12 months, no new dependency (dateutil isn't used
+    anywhere in this codebase) -- same month/day one year later, with the
+    one real edge case (29 Feb in a leap year landing on a non-leap year)
+    falling back to 28 Feb. Used for PEP Review Due's default interval
+    (FIU guidance s.78's own minimum risk-assessment review cadence --
+    see run_migrations()'s client_compliance comment for the full
+    citation); a plain 365-day timedelta would drift by a day across
+    most leap-year boundaries, which a "due date" shouldn't."""
+    try:
+        return d.replace(year=d.year + 1)
+    except ValueError:
+        return d.replace(year=d.year + 1, day=28)
+
+def _pep_review_due_issue(compliance: dict) -> Optional[tuple]:
+    """Returns (issue_code, label) if this client is still flagged as a
+    PEP (is_pep is True) AND its pep_review_due date has arrived --
+    FIU guidance s.119-122 "Time Limits of PEP Status": PEP status does
+    NOT automatically expire when someone leaves a prominent public
+    function (FATF Recommendation 12's own framing is open-ended --
+    s.121, "once a PEP could always remain a PEP"), so this never clears
+    is_pep itself -- it only flags that the risk-based reassessment
+    s.122 requires (residual informal influence, seniority held,
+    continuity with a successor) is now due. If a lawyer's review
+    concludes the client should no longer be treated as a PEP, that's a
+    real decision made through is_pep itself, not something this
+    function infers on its own. Reused by both
+    _sync_compliance_exceptions_for_client() (creates/reopens the
+    exception) and _is_exception_issue_resolved() (the resolution gate),
+    same convention as _cdd_review_outstanding_issue() above -- the two
+    can never disagree about whether this client's review is due."""
+    if compliance.get("is_pep") is not True:
+        return None
+    review_due = compliance.get("pep_review_due")
+    if not review_due:
+        return None
+    if isinstance(review_due, str):
+        review_due = date.fromisoformat(review_due)
+    if review_due > date.today():
+        return None
+    label = "PEP status review due"
+    if compliance.get("pep_ceased_date"):
+        label += f" — ceased public function {compliance['pep_ceased_date']}"
+    return ("PEP_REVIEW_DUE", label)
+
 def _priority_for_missing_item(item: str) -> str:
     item_lower = item.lower()
     if "pep" in item_lower or "beneficial ownership" in item_lower:
@@ -4602,6 +4681,13 @@ EXCEPTION_ISSUE_CODES = [
     "RISK_RATING_REQUIRED",
     "CONFLICT_CHECK_REQUIRED",
     "CDD_REVIEW_OUTSTANDING",
+    # PEP Review Due (2026-09-10, FIU guidance s.119-122) -- an
+    # independent exception source, same shape as CDD_REVIEW_OUTSTANDING
+    # above: not part of _compute_compliance_status()'s missing[]/Cleared
+    # computation (is_pep itself is untouched), just flagged for a
+    # human's risk-based reassessment once due. See
+    # _pep_review_due_issue()'s own docstring.
+    "PEP_REVIEW_DUE",
 ]
 
 EXCEPTION_STATUSES = ["Open", "InProgress", "AwaitingClient", "Resolved", "ClosedNoFurtherAction"]
@@ -4633,6 +4719,11 @@ _COMPLIANCE_EXCEPTION_REOPEN_REASON = "Underlying compliance condition is no lon
 _HIGH_PRIORITY_ISSUE_CODES = {
     "PEP_SCREENING_INCOMPLETE", "PEP_APPROVAL_REQUIRED", "RISK_RATING_REQUIRED",
     "BENEFICIAL_OWNER_NOT_ASSESSED", "BENEFICIAL_OWNER_NOT_VERIFIED",
+    # PEP_REVIEW_DUE (2026-09-10): same PEP family as the two PEP codes
+    # above -- FIU guidance s.122's own risk factors (residual informal
+    # influence, seniority held, continuity with a successor) are a real
+    # ML/TF/PF risk question, not routine housekeeping.
+    "PEP_REVIEW_DUE",
 }
 
 def _priority_for_issue_code(issue_code: str) -> str:
@@ -4660,6 +4751,13 @@ async def _is_exception_issue_resolved(conn, issue_code: str, cid) -> bool:
     if issue_code == "CDD_REVIEW_OUTSTANDING":
         latest_review = await _fetch_latest_cdd_review_row(conn, cid)
         return _cdd_review_outstanding_issue(latest_review) is None
+
+    if issue_code == "PEP_REVIEW_DUE":
+        compliance_row = await conn.fetchrow(
+            "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+        compliance = _row_to_client_compliance(compliance_row) if compliance_row else dict(_DEFAULT_CLIENT_COMPLIANCE)
+        return _pep_review_due_issue(compliance) is None
 
     if issue_code not in EXCEPTION_ISSUE_CODES:
         raise ValueError(f"Unknown issue_code: {issue_code}")
@@ -4712,7 +4810,7 @@ async def _sync_compliance_exceptions_for_client(conn, cid, actor: dict) -> list
     anything Resolved.
 
     Called at every compliance-mutating endpoint that could plausibly
-    move one of these 9 conditions (so a reopening's audit timestamp
+    move one of these 10 conditions (so a reopening's audit timestamp
     reflects the real moment of change), and defensively at every read
     of a client's exceptions/reports as a catch-all in case a mutation
     path is ever missed.
@@ -4734,6 +4832,10 @@ async def _sync_compliance_exceptions_for_client(conn, cid, actor: dict) -> list
     cdd_issue = _cdd_review_outstanding_issue(latest_review)
     if cdd_issue:
         label_by_code[cdd_issue[0]] = cdd_issue[1]
+
+    pep_issue = _pep_review_due_issue(compliance)
+    if pep_issue:
+        label_by_code[pep_issue[0]] = pep_issue[1]
 
     existing_rows = await conn.fetch(
         "SELECT * FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2", FIRM_ID, cid
@@ -5761,12 +5863,23 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         raise HTTPException(status_code=422, detail=f"identity_verification_status must be one of: {', '.join(VERIFICATION_STATUSES)}")
     if "client_is_beneficial_owner" in fields and fields["client_is_beneficial_owner"] not in CLIENT_IS_BENEFICIAL_OWNER_VALUES:
         raise HTTPException(status_code=422, detail=f"client_is_beneficial_owner must be one of: {', '.join(CLIENT_IS_BENEFICIAL_OWNER_VALUES)}")
-    for k in ("senior_management_approved_date", "retained_until"):
+    for k in ("senior_management_approved_date", "retained_until", "pep_ceased_date", "pep_review_due"):
         if k in fields:
             try:
                 fields[k] = date.fromisoformat(fields[k])
             except ValueError:
                 raise HTTPException(status_code=400, detail=f"{k} must be in YYYY-MM-DD format")
+
+    # PEP Review Due (FIU guidance s.119-122, see run_migrations()'s own
+    # comment for the full citation): pep_review_due defaults to
+    # pep_ceased_date + 12 months whenever a lawyer records/changes the
+    # ceased date and doesn't ALSO explicitly set pep_review_due in the
+    # same request -- that explicit value always wins (e.g. pushing the
+    # deadline out again after an actual s.122 risk-based review, with
+    # no change to when the role actually ended).
+    if "pep_ceased_date" in fields and "pep_review_due" not in fields:
+        fields["pep_review_due"] = _add_12_months(fields["pep_ceased_date"])
+
     if "senior_management_approved_by" in fields:
         try:
             fields["senior_management_approved_by"] = _uuid_mod.UUID(fields["senior_management_approved_by"])

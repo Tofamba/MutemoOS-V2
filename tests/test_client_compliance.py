@@ -336,6 +336,74 @@ def test_setting_is_pep_true_forces_senior_management_approval_required(monkeypa
     assert result["senior_management_approval_required"] is True
 
 
+# ── PEP Review Due (2026-09-10, FIU guidance s.119-122) ───────────────────────
+
+def test_setting_pep_ceased_date_auto_computes_review_due_12_months_later(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(is_pep=True, pep_ceased_date="2025-06-15"), None
+    ))
+    assert result["pep_ceased_date"] == "2025-06-15"
+    assert result["pep_review_due"] == "2026-06-15"
+
+
+def test_explicit_pep_review_due_overrides_the_computed_default(monkeypatch):
+    """A lawyer pushing the review date out again after an actual s.122
+    risk-based review -- setting pep_review_due directly must win over
+    the pep_ceased_date + 12 months default, even in the same request."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(is_pep=True, pep_ceased_date="2025-06-15", pep_review_due="2027-01-01"),
+        None,
+    ))
+    assert result["pep_ceased_date"] == "2025-06-15"
+    assert result["pep_review_due"] == "2027-01-01"
+
+
+def test_pep_review_due_can_be_pushed_out_without_touching_ceased_date(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(is_pep=True, pep_ceased_date="2025-06-15"), None
+    ))
+
+    result = asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(pep_review_due="2099-01-01"), None
+    ))
+    assert result["pep_ceased_date"] == "2025-06-15"  # untouched
+    assert result["pep_review_due"] == "2099-01-01"
+
+
+def test_pep_ceased_date_auto_compute_handles_leap_day():
+    """_add_12_months(29 Feb 2028) -> 2029 isn't a leap year, so this
+    must fall back to 28 Feb rather than raising."""
+    assert m._add_12_months(date(2028, 2, 29)) == date(2029, 2, 28)
+
+
+def test_pep_ceased_date_auto_compute_ordinary_case():
+    assert m._add_12_months(date(2025, 6, 15)) == date(2026, 6, 15)
+
+
+def test_invalid_pep_ceased_date_format_returns_400(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(update_client_compliance(
+            str(client["id"]), ClientComplianceUpdate(pep_ceased_date="15/06/2025"), None
+        ))
+    assert exc_info.value.status_code == 400
+
+
 def test_invalid_senior_management_approver_id_returns_422_not_500(monkeypatch):
     """A nonexistent user id previously surfaced as a raw 500 (asyncpg's
     ForeignKeyViolationError going uncaught) -- update_client_compliance
