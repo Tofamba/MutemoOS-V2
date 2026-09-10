@@ -6899,6 +6899,79 @@ async def client_aml_cdd_report_export_pdf(client_id: str, request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+@app.get("/api/admin/cleanup-pep-review-test-client")
+async def _TEMP_cleanup_pep_review_test_client(request: Request):
+    """
+    TEMP, admin-token-gated -- removes the throwaway "PEP Review
+    Verification Test Client" (MTP-001) created on staging for the
+    2026-09-10 PEP Review Due end-to-end check. There is deliberately no
+    delete-client endpoint in this codebase, so this is the one-off way
+    to clean it up, same TEMP-endpoint pattern as commit 9322d6e's own
+    MLPCA-duplicate cleanup. Hard safety checks: acts ONLY on a client
+    whose full_name is exactly the test name AND which has zero matters
+    -- refuses (reporting why) otherwise, so a wrong id can never touch
+    a real client. client_compliance / beneficial_owners /
+    authorized_representatives / cdd_reviews / compliance_exceptions all
+    ON DELETE CASCADE from clients; audit_logs (target_type='CLIENT',
+    no FK) are deleted explicitly first. Removed once run.
+    """
+    require_admin_token(request)
+    TEST_NAME = "PEP Review Verification Test Client"
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, full_name, client_number FROM clients WHERE firm_id=$1 AND full_name=$2",
+            FIRM_ID, TEST_NAME
+        )
+        if not rows:
+            return {"action": "nothing to do -- no client with that exact name", "name": TEST_NAME}
+        if len(rows) > 1:
+            return {"action": "REFUSED -- more than one client matches that name; not guessing",
+                    "matches": [{"id": str(r["id"]), "client_number": r["client_number"]} for r in rows]}
+        cid = rows[0]["id"]
+        matter_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM matters WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
+        )
+        if matter_count:
+            return {"action": f"REFUSED -- client has {matter_count} matter(s); not a clean throwaway",
+                    "client_id": str(cid)}
+
+        before = {
+            "client_compliance": await conn.fetchval(
+                "SELECT COUNT(*) FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID),
+            "compliance_exceptions": await conn.fetchval(
+                "SELECT COUNT(*) FROM compliance_exceptions WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID),
+            "beneficial_owners": await conn.fetchval(
+                "SELECT COUNT(*) FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID),
+            "authorized_representatives": await conn.fetchval(
+                "SELECT COUNT(*) FROM authorized_representatives WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID),
+            "cdd_reviews": await conn.fetchval(
+                "SELECT COUNT(*) FROM cdd_reviews WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID),
+            "audit_logs": await conn.fetchval(
+                "SELECT COUNT(*) FROM audit_logs WHERE firm_id=$1 AND target_type='CLIENT' AND target_id=$2",
+                FIRM_ID, cid),
+        }
+
+        await conn.execute(
+            "DELETE FROM audit_logs WHERE firm_id=$1 AND target_type='CLIENT' AND target_id=$2", FIRM_ID, cid)
+        del_result = await conn.execute("DELETE FROM clients WHERE id=$1 AND firm_id=$2", cid, FIRM_ID)
+
+        after_client = await conn.fetchval("SELECT COUNT(*) FROM clients WHERE id=$1", cid)
+        after_compliance = await conn.fetchval("SELECT COUNT(*) FROM client_compliance WHERE client_id=$1", cid)
+        after_exceptions = await conn.fetchval("SELECT COUNT(*) FROM compliance_exceptions WHERE client_id=$1", cid)
+
+    return {
+        "action": "deleted",
+        "client_id": str(cid),
+        "deleted_client_rows": del_result,
+        "rows_before": before,
+        "rows_after": {
+            "client": after_client,
+            "client_compliance": after_compliance,
+            "compliance_exceptions": after_exceptions,
+        },
+        "clean": after_client == 0 and after_compliance == 0 and after_exceptions == 0,
+    }
+
 @app.get("/api/matters/template")
 async def download_matter_template():
     tpl = os.path.join(frontend_path, "MutemoDesk_Matter_Import_Template.docx")
