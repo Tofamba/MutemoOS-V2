@@ -1858,6 +1858,7 @@ select{cursor:pointer}
           <div class="form-group"><label>Ownership % <span style="font-weight:400;color:var(--ink3)">(optional)</span></label><input type="number" id="cc-owner-percentage" step="0.01" min="0" max="100"/></div>
         </div>
         <div class="form-group"><label>Ownership / Control Basis</label><input type="text" id="cc-owner-basis" placeholder='e.g. "60% shareholding" or "de facto control via management agreement"'/></div>
+        <div id="cc-owner-add-status" class="status" style="margin-bottom:0.5rem"></div>
         <button class="btn btn-outline btn-sm" onclick="addBeneficialOwner()">+ Add Owner</button>
       </div>
     </div>
@@ -1893,6 +1894,7 @@ select{cursor:pointer}
           </div>
           <div class="form-group"><label>Authority Document <span style="font-weight:400;color:var(--ink3)">(Vault document ID)</span></label><input type="text" id="cc-rep-document"/></div>
         </div>
+        <div id="cc-rep-add-status" class="status" style="margin-bottom:0.5rem"></div>
         <button class="btn btn-outline btn-sm" onclick="addAuthorizedRepresentative()">+ Add Representative</button>
       </div>
     </div>
@@ -3546,6 +3548,10 @@ async function openComplianceModal(clientId) {
 
   document.getElementById('compliance-modal-status').className = 'status';
   document.getElementById('compliance-modal-status').textContent = '';
+  ['cc-owner-add-status', 'cc-rep-add-status'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.className = 'status'; el.textContent = ''; }
+  });
   document.getElementById('cc-conflict-result').style.display = 'none';
   document.getElementById('compliance-modal').style.display = 'flex';
 
@@ -3560,8 +3566,14 @@ async function openComplianceModal(clientId) {
     ]);
     const client = await clientRes.json();
     _complianceData = await complianceRes.json();
-    _complianceOwners = await ownersRes.json();
-    _complianceReps = await repsRes.json();
+    // Guard every list parse: a non-2xx response here would otherwise
+    // leave _complianceOwners/_complianceReps as an error object, and the
+    // later .push() in addBeneficialOwner()/addAuthorizedRepresentative()
+    // would throw silently -- same defensive pattern as exceptions/users.
+    _complianceOwners = ownersRes.ok ? await ownersRes.json() : [];
+    _complianceReps = repsRes.ok ? await repsRes.json() : [];
+    if (!Array.isArray(_complianceOwners)) _complianceOwners = [];
+    if (!Array.isArray(_complianceReps)) _complianceReps = [];
     // Exceptions/users degrade independently -- a failure here shouldn't
     // block the rest of the compliance form from loading and being usable.
     _complianceExceptions = exceptionsRes.ok ? await exceptionsRes.json() : [];
@@ -3787,8 +3799,17 @@ function renderOwnersList() {
 }
 
 async function addBeneficialOwner() {
+  const statusEl = document.getElementById('cc-owner-add-status');
+  const setStatus = (cls, msg) => { statusEl.className = cls; statusEl.textContent = msg || ''; };
+  setStatus('status', '');
   const name = document.getElementById('cc-owner-name').value.trim();
-  if (!name) return;
+  // Was previously a silent `return` -- an empty required field looked
+  // identical to a broken button. Surface it instead.
+  if (!name) {
+    setStatus('status show error', 'Owner Name is required.');
+    document.getElementById('cc-owner-name').focus();
+    return;
+  }
   const payload = {
     owner_name: name,
     id_or_passport_number: document.getElementById('cc-owner-id').value.trim() || null,
@@ -3796,13 +3817,40 @@ async function addBeneficialOwner() {
     ownership_percentage: document.getElementById('cc-owner-percentage').value ? parseFloat(document.getElementById('cc-owner-percentage').value) : null,
     ownership_or_control_basis: document.getElementById('cc-owner-basis').value.trim() || null,
   };
-  const res = await fetch(`${API}/api/clients/${_complianceClientId}/beneficial-owners`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-  });
-  if (!res.ok) return;
+  let res;
+  try {
+    res = await fetch(`${API}/api/clients/${_complianceClientId}/beneficial-owners`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    setStatus('status show error', `Could not reach the server: ${e.message}`);
+    return;
+  }
+  if (!res.ok) {
+    // Was previously a silent `return` -- a rejected request left no trace.
+    setStatus('status show error', `Could not add beneficial owner: ${await _errDetail(res)}`);
+    return;
+  }
+  if (!Array.isArray(_complianceOwners)) _complianceOwners = [];
   _complianceOwners.push(await res.json());
   ['cc-owner-name','cc-owner-id','cc-owner-nationality','cc-owner-percentage','cc-owner-basis'].forEach(id => document.getElementById(id).value = '');
+  setStatus('status', '');
   renderOwnersList();
+}
+
+// Shared: pull a human-readable message out of a failed fetch Response --
+// FastAPI validation errors put a list under `detail`, everything else a
+// string. Falls back to the HTTP status line.
+async function _errDetail(res) {
+  try {
+    const b = await res.json();
+    if (b && b.detail != null) {
+      if (typeof b.detail === 'string') return b.detail;
+      if (Array.isArray(b.detail)) return b.detail.map(d => d.msg || JSON.stringify(d)).join('; ');
+      return JSON.stringify(b.detail);
+    }
+  } catch (_) {}
+  return `${res.status} ${res.statusText}`.trim();
 }
 
 async function verifyBeneficialOwner(ownerId) {
@@ -3834,8 +3882,15 @@ function renderRepsList() {
 }
 
 async function addAuthorizedRepresentative() {
+  const statusEl = document.getElementById('cc-rep-add-status');
+  const setStatus = (cls, msg) => { statusEl.className = cls; statusEl.textContent = msg || ''; };
+  setStatus('status', '');
   const name = document.getElementById('cc-rep-name').value.trim();
-  if (!name) return;
+  if (!name) {
+    setStatus('status show error', 'Full Name is required.');
+    document.getElementById('cc-rep-name').focus();
+    return;
+  }
   const payload = {
     full_name: name,
     position_or_relationship: document.getElementById('cc-rep-position').value.trim() || null,
@@ -3844,13 +3899,24 @@ async function addAuthorizedRepresentative() {
     authority_basis: document.getElementById('cc-rep-authority-basis').value || null,
     authority_document_id: document.getElementById('cc-rep-document').value.trim() || null,
   };
-  const res = await fetch(`${API}/api/clients/${_complianceClientId}/authorized-representatives`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
-  });
-  if (!res.ok) return;
+  let res;
+  try {
+    res = await fetch(`${API}/api/clients/${_complianceClientId}/authorized-representatives`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+  } catch (e) {
+    setStatus('status show error', `Could not reach the server: ${e.message}`);
+    return;
+  }
+  if (!res.ok) {
+    setStatus('status show error', `Could not add representative: ${await _errDetail(res)}`);
+    return;
+  }
+  if (!Array.isArray(_complianceReps)) _complianceReps = [];
   _complianceReps.push(await res.json());
   ['cc-rep-name','cc-rep-position','cc-rep-id','cc-rep-contact','cc-rep-document'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('cc-rep-authority-basis').value = '';
+  setStatus('status', '');
   renderRepsList();
 }
 
