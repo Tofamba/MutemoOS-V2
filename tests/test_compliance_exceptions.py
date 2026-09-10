@@ -274,12 +274,13 @@ def test_fully_cleared_client_has_no_missing_codes():
 
 def test_every_issue_code_constant_is_covered():
     """EXCEPTION_ISSUE_CODES must cover the full real missing[] set plus
-    CDD_REVIEW_OUTSTANDING -- not more, not fewer."""
+    CDD_REVIEW_OUTSTANDING and PEP_REVIEW_DUE (2026-09-10, FIU guidance
+    s.119-122) -- not more, not fewer."""
     assert set(EXCEPTION_ISSUE_CODES) == {
         "CLIENT_TYPE_NOT_RECORDED", "IDENTITY_NOT_VERIFIED",
         "BENEFICIAL_OWNER_NOT_ASSESSED", "BENEFICIAL_OWNER_NOT_VERIFIED",
         "PEP_SCREENING_INCOMPLETE", "PEP_APPROVAL_REQUIRED", "RISK_RATING_REQUIRED",
-        "CONFLICT_CHECK_REQUIRED", "CDD_REVIEW_OUTSTANDING",
+        "CONFLICT_CHECK_REQUIRED", "CDD_REVIEW_OUTSTANDING", "PEP_REVIEW_DUE",
     }
 
 
@@ -650,6 +651,111 @@ def test_cdd_review_outstanding_resolves_and_reopens_correctly(monkeypatch):
     assert reopened_rows[0]["status"] == "Open"
     assert "New PEP link discovered" in reopened_rows[0]["issue_label"]
     assert any(l["action"] == "COMPLIANCE_EXCEPTION_REOPENED" for l in pool.conn.audit_logs)
+
+
+# ── PEP Review Due (2026-09-10, FIU guidance s.119-122) ───────────────────────
+# "Time Limits of PEP Status" -- FATF Recommendation 12's own framing is
+# open-ended ("once a PEP could always remain a PEP", s.121); handling a
+# client no longer entrusted with a prominent public function "should be
+# based on an assessment of risk and not on prescribed time limits" -- so
+# is_pep is NEVER auto-cleared by any of this, only flagged for a human's
+# risk-based reassessment (s.122) once pep_review_due arrives.
+
+def test_pep_review_due_resolves_and_reopens_correctly(monkeypatch):
+    """Same lifecycle shape as CDD_REVIEW_OUTSTANDING above: cannot resolve
+    while genuinely due, resolves once a lawyer pushes the review date
+    forward (the real, current signal), auto-reopens if that date arrives
+    again -- and is_pep itself is never touched by any of it."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _compliance(
+        client_id, is_pep=True, senior_management_approved_by=uuid.uuid4(), risk_rating="High",
+        pep_ceased_date=date(2025, 1, 1), pep_review_due=date(2026, 1, 1),  # already due
+    )
+    pool = FakePool(clients=[client], compliance={client_id: compliance})
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    rows = asyncio.run(list_compliance_exceptions(str(client_id), _fake_request()))
+    assert len(rows) == 1
+    assert rows[0]["issue_code"] == "PEP_REVIEW_DUE"
+    assert "2025-01-01" in rows[0]["issue_label"]
+
+    # Cannot resolve while the review date is still due.
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(update_compliance_exception(
+            str(client_id), rows[0]["id"], ComplianceExceptionUpdate(status="Resolved"), _fake_request()
+        ))
+    assert exc_info.value.status_code == 409
+
+    # A lawyer does the actual s.122 risk-based review and pushes the
+    # date forward (no change to is_pep or pep_ceased_date) -- resolves.
+    pool.conn.compliance[client_id]["pep_review_due"] = date(2099, 1, 1)
+    result = asyncio.run(update_compliance_exception(
+        str(client_id), rows[0]["id"], ComplianceExceptionUpdate(status="Resolved"), _fake_request()
+    ))
+    assert result["status"] == "Resolved"
+    assert pool.conn.compliance[client_id]["is_pep"] is True  # never auto-cleared
+
+    # The pushed-out date arrives again -> auto-reopens.
+    pool.conn.compliance[client_id]["pep_review_due"] = date(2020, 1, 1)
+    reopened_rows = asyncio.run(list_compliance_exceptions(str(client_id), _fake_request()))
+    assert reopened_rows[0]["status"] == "Open"
+    assert any(l["action"] == "COMPLIANCE_EXCEPTION_REOPENED" for l in pool.conn.audit_logs)
+
+
+def test_pep_review_due_does_not_fire_before_the_due_date(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _compliance(
+        client_id, is_pep=True, senior_management_approved_by=uuid.uuid4(), risk_rating="High",
+        pep_ceased_date=date.today(), pep_review_due=date(2099, 1, 1),
+    )
+    pool = FakePool(clients=[client], compliance={client_id: compliance})
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    rows = asyncio.run(list_compliance_exceptions(str(client_id), _fake_request()))
+    assert all(r["issue_code"] != "PEP_REVIEW_DUE" for r in rows)
+
+
+def test_pep_review_due_does_not_fire_when_no_cessation_recorded(monkeypatch):
+    """A currently active PEP with no pep_ceased_date/pep_review_due at
+    all must not trigger this exception -- recording a cessation date is
+    what starts the review clock, not is_pep alone."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _compliance(
+        client_id, is_pep=True, senior_management_approved_by=uuid.uuid4(), risk_rating="High",
+    )
+    pool = FakePool(clients=[client], compliance={client_id: compliance})
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    rows = asyncio.run(list_compliance_exceptions(str(client_id), _fake_request()))
+    assert all(r["issue_code"] != "PEP_REVIEW_DUE" for r in rows)
+
+
+def test_pep_review_due_does_not_fire_once_is_pep_is_unflagged(monkeypatch):
+    """Additive guarantee (requirement #4): is_pep stays exactly as-is --
+    if a lawyer has already decided, through is_pep itself, that this
+    client is no longer a PEP, there's no PEP status left to review,
+    regardless of what a stale pep_review_due still says."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _compliance(
+        client_id, is_pep=False, pep_ceased_date=date(2025, 1, 1), pep_review_due=date(2020, 1, 1),
+    )
+    pool = FakePool(clients=[client], compliance={client_id: compliance})
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    rows = asyncio.run(list_compliance_exceptions(str(client_id), _fake_request()))
+    assert all(r["issue_code"] != "PEP_REVIEW_DUE" for r in rows)
 
 
 # ── Reassignment ─────────────────────────────────────────────────────────────
