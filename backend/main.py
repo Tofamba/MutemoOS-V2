@@ -6923,19 +6923,7 @@ async def _TEMP_cleanup_pep_review_test_client(request: Request):
             FIRM_ID, TEST_NAME
         )
         if not rows:
-            all_rows = await conn.fetch(
-                "SELECT id, full_name, client_number, firm_id FROM clients ORDER BY created_at DESC LIMIT 25"
-            )
-            return {
-                "action": "nothing to do -- no client with that exact name",
-                "name": TEST_NAME,
-                "configured_firm_id": str(FIRM_ID),
-                "clients_seen": [
-                    {"id": str(r["id"]), "full_name": r["full_name"],
-                     "client_number": r["client_number"], "firm_id": str(r["firm_id"])}
-                    for r in all_rows
-                ],
-            }
+            return {"action": "nothing to do -- no client with that exact name", "name": TEST_NAME}
         if len(rows) > 1:
             return {"action": "REFUSED -- more than one client matches that name; not guessing",
                     "matches": [{"id": str(r["id"]), "client_number": r["client_number"]} for r in rows]}
