@@ -6376,9 +6376,18 @@ async def update_compliance_exception(client_id: str, exception_id: str, update:
 
         fields["updated_at"] = datetime.utcnow()
         set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
+        # firm_id restated here even though `eid` was already reached via the
+        # firm_id-scoped SELECT above (WHERE id=$1 AND client_id=$2 AND
+        # firm_id=$3, main.py:6147) -- under Option B (one firm's data per
+        # database) there is no other firm's row `eid` could belong to, so
+        # this is currently redundant, not a fix to a live bug. Added as
+        # cheap defense-in-depth against a future shared-schema/shared-
+        # database migration, matching the pattern every other query in this
+        # function already follows -- flagged as the one exception to that
+        # pattern by docs/MULTI_TENANCY_ARCHITECTURE_AUDIT_2026-09.md.
         updated = await conn.fetchrow(
-            f"UPDATE compliance_exceptions SET {set_clauses} WHERE id=$1 RETURNING *",
-            eid, *fields.values()
+            f"UPDATE compliance_exceptions SET {set_clauses} WHERE id=$1 AND firm_id=${len(fields)+2} RETURNING *",
+            eid, *fields.values(), FIRM_ID
         )
     return _row_to_compliance_exception(dict(updated))
 
