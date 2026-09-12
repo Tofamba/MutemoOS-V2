@@ -48,6 +48,8 @@ class FakeConnection:
         self.users = users or []
         self.compliance_exceptions = compliance_exceptions or []
         self.audit_logs = []
+        self.last_update_exception_query = None
+        self.last_update_exception_args = None
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -83,6 +85,33 @@ class FakeConnection:
             for u in self.users:
                 if u["id"] == uid and u["firm_id"] == firm_id:
                     return {"display_name": u["display_name"]}
+            return None
+
+        if q.startswith("UPDATE compliance_exceptions SET") and "WHERE id=$1 AND firm_id=" in q:
+            # update_compliance_exception()'s final write (main.py) -- firm_id
+            # restated on this UPDATE as defense-in-depth (see the comment at
+            # that call site), redundant under Option B but real enough to
+            # simulate here: a mismatched firm_id must not match the row,
+            # same as a real `WHERE id=$1 AND firm_id=$N` would enforce.
+            # Recorded for test_final_update_restates_firm_id below -- the
+            # initial SELECT (WHERE id=$1 AND client_id=$2 AND firm_id=$3)
+            # already gates on the same FIRM_ID, so there's no way to make
+            # that SELECT pass and this UPDATE's firm_id fail in the same
+            # call; the meaningful thing to test here is that the clause and
+            # argument are actually still present, not a leak this can
+            # construct end-to-end.
+            self.last_update_exception_query = q
+            self.last_update_exception_args = args
+            m_ = re.search(r"SET (.+) WHERE id=\$1 AND firm_id=\$\d+", q)
+            cols = re.findall(r"(\w+)=\$\d+", m_.group(1))
+            eid = args[0]
+            values = args[1:1 + len(cols)]
+            firm_id = args[-1]
+            for e in self.compliance_exceptions:
+                if e["id"] == eid and e["firm_id"] == firm_id:
+                    for col, val in zip(cols, values):
+                        e[col] = val
+                    return dict(e)
             return None
 
         if q.startswith("UPDATE compliance_exceptions SET"):
@@ -384,6 +413,37 @@ def test_can_mark_resolved_once_condition_is_genuinely_satisfied(monkeypatch):
 
     assert result["status"] == "Resolved"
     assert result["resolved_at"] is not None
+
+
+def test_final_update_restates_firm_id(monkeypatch):
+    """Multi-tenancy audit finding (docs/MULTI_TENANCY_ARCHITECTURE_AUDIT_
+    2026-09.md): update_compliance_exception()'s final UPDATE used to be
+    the one write in this function that didn't repeat firm_id, trusting the
+    firm_id-scoped SELECT a few lines above it. Fixed as cheap defense-in-
+    depth against a future shared-schema migration -- inert under today's
+    Option B (one firm's data per database), so there's no way to construct
+    an end-to-end test proving a cross-firm write is blocked (the initial
+    SELECT already gates on the same FIRM_ID, so a mismatched firm_id would
+    404 before ever reaching this UPDATE). What's actually testable, and
+    what regresses silently if someone "simplifies" this line later: the
+    clause and the argument are genuinely still there."""
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    compliance = _compliance(client_id, identity_verification_status="Verified")
+    exception = _exception_row(client_id, "IDENTITY_NOT_VERIFIED", issue_label="Identity not verified")
+    pool = FakePool(clients=[client], compliance={client_id: compliance}, compliance_exceptions=[exception])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    result = asyncio.run(update_compliance_exception(
+        str(client_id), str(exception["id"]), ComplianceExceptionUpdate(notes="Chased client by phone"), _fake_request()
+    ))
+
+    assert result["notes"] == "Chased client by phone"  # the write itself still worked
+    assert pool.conn.last_update_exception_query is not None  # the new branch was actually exercised
+    assert "WHERE id=$1 AND firm_id=$" in pool.conn.last_update_exception_query
+    assert pool.conn.last_update_exception_args[-1] == FIRM_ID
 
 
 def test_resolving_never_writes_back_into_client_compliance(monkeypatch):
