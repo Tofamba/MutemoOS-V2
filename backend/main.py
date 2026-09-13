@@ -6737,6 +6737,46 @@ async def _run_ai_action_queue_scan(today: Optional[date] = None) -> list:
                     recommended_action, draft_text, json.dumps(payload)
                 )
                 created.append(_row_to_ai_action_queue_item(dict(new_row)))
+
+                # Compliance-agent notification trigger. Fires right here,
+                # on this exact escalation-level transition -- the
+                # idempotency check a few lines up is what guarantees this
+                # runs at most once per (exception, action_type, level)
+                # ever -- not on the daily reminder/digest cadence: a
+                # Day-5 partner_escalation shouldn't sit unnoticed until
+                # tomorrow's 5am digest run. 'flag' is deliberately silent
+                # per spec -- only draft/partner_escalation notify.
+                #
+                # Goes through the exact same send_user_notification()
+                # primitive the deadline reminder engine now uses (see
+                # its own extraction comment above _send_via_resend_sync)
+                # -- one shared notification code path, not a second,
+                # independent one for this agent.
+                if action_type != "flag":
+                    level_label = "Draft" if action_type == "draft" else "Partner Escalation"
+                    responsible_user_id = exc.get("responsible_user_id")
+                    if responsible_user_id:
+                        subject = f"⚠ Compliance action required — {client_name} ({level_label})"
+                        body = (
+                            f"{recommended_action}\n\n"
+                            f"Client: {client_name}\n"
+                            f"Compliance issue: {exc['issue_label']}\n"
+                            f"Escalation stage: {level_label} ({days_overdue} days since {payload['anchor_source']})\n\n"
+                            f"Review this in Mutemo Desk's Compliance Actions tab."
+                        )
+                        try:
+                            await send_user_notification(responsible_user_id, subject, body)
+                        except Exception as e:
+                            print(f"[ai_action_queue] notification failed for {new_row['id']}: {e}")
+                    else:
+                        # No invented fallback recipient (e.g. "notify all
+                        # partners") -- responsible_user_id is unset only
+                        # in the rare case a client has no created_by
+                        # (_sync_compliance_exceptions_for_client()'s own
+                        # default), and guessing a recipient here would be
+                        # exactly the kind of unspecified behavior this
+                        # cycle has already had to walk back once.
+                        print(f"[ai_action_queue] no responsible_user_id for exception {exc['id']} -- {level_label} notification skipped")
     return created
 
 
@@ -15316,8 +15356,85 @@ def _send_via_resend_sync(to: str, subject: str, html_body: str, text_body: str,
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text}")
 
-async def send_reminder_email(recipient: str, events: list, test: bool = False, review_matters: Optional[list] = None) -> bool:
-    """Send rich HTML daily calendar reminder via Resend with ICS attachment."""
+# ── Shared notification primitive (2026-09-13) ──────────────────────────────
+# Extracted from the deadline reminder engine's own inline sending logic
+# (send_reminder_email below, previously the only caller of
+# _send_via_resend_sync besides OTP/invite emails) so any agent that needs
+# to tell a specific user something has ONE obvious function to call --
+# not a choice between the reminder engine's send path and a second,
+# independent one. First two callers: send_reminder_email() (refactored,
+# not rewritten -- see its own docstring) and the AI Action Queue's
+# compliance-escalation trigger (_run_ai_action_queue_scan()).
+#
+# Deliberately has no calendar/deadline/compliance concept anywhere in
+# it -- no event_type, no days_until, no escalation_level, no ICS
+# building. It takes a user, a subject, and a body, and knows how to
+# turn a user_id into an actual outbound email the same way every
+# existing per-user email in this app already resolves one (recipient_
+# email override if the user has set one, else their account email --
+# see user_reminder_settings' own migration comment for why this
+# fallback exists and stays per-user, not firm-wide).
+#
+# html_body/ics_content are optional passthroughs, not new generic
+# concepts of their own -- they exist only so send_reminder_email's
+# already-rich HTML body and calendar attachment survive this
+# extraction unchanged (a real behavior-preservation requirement, not
+# scope creep). A caller with a plain text notification -- every
+# caller except send_reminder_email today -- never needs to touch them.
+async def send_user_notification(user_id, subject: str, body: str, link: Optional[str] = None,
+                                  html_body: Optional[str] = None, ics_content: Optional[str] = None) -> bool:
+    """
+    Resolves user_id's own effective email and sends one notification.
+    Returns True if an email genuinely went out, False if there was no
+    email to send to, or the send itself failed -- the caller decides
+    what "sent" should gate (e.g. whether to advance last_run_date),
+    same contract send_reminder_email already had before this
+    extraction.
+    """
+    if not _db_pool or not user_id:
+        return False
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT urs.recipient_email, u.email AS account_email
+            FROM users u
+            LEFT JOIN user_reminder_settings urs ON urs.user_id = u.id
+            WHERE u.id=$1
+        """, user_id)
+    if not row:
+        return False
+    recipient = row["recipient_email"] or row["account_email"]
+    if not recipient:
+        return False
+
+    text_body = body
+    final_html = html_body
+    if final_html is None:
+        final_html = f'<p>{_escape_html(body).replace(chr(10), "<br/>")}</p>'
+    if link:
+        text_body = f"{text_body}\n\nView: {link}"
+        final_html = f'{final_html}<p><a href="{_escape_html(link)}">View in Mutemo Desk</a></p>'
+
+    try:
+        await asyncio.to_thread(_send_via_resend_sync, recipient, subject, final_html, text_body, ics_content)
+        return True
+    except Exception as e:
+        print(f"[notification] send failed for user {user_id}: {e}")
+        return False
+
+async def send_reminder_email(user_id, events: list, test: bool = False, review_matters: Optional[list] = None) -> bool:
+    """
+    Send the rich HTML daily calendar reminder, with an ICS attachment.
+
+    Refactored (2026-09-13), not rewritten: build_reminder_email_body(),
+    the subject logic, and build_ics() below are byte-for-byte what they
+    were before -- the only thing that changed is the actual send step,
+    which now goes through the shared send_user_notification() primitive
+    (resolving user_id's own email the same way this function's callers
+    used to resolve it themselves, one level up) instead of calling
+    _send_via_resend_sync directly. Same emails, same content, same
+    recipients -- verified in tests/test_notification_refactor.py and
+    against a real staging send.
+    """
     review_matters = review_matters or []
     text_body, html_body = build_reminder_email_body(events, review_matters)
     if test:
@@ -15335,12 +15452,7 @@ async def send_reminder_email(recipient: str, events: list, test: bool = False, 
     else:
         subject = f"{subject_prefix}\u2696 Mutemo Desk \u2014 Daily reminder (nothing upcoming)"
     ics_content = build_ics(events) if events else None
-    try:
-        await asyncio.to_thread(_send_via_resend_sync, recipient, subject, html_body, text_body, ics_content)
-        return True
-    except Exception as e:
-        print(f"[email] send failed: {e}")
-        return False
+    return await send_user_notification(user_id, subject, text_body, html_body=html_body, ics_content=ics_content)
 
 def _own_email_or_none(user: dict) -> Optional[str]:
     email = (user.get("email") or "").strip()
@@ -15517,7 +15629,7 @@ async def test_reminder(request: Request):
     # renders correctly for whatever real data exists right now, rather
     # than a synthetic stand-in.
     review_matters = await _get_review_matters_for_digest(today)
-    sent = await send_reminder_email(recipient, test_events, test=True, review_matters=review_matters)
+    sent = await send_reminder_email(user_id, test_events, test=True, review_matters=review_matters)
     if not sent:
         raise HTTPException(status_code=500, detail="Failed to send test email.")
     return {
@@ -15817,8 +15929,12 @@ async def _maybe_send_reminder():
             e["days_until"] = 0  # treat as today if date parse fails
 
     for row in due:
+        # recipient is only computed for the log line below now --
+        # send_reminder_email()/send_user_notification() re-resolve it
+        # themselves from row["user_id"], same fallback rule, so this
+        # isn't the value actually used to send.
         recipient = row["recipient_email"] or row["account_email"]
-        sent = await send_reminder_email(recipient, events, review_matters=review_matters)
+        sent = await send_reminder_email(row["user_id"], events, review_matters=review_matters)
         if sent:
             async with _db_pool.acquire() as conn:
                 await conn.execute(
@@ -15868,8 +15984,19 @@ async def inactivity_check(request: Request):
         last = m.get("last_activity", "Never")[:10] if m.get("last_activity") else "Never"
         lines.append(f"  • [{ref}] {m['name']} — last activity: {last}")
     body = "\n".join(lines)
+    # PRE-EXISTING BUG, not introduced or fixed by this refactor: this call
+    # passes a subject string where send_reminder_email() expects `events`
+    # (a list) and `body` where it expects `test` (a bool) -- positionally
+    # wrong since before this change, would raise inside build_reminder_
+    # email_body() the moment it tries to iterate a string as if it were a
+    # list of event dicts. Left exactly as broken as it already was (only
+    # the first argument is touched here, to match send_reminder_email()'s
+    # new user_id-based signature) -- this endpoint has no frontend button
+    # calling it, so it's never actually been exercised in practice.
+    # Flagged, not fixed: out of scope for this notification-primitive
+    # extraction.
     sent = await send_reminder_email(
-        recipient,
+        user["id"],
         f"Mutemo Desk — {len(inactive)} inactive matter(s)",
         body
     )
