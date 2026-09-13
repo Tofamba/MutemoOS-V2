@@ -6651,6 +6651,47 @@ async def list_ai_action_queue_for_client(client_id: str, request: Request):
     return [_row_to_ai_action_queue_item(dict(r)) for r in rows]
 
 
+@app.get("/api/ai-action-queue")
+async def list_ai_action_queue_firm_wide(request: Request):
+    """
+    Firm-wide Compliance Actions queue -- the primary discovery surface
+    (Phase 2): "what pending recommendations do I need to deal with?",
+    same shape of question the AML Exceptions report answers for
+    compliance_exceptions itself, so it's gated by the same permission
+    tier (reports:client_compliance_status -- admin/partner only, not
+    every role that can read a single client's own record).
+
+    Only 'pending_review' items -- an approved/edited/dismissed item has
+    already been dealt with, same "actionable items only" convention the
+    AML Exceptions report uses for compliance_exceptions (Resolved/
+    ClosedNoFurtherAction excluded there for the identical reason).
+    Joined with clients/compliance_exceptions so the queue view doesn't
+    need N+1 lookups per row.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "reports:client_compliance_status")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT aq.*, c.full_name AS client_name, c.client_number,
+                   ce.issue_code, ce.issue_label, ce.status AS exception_status
+            FROM ai_action_queue aq
+            JOIN clients c ON c.id = aq.client_id
+            JOIN compliance_exceptions ce ON ce.id = aq.compliance_exception_id
+            WHERE aq.firm_id=$1 AND aq.status='pending_review'
+            ORDER BY aq.escalation_level DESC, aq.created_at ASC
+        """, FIRM_ID)
+    items = []
+    for r in rows:
+        d = _row_to_ai_action_queue_item(dict(r))
+        d["client_name"] = r["client_name"]
+        d["client_number"] = r["client_number"]
+        d["issue_code"] = r["issue_code"]
+        d["issue_label"] = r["issue_label"]
+        d["exception_status"] = r["exception_status"]
+        items.append(d)
+    return items
+
+
 @app.patch("/api/ai-action-queue/{item_id}")
 async def review_ai_action_queue_item(item_id: str, update: AiActionQueueReview, request: Request):
     """
