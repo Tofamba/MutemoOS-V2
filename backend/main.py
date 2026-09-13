@@ -1186,6 +1186,90 @@ async def run_migrations():
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_sms_usage_log_firm ON sms_usage_log(firm_id, created_at DESC);
+
+        -- AI Action Queue, Phase 1 (2026-09-13): a derived, advisory record
+        -- of AI-recommended compliance-escalation actions for an open
+        -- compliance_exceptions row -- see AI_ACTION_QUEUE_LADDERS and
+        -- _run_ai_action_queue_scan() below for the actual escalation logic.
+        --
+        -- DESIGN PRINCIPLE: compliance_exceptions is the sole authoritative
+        -- record of whether a client/matter is compliant. ai_action_queue
+        -- may reference, explain, and draft a recommended response to an
+        -- exception, and record human review of that draft -- it must
+        -- NEVER independently determine or alter compliance status, and no
+        -- compliance state may be duplicated into this table.
+        CREATE TABLE IF NOT EXISTS ai_action_queue (
+            id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id                     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            compliance_exception_id     UUID NOT NULL REFERENCES compliance_exceptions(id) ON DELETE CASCADE,
+            client_id                   UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+            action_type                 TEXT NOT NULL
+                CHECK (action_type IN ('flag', 'draft', 'partner_escalation')),
+            -- The numbered ladder stage this action represents (1/2/3).
+            -- Kept as its own column alongside action_type (rather than
+            -- inferring level from action_type) so the idempotency
+            -- constraint below is robust on its own terms -- see
+            -- AI_ACTION_QUEUE_STAGES for the single source of truth
+            -- mapping level -> action_type (1=flag, 2=draft,
+            -- 3=partner_escalation for Phase 1).
+            escalation_level            INT NOT NULL CHECK (escalation_level IN (1, 2, 3)),
+            recommended_action          TEXT NOT NULL,
+            draft_text                  TEXT,  -- NULL for 'flag' -- nothing is drafted at that stage, only recommended_action
+            -- Point-in-time snapshot of the facts used to generate this
+            -- action -- NOT a live reference. See _build_ai_action_
+            -- grounding_payload() below: issue_code/issue_label/due_date/
+            -- anchor_date/days_overdue/day_basis/client_name/
+            -- requested_items etc, exactly as they were at creation time,
+            -- so "why did the system draft this" is reconstructable later
+            -- even if the underlying compliance_exceptions/client_compliance
+            -- rows have since changed.
+            draft_grounding_payload     JSONB NOT NULL,
+            status                      TEXT NOT NULL DEFAULT 'pending_review'
+                CHECK (status IN ('pending_review', 'approved', 'edited', 'dismissed')),
+            -- Supersession, not deletion: lets a legitimate re-draft happen
+            -- after a dismissal without violating the idempotency index
+            -- below (a superseded row no longer counts as "the live row"
+            -- for that exception/action_type/level). NULL = this is the
+            -- live row (if any) for its (compliance_exception_id,
+            -- action_type, escalation_level) combination.
+            superseded_by               UUID REFERENCES ai_action_queue(id),
+            created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            reviewed_at                 TIMESTAMPTZ,
+            reviewed_by                 UUID REFERENCES users(id)
+        );
+        -- IDEMPOTENCY, enforced as a real DB constraint, not just
+        -- application logic: the daily scheduler must not create a second
+        -- row for the same exception at the same ladder stage. A PARTIAL
+        -- unique index rather than a plain UNIQUE constraint, specifically
+        -- so a legitimate re-draft after dismissal is still possible --
+        -- superseding the old row (setting its superseded_by) removes it
+        -- from this index, clearing the way for exactly one live row
+        -- again. The default path (no supersession) still hard-rejects a
+        -- duplicate insert at the database level.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_action_queue_idempotency
+            ON ai_action_queue(compliance_exception_id, action_type, escalation_level)
+            WHERE superseded_by IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_ai_action_queue_firm_status ON ai_action_queue(firm_id, status);
+        CREATE INDEX IF NOT EXISTS idx_ai_action_queue_client ON ai_action_queue(client_id);
+
+        -- Firm-level escalation-ladder configuration: extends the existing
+        -- firms/`/api/settings` config mechanism (see firms.features above)
+        -- rather than a new table -- inspected first per instruction; a
+        -- new JSONB column is enough to let a firm override the hardcoded
+        -- AI_ACTION_QUEUE_LADDERS/AI_ACTION_QUEUE_GENERAL_LADDER defaults
+        -- per issue_code (and a "_default" key to override the general
+        -- ladder itself) without a schema change per firm. NULL/missing
+        -- keys fall back to the hardcoded defaults -- see
+        -- _escalation_ladder_for(). Shape:
+        --   {"<ISSUE_CODE>": {"flag": N, "draft": N, "partner_escalation": N}, "_default": {...}}
+        ALTER TABLE firms ADD COLUMN IF NOT EXISTS escalation_config JSONB;
+        -- Once-per-day gate for _run_ai_action_queue_scan(), same pattern
+        -- as user_reminder_settings.digest_last_run_date above but at
+        -- firm level (this is a firm-wide scan, not a per-user one). The
+        -- scan is also idempotent on its own merits (the unique index
+        -- above), so this column only controls *how often it bothers to
+        -- run*, not correctness.
+        ALTER TABLE firms ADD COLUMN IF NOT EXISTS ai_action_queue_last_run_date DATE;
         """)
 
         # Seed this deployment's firm row from its own env vars -- NOT
@@ -6251,6 +6335,374 @@ async def update_compliance_exception(client_id: str, exception_id: str, update:
             eid, *fields.values(), FIRM_ID
         )
     return _row_to_compliance_exception(dict(updated))
+
+# ── AI Action Queue, Phase 1 (2026-09-13) ───────────────────────────────────
+#
+# DESIGN PRINCIPLE (also stated as a literal comment above the table's own
+# CREATE TABLE in run_migrations()): compliance_exceptions is the sole
+# authoritative record of whether a client/matter is compliant.
+# ai_action_queue may reference, explain, and draft a recommended response
+# to an exception, and record human review of that draft -- it must NEVER
+# independently determine or alter compliance status, and no compliance
+# state may be duplicated into this table. Every function below only ever
+# READS compliance_exceptions/client_compliance -- see
+# tests/test_ai_action_queue.py::test_scheduler_never_mutates_compliance_
+# exceptions, which asserts this by running the scanner across multiple
+# escalation crossings for the same exception and diffing the row
+# byte-for-byte throughout.
+#
+# CALENDAR DAYS, NOT BUSINESS DAYS -- a deliberate Phase 1 simplification,
+# not an oversight: no business-day/Zimbabwe-public-holiday calculator
+# exists anywhere in this codebase (checked directly -- deadline_engine.py
+# is the only date/deadline module, and it does plain calendar-day
+# arithmetic only; there is no "Rules of Court deadline calculator" to
+# reuse). Building one is separate, later scope. KNOWN RISK: a threshold
+# can be crossed purely by a weekend/public holiday passing (e.g. a
+# Friday-created PEP_APPROVAL_REQUIRED exception reaches "Day 1" on
+# Saturday, a full business day earlier than intended). Accepted for
+# Phase 1.
+AI_ACTION_QUEUE_LADDERS = {
+    "PEP_APPROVAL_REQUIRED": {"flag": 1, "draft": 3, "partner_escalation": 5},
+    "CDD_REVIEW_OUTSTANDING": {"flag": 3, "draft": 7, "partner_escalation": 14},
+}
+# Every issue_code NOT in AI_ACTION_QUEUE_LADDERS above (currently:
+# CLIENT_TYPE_NOT_RECORDED, IDENTITY_NOT_VERIFIED,
+# BENEFICIAL_OWNER_NOT_ASSESSED, BENEFICIAL_OWNER_NOT_VERIFIED,
+# PEP_SCREENING_INCOMPLETE, RISK_RATING_REQUIRED, CONFLICT_CHECK_REQUIRED,
+# and PEP_REVIEW_DUE -- confirmed by deliberate choice, not oversight:
+# PEP_REVIEW_DUE is a distinct trigger from PEP_APPROVAL_REQUIRED, periodic
+# reassessment vs. senior-management sign-off, and wasn't given its own
+# ladder) falls back to this general ladder. Never give an issue_code
+# special treatment here without it being explicitly approved first --
+# an unmapped code falling back to the general ladder is the correct,
+# safe default, not a gap to silently "fix" by inventing a bespoke one.
+AI_ACTION_QUEUE_GENERAL_LADDER = {"flag": 3, "draft": 7, "partner_escalation": 14}
+# Single source of truth for the level<->action_type correspondence --
+# every place that needs one direction or the other reads this rather than
+# hardcoding the mapping twice. Order matters: iterated in ladder order so
+# an exception that's old enough to skip straight to partner_escalation
+# still gets its flag/draft rows created too (each stage's own row is
+# independent evidence, not just the highest one reached).
+AI_ACTION_QUEUE_STAGES = [(1, "flag"), (2, "draft"), (3, "partner_escalation")]
+AI_ACTION_QUEUE_STATUSES = ["pending_review", "approved", "edited", "dismissed"]
+
+
+def _escalation_ladder_for(issue_code: str, firm_escalation_config: Optional[dict]) -> dict:
+    """
+    Resolves the {action_type: threshold_days} ladder for one issue_code,
+    firm override first: firms.escalation_config (JSONB, extends the
+    existing firm-settings mechanism -- see run_migrations()'s comment
+    above that column, and /api/settings) can override any specific
+    issue_code's ladder, or the general fallback itself via a "_default"
+    key. Falls back to the hardcoded AI_ACTION_QUEUE_LADDERS /
+    AI_ACTION_QUEUE_GENERAL_LADDER when a firm hasn't configured
+    (or only partially configured) its own -- a firm override must supply
+    all three stages for a code it overrides at all, partial overrides
+    aren't merged field-by-field, to avoid a firm's config silently
+    reverting one stage to the hardcoded default without them noticing.
+    """
+    cfg = firm_escalation_config or {}
+    if issue_code in cfg and isinstance(cfg[issue_code], dict) and all(
+        k in cfg[issue_code] for k in ("flag", "draft", "partner_escalation")
+    ):
+        return cfg[issue_code]
+    if "_default" in cfg and isinstance(cfg["_default"], dict) and all(
+        k in cfg["_default"] for k in ("flag", "draft", "partner_escalation")
+    ):
+        default = cfg["_default"]
+    else:
+        default = AI_ACTION_QUEUE_GENERAL_LADDER
+    return AI_ACTION_QUEUE_LADDERS.get(issue_code, default)
+
+
+def _ai_action_anchor_date(exception_row: dict) -> date:
+    """
+    The date the escalation ladder counts FROM -- "the relevant compliance
+    due date" per spec. Prefers the exception's own due_date when a human
+    has actually set one (rare in practice: _sync_compliance_exceptions_
+    for_client(), the sole auto-create/reopen path, never sets due_date --
+    only a human via update_compliance_exception() does). Falls back to
+    created_at otherwise, which is stable across the row's whole lifecycle
+    including reopens (see _sync_compliance_exceptions_for_client()'s own
+    docstring -- reopening resets status/resolved_at, never created_at),
+    so "how long has this deficiency been open" is a real, non-resettable
+    clock. Both the due_date actually used (if any) and this resolved
+    anchor are preserved in the grounding snapshot -- see
+    _build_ai_action_grounding_payload() below -- so which source applied
+    is always reconstructable later, not just the final day count.
+    """
+    due = exception_row.get("due_date")
+    if due:
+        return due if not isinstance(due, str) else date.fromisoformat(due)
+    created = exception_row["created_at"]
+    return created.date() if hasattr(created, "date") else date.fromisoformat(created)
+
+
+def _recommended_action_and_draft_text(issue_code: str, issue_label: str, action_type: str, client_name: str):
+    """
+    Phase 1 content generation: plain, deterministic template text, NOT an
+    LLM call -- the spec for this pass covers the schema/idempotency/
+    evidence-snapshot/non-mutation architecture, not a drafting prompt, so
+    building an LLM-drafting pipeline here would be inventing unspecified
+    scope the same way the ai_action_queue schema itself would have been
+    had it been guessed rather than asked for. Structurally ready to swap
+    in a real generated draft later (draft_text is already free-form TEXT,
+    and draft_grounding_payload already carries everything a prompt would
+    need) without a schema change.
+
+    Returns (recommended_action, draft_text) -- draft_text is None for
+    'flag' (nothing is drafted at that stage, only a recommendation).
+    """
+    if action_type == "flag":
+        return (
+            f"Flag for review: {issue_label}",
+            None,
+        )
+    if action_type == "draft":
+        return (
+            f"Draft a follow-up to progress: {issue_label}",
+            f"[Placeholder draft -- Phase 1 template, not AI-generated]\n\n"
+            f"Re: {client_name} -- {issue_label}\n\n"
+            f"This compliance item remains outstanding and needs action to "
+            f"progress it towards resolution.",
+        )
+    return (
+        f"Escalate to partner: {issue_label}",
+        f"[Placeholder draft -- Phase 1 template, not AI-generated]\n\n"
+        f"Partner escalation -- {client_name}\n\n"
+        f"The following compliance item has been outstanding long enough to "
+        f"require partner attention: {issue_label}",
+    )
+
+
+def _build_ai_action_grounding_payload(exception_row: dict, client_name: str, anchor_date: date,
+                                        days_overdue: int, action_type: str, escalation_level: int,
+                                        threshold_days: int) -> dict:
+    """
+    Point-in-time snapshot of the exact structured facts used to produce
+    one ai_action_queue row -- NOT a live reference to compliance_
+    exceptions/clients. Written once at row-creation time and never
+    updated afterward, so "why did the system draft this" stays
+    reconstructable even if the underlying records later change (the
+    client's name changes, the exception's issue_label is refreshed,
+    the exception is eventually resolved, etc.) -- this snapshot is
+    frozen at the moment shown in created_at.
+    """
+    due = exception_row.get("due_date")
+    return {
+        "issue_code": exception_row["issue_code"],
+        "issue_label": exception_row["issue_label"],
+        "due_date": (due.isoformat() if hasattr(due, "isoformat") else due) if due else None,
+        "anchor_date": anchor_date.isoformat(),
+        "anchor_source": "due_date" if due else "created_at",
+        "days_overdue": days_overdue,
+        "day_basis": "calendar",  # not business days -- see the module comment above AI_ACTION_QUEUE_LADDERS
+        "action_type": action_type,
+        "escalation_level": escalation_level,
+        "threshold_days": threshold_days,
+        "client_id": str(exception_row["client_id"]),
+        "client_name": client_name,
+        # Best available source for "what's being asked for" -- there is
+        # no separate structured checklist/requested-items table anywhere
+        # in this schema, so this wraps the same human-readable
+        # issue_label already shown everywhere else this exception appears.
+        "requested_items": [exception_row["issue_label"]],
+        "snapshot_taken_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _row_to_ai_action_queue_item(row: dict) -> dict:
+    d = dict(row)
+    for k in ("id", "firm_id", "compliance_exception_id", "client_id", "superseded_by", "reviewed_by"):
+        if d.get(k):
+            d[k] = str(d[k])
+    for k in ("created_at", "reviewed_at"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    if isinstance(d.get("draft_grounding_payload"), str):
+        d["draft_grounding_payload"] = json.loads(d["draft_grounding_payload"])
+    return d
+
+
+async def _run_ai_action_queue_scan(today: Optional[date] = None) -> list:
+    """
+    The core scan, deliberately pure enough to unit-test directly (see
+    tests/test_ai_action_queue.py): for every compliance_exceptions row
+    still actively tracked (status in Open/InProgress/AwaitingClient --
+    Resolved/ClosedNoFurtherAction are terminal, no further escalation),
+    work out which ladder stages its calendar-day age has now reached, and
+    INSERT one ai_action_queue row per newly-crossed stage that doesn't
+    already have a live (superseded_by IS NULL) row for that exact
+    (compliance_exception_id, action_type, escalation_level) combination
+    -- the real DB partial-unique-index is the actual backstop; this
+    check is what avoids relying on that index alone to fail loudly.
+
+    Read-only against compliance_exceptions/clients/client_compliance --
+    see the DESIGN PRINCIPLE comment at the top of this section. Returns
+    the list of newly created rows (each already through
+    _row_to_ai_action_queue_item()).
+    """
+    if not _db_pool:
+        return []
+    today = today or datetime.utcnow().date()
+    created = []
+    async with _db_pool.acquire() as conn:
+        firm_row = await conn.fetchrow("SELECT escalation_config FROM firms WHERE id=$1", FIRM_ID)
+        firm_escalation_config = None
+        if firm_row and firm_row["escalation_config"]:
+            raw = firm_row["escalation_config"]
+            firm_escalation_config = json.loads(raw) if isinstance(raw, str) else raw
+
+        exceptions = await conn.fetch(
+            "SELECT * FROM compliance_exceptions WHERE firm_id=$1 "
+            "AND status IN ('Open', 'InProgress', 'AwaitingClient')",
+            FIRM_ID
+        )
+        for exc in exceptions:
+            exc = dict(exc)
+            ladder = _escalation_ladder_for(exc["issue_code"], firm_escalation_config)
+            anchor = _ai_action_anchor_date(exc)
+            days_overdue = (today - anchor).days
+            if days_overdue < 0:
+                continue  # due_date is in the future -- nothing to escalate yet
+
+            client_row = await conn.fetchrow(
+                "SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2", exc["client_id"], FIRM_ID
+            )
+            client_name = client_row["full_name"] if client_row else "Unknown client"
+
+            for level, action_type in AI_ACTION_QUEUE_STAGES:
+                threshold = ladder.get(action_type)
+                if threshold is None or days_overdue < threshold:
+                    continue
+                existing = await conn.fetchrow(
+                    "SELECT id FROM ai_action_queue WHERE compliance_exception_id=$1 "
+                    "AND action_type=$2 AND escalation_level=$3 AND superseded_by IS NULL",
+                    exc["id"], action_type, level
+                )
+                if existing:
+                    continue  # already have a live row for this exact stage
+
+                recommended_action, draft_text = _recommended_action_and_draft_text(
+                    exc["issue_code"], exc["issue_label"], action_type, client_name
+                )
+                payload = _build_ai_action_grounding_payload(
+                    exc, client_name, anchor, days_overdue, action_type, level, threshold
+                )
+                new_row = await conn.fetchrow(
+                    """INSERT INTO ai_action_queue
+                           (firm_id, compliance_exception_id, client_id, action_type, escalation_level,
+                            recommended_action, draft_text, draft_grounding_payload, status)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending_review') RETURNING *""",
+                    FIRM_ID, exc["id"], exc["client_id"], action_type, level,
+                    recommended_action, draft_text, json.dumps(payload)
+                )
+                created.append(_row_to_ai_action_queue_item(dict(new_row)))
+    return created
+
+
+async def _maybe_run_ai_action_queue_scheduler():
+    """
+    Once-per-day gate around _run_ai_action_queue_scan(), same shape as
+    _maybe_send_digest() above but firm-level (firms.
+    ai_action_queue_last_run_date) rather than per-user -- this is one
+    firm-wide scan, not something each user has their own schedule for.
+    Wired into reminder_scheduler_loop() below, same hourly tick as the
+    reminder/digest checks; the date guard is what keeps it to once a day
+    despite the hourly tick (the scan is also self-idempotent regardless --
+    see _run_ai_action_queue_scan()'s own docstring -- so running it more
+    than once on the same day would be harmless, just wasted work).
+    """
+    if not _db_pool:
+        return
+    today = datetime.utcnow().date()
+    async with _db_pool.acquire() as conn:
+        firm_row = await conn.fetchrow(
+            "SELECT ai_action_queue_last_run_date FROM firms WHERE id=$1", FIRM_ID
+        )
+        if firm_row and firm_row["ai_action_queue_last_run_date"] == today:
+            return
+    created = await _run_ai_action_queue_scan(today)
+    async with _db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE firms SET ai_action_queue_last_run_date=$1 WHERE id=$2", today, FIRM_ID
+        )
+    if created:
+        print(f"[ai_action_queue] created {len(created)} new action(s)")
+
+
+class AiActionQueueReview(BaseModel):
+    status: str
+    draft_text: Optional[str] = None  # only meaningful alongside status="edited"
+
+
+@app.get("/api/clients/{client_id}/ai-action-queue")
+async def list_ai_action_queue_for_client(client_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        rows = await conn.fetch(
+            "SELECT * FROM ai_action_queue WHERE client_id=$1 AND firm_id=$2 "
+            "ORDER BY created_at DESC",
+            cid, FIRM_ID
+        )
+    return [_row_to_ai_action_queue_item(dict(r)) for r in rows]
+
+
+@app.patch("/api/ai-action-queue/{item_id}")
+async def review_ai_action_queue_item(item_id: str, update: AiActionQueueReview, request: Request):
+    """
+    The ONLY place a human reviews an ai_action_queue item -- approve it
+    as-is, edit its draft_text, or dismiss it. This never touches
+    compliance_exceptions in any way (see the DESIGN PRINCIPLE comment at
+    the top of this section) -- it only records what a human decided about
+    the recommendation/draft itself.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:edit")
+    try:
+        iid = _uuid_mod.UUID(item_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="item_id must be a valid UUID")
+    if update.status not in AI_ACTION_QUEUE_STATUSES:
+        raise HTTPException(status_code=422, detail=f"status must be one of: {', '.join(AI_ACTION_QUEUE_STATUSES)}")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM ai_action_queue WHERE id=$1 AND firm_id=$2", iid, FIRM_ID
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Action queue item not found")
+
+        reviewer_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+        fields = {"status": update.status, "reviewed_at": datetime.utcnow(), "reviewed_by": reviewer_id}
+        if update.status == "edited" and update.draft_text is not None:
+            fields["draft_text"] = update.draft_text
+
+        set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
+        updated = await conn.fetchrow(
+            f"UPDATE ai_action_queue SET {set_clauses} WHERE id=$1 AND firm_id=${len(fields)+2} RETURNING *",
+            iid, *fields.values(), FIRM_ID
+        )
+    return _row_to_ai_action_queue_item(dict(updated))
+
+
+@app.post("/api/admin/ai-action-queue/run")
+async def admin_run_ai_action_queue_scan(request: Request):
+    """
+    TEMP-pattern manual trigger, admin-token gated, same convention as
+    /api/reminders/test -- lets a real end-to-end check on staging run the
+    scan immediately rather than waiting for the daily scheduler tick.
+    Bypasses the once-per-day gate deliberately (calls
+    _run_ai_action_queue_scan() directly, not _maybe_run_ai_action_queue_
+    scheduler()) -- that's the point of a manual test trigger.
+    """
+    require_admin_token(request)
+    created = await _run_ai_action_queue_scan()
+    return {"created_count": len(created), "created": created}
+
 
 def _compute_person_acting_status(reps: list) -> str:
     """
@@ -15003,7 +15455,9 @@ async def _maybe_send_digest():
 
 
 async def reminder_scheduler_loop():
-    """Runs every hour. Sends daily digest of upcoming deadlines if enabled."""
+    """Runs every hour. Sends daily digest of upcoming deadlines if enabled,
+    and runs the AI Action Queue escalation scan (once per day -- see
+    _maybe_run_ai_action_queue_scheduler()'s own docstring)."""
     await asyncio.sleep(30)  # brief startup delay
     while True:
         try:
@@ -15014,6 +15468,10 @@ async def reminder_scheduler_loop():
             await _maybe_send_digest()
         except Exception as e:
             print(f"[digest] scheduler error: {e}")
+        try:
+            await _maybe_run_ai_action_queue_scheduler()
+        except Exception as e:
+            print(f"[ai_action_queue] scheduler error: {e}")
         await asyncio.sleep(3600)
 
 async def _get_review_matters_for_digest(today: date) -> list:
