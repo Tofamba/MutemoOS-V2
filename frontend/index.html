@@ -208,8 +208,27 @@ a{color:var(--green);text-decoration:none}
 .header-firm{font-size:0.75rem;color:var(--gold3);font-style:italic}
 
 /* ── Nav ── */
-.nav{background:var(--green2);display:flex;gap:0;border-bottom:2px solid var(--gold)}
-.nav-btn{background:none;border:none;color:rgba(255,255,255,0.7);padding:0.7rem 1.2rem;cursor:pointer;font-size:0.82rem;font-family:var(--font-sans);letter-spacing:0.3px;transition:all 0.15s;display:flex;align-items:center;gap:6px;position:relative}
+/* 2026-09-13: flex-wrap + white-space:nowrap, added once "Compliance
+   Actions" became the 16th nav button and pushed the row's natural
+   (unwrapped) width to ~2000px -- past 1440px (the Tauri desktop app's
+   own default window width, not just a narrow-browser edge case; see
+   mutemo-desktop/src-tauri/tauri.conf.json) with real margin to spare.
+   Without white-space:nowrap, a button that doesn't fit wraps its OWN
+   text mid-label ("Compliance Actions" -> "Compliance" / "Actions",
+   "Case Law Index" -> "Case" / "Law Index", etc.) -- confirmed this
+   already happened to SEVEN of the sixteen buttons at 1440px before
+   this fix, not just the one at the end; the last one only looked worse
+   because it sits flush against the window's edge. flex-wrap lets a
+   button that doesn't fit move to a full second row *as a whole unit*
+   instead -- every button stays single-line and equally legible,
+   Compliance Actions included, matching the instruction not to shrink
+   or de-emphasize it relative to the others. The padding/font-size trim
+   below is a real but modest saving (this is a ~560px overflow at
+   1440px -- no amount of shrinking closes that while keeping text
+   legible, so wrapping is the actual fix; the trim just reduces how
+   much needs to wrap in the common case). */
+.nav{background:var(--green2);display:flex;flex-wrap:wrap;gap:2px 0;border-bottom:2px solid var(--gold)}
+.nav-btn{background:none;border:none;color:rgba(255,255,255,0.7);padding:0.6rem 0.9rem;cursor:pointer;font-size:0.79rem;font-family:var(--font-sans);letter-spacing:0.3px;transition:all 0.15s;display:flex;align-items:center;gap:6px;position:relative;white-space:nowrap}
 .nav-btn:hover{color:white;background:rgba(255,255,255,0.07)}
 .nav-btn.active{color:white;background:rgba(255,255,255,0.12)}
 .nav-btn.active::after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;background:var(--gold3)}
