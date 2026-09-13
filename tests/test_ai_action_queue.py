@@ -5,6 +5,7 @@ Unit tests for the AI Action Queue, Phase 1 (backend/main.py, 2026-09-13):
   _ai_action_anchor_date() -- due_date-then-created_at fallback
   _run_ai_action_queue_scan() -- the core, directly-testable scheduler logic
   GET   /api/clients/{client_id}/ai-action-queue
+  GET   /api/ai-action-queue                        (Phase 2, firm-wide)
   PATCH /api/ai-action-queue/{item_id}
 
 THE guarantee this whole feature exists to enforce, called out explicitly
@@ -40,6 +41,7 @@ from backend.main import (
     _ai_action_anchor_date,
     _run_ai_action_queue_scan,
     list_ai_action_queue_for_client,
+    list_ai_action_queue_firm_wide,
     review_ai_action_queue_item,
 )
 
@@ -133,6 +135,29 @@ class FakeConnection:
             rows = [dict(a) for a in self.ai_action_queue if a["client_id"] == cid and a["firm_id"] == firm_id]
             return sorted(rows, key=lambda r: r["created_at"], reverse=True)
 
+        if q.startswith("SELECT aq.*, c.full_name AS client_name"):
+            # Manual join, mirroring the real query: ai_action_queue x
+            # clients x compliance_exceptions, firm-scoped, pending_review
+            # only, highest escalation_level first then oldest first.
+            firm_id, = args
+            clients_by_id = {c["id"]: c for c in self.clients}
+            exceptions_by_id = {e["id"]: e for e in self.compliance_exceptions}
+            joined = []
+            for a in self.ai_action_queue:
+                if a["firm_id"] != firm_id or a["status"] != "pending_review":
+                    continue
+                c = clients_by_id.get(a["client_id"])
+                e = exceptions_by_id.get(a["compliance_exception_id"])
+                row = dict(a)
+                row["client_name"] = c["full_name"] if c else None
+                row["client_number"] = c.get("client_number") if c else None
+                row["issue_code"] = e["issue_code"] if e else None
+                row["issue_label"] = e["issue_label"] if e else None
+                row["exception_status"] = e["status"] if e else None
+                joined.append(row)
+            joined.sort(key=lambda r: (-r["escalation_level"], r["created_at"]))
+            return joined
+
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
@@ -164,7 +189,7 @@ class FakePool:
 
 
 def _client_row(client_id=None, **overrides):
-    row = {"id": client_id or uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Test Client"}
+    row = {"id": client_id or uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Test Client", "client_number": "TC-001"}
     row.update(overrides)
     return row
 
@@ -544,3 +569,69 @@ def test_list_missing_client_returns_404(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(list_ai_action_queue_for_client(str(uuid.uuid4()), _fake_request()))
     assert exc_info.value.status_code == 404
+
+
+# ── Firm-wide queue (Phase 2 discovery surface) ────────────────────────────
+
+def test_firm_wide_queue_requires_admin_or_partner(monkeypatch):
+    """Same permission tier as the AML Exceptions report
+    (reports:client_compliance_status) -- not every role that can read a
+    single client's own record should see the firm-wide queue."""
+    import backend.main as m
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    for role in ("associate", "secretary"):
+        _as_current_user(monkeypatch, m, {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": role})
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(list_ai_action_queue_firm_wide(_fake_request()))
+        assert exc_info.value.status_code == 403
+
+
+def test_firm_wide_queue_only_shows_pending_review(monkeypatch):
+    import backend.main as m
+    client = _client_row()
+    exc = _exception_row(client["id"], "CDD_REVIEW_OUTSTANDING", created_days_ago=3)
+    pool = FakePool(clients=[client], compliance_exceptions=[exc])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    created = asyncio.run(_run_ai_action_queue_scan())
+    result = asyncio.run(list_ai_action_queue_firm_wide(_fake_request()))
+    assert len(result) == 1
+
+    asyncio.run(review_ai_action_queue_item(str(created[0]["id"]), AiActionQueueReview(status="approved"), _fake_request()))
+    result_after = asyncio.run(list_ai_action_queue_firm_wide(_fake_request()))
+    assert result_after == []  # approved items drop off the queue, same as a resolved compliance_exceptions row
+
+
+def test_firm_wide_queue_orders_highest_escalation_first(monkeypatch):
+    import backend.main as m
+    client_a = _client_row(full_name="Old CDD Client")
+    client_b = _client_row(full_name="New PEP Client")
+    exc_a = _exception_row(client_a["id"], "CDD_REVIEW_OUTSTANDING", created_days_ago=20)  # reaches level 3
+    exc_b = _exception_row(client_b["id"], "PEP_APPROVAL_REQUIRED", created_days_ago=1)     # reaches level 1 only
+    pool = FakePool(clients=[client_a, client_b], compliance_exceptions=[exc_a, exc_b])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    asyncio.run(_run_ai_action_queue_scan())
+    result = asyncio.run(list_ai_action_queue_firm_wide(_fake_request()))
+
+    assert result[0]["escalation_level"] == 3  # partner_escalation surfaces first, regardless of client order
+    assert result[0]["client_name"] == "Old CDD Client"
+
+
+def test_firm_wide_queue_includes_joined_client_and_exception_fields(monkeypatch):
+    import backend.main as m
+    client = _client_row(full_name="Anchorflow Holdings", client_number="DU-002")
+    exc = _exception_row(client["id"], "CDD_REVIEW_OUTSTANDING", created_days_ago=3)
+    pool = FakePool(clients=[client], compliance_exceptions=[exc])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner())
+
+    asyncio.run(_run_ai_action_queue_scan())
+    result = asyncio.run(list_ai_action_queue_firm_wide(_fake_request()))
+
+    assert result[0]["client_name"] == "Anchorflow Holdings"
+    assert result[0]["client_number"] == "DU-002"
+    assert result[0]["issue_code"] == "CDD_REVIEW_OUTSTANDING"
+    assert result[0]["issue_label"] == exc["issue_label"]

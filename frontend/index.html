@@ -519,6 +519,7 @@ select{cursor:pointer}
   <button class="nav-btn" id="nav-zlr" onclick="showTab('zlr')">📚 Case Law Index</button>
   <button class="nav-btn" id="nav-users" onclick="showTab('users')" data-role-hide="secretary,associate">👥 Users</button>
   <button class="nav-btn" id="nav-reports" onclick="showTab('reports')" data-role-hide="secretary,associate">📊 Reports</button>
+  <button class="nav-btn" id="nav-compliance-actions" onclick="showTab('compliance-actions')" data-role-hide="secretary,associate">🚨 Compliance Actions <span class="nav-badge" id="caq-badge" style="display:none">0</span></button>
 </nav>
 
 <main class="main">
@@ -2036,6 +2037,13 @@ select{cursor:pointer}
     <div class="form-section-label">COMPLIANCE EXCEPTIONS <span style="font-weight:400;text-transform:none;color:var(--ink3)">(auto-tracked from this client's real compliance state)</span></div>
     <div id="cc-exceptions-list" style="margin-bottom:1rem;font-size:0.82rem;color:var(--ink3)">Loading…</div>
 
+    <!-- 2026-09-13, Phase 2 secondary integration: same ai_action_queue
+         data the firm-wide Compliance Actions tab shows, scoped to just
+         this client -- see renderClientAiActionQueueList(). Pending items
+         only, same convention as the firm-wide queue. -->
+    <div class="form-section-label">COMPLIANCE ACTIONS <span style="font-weight:400;text-transform:none;color:var(--ink3)">(AI-recommended follow-ups pending review — see the firm-wide Compliance Actions tab for every client)</span></div>
+    <div id="cc-ai-action-queue-list" style="margin-bottom:1rem;font-size:0.82rem;color:var(--ink3)">Loading…</div>
+
     <div class="form-section-label">RETENTION — s24 <span style="font-weight:400;text-transform:none;color:var(--ink3)">(flag only, no automatic deletion)</span></div>
     <div class="form-row">
       <div class="form-group">
@@ -2446,6 +2454,26 @@ select{cursor:pointer}
     </div>
   </div>
 
+<!-- ═══════════════ COMPLIANCE ACTIONS TAB ═══════════════ -->
+<!-- 2026-09-13, Compliance Monitoring Agent Phase 2: the firm-wide
+     discovery surface for ai_action_queue (Phase 1, backend only until
+     now) -- "what pending recommendations do I need to deal with?",
+     across every client, not just the one currently open. Same
+     admin/partner-only visibility as Reports (data-role-hide above),
+     matching the permission tier GET /api/ai-action-queue itself uses.
+     Approve/Edit/Dismiss here call the exact same PATCH
+     /api/ai-action-queue/{id} Phase 1 already shipped and tested --
+     this tab is new UI over an existing, unchanged API contract, not a
+     new write path. No send capability anywhere here, by design: these
+     three actions only ever change the queue item's own status. -->
+  <div id="tab-compliance-actions" style="display:none">
+    <div class="section-head">
+      <h2>🚨 Compliance Actions</h2>
+      <p>AI-recommended follow-ups on compliance exceptions that have been open too long — review, edit, or dismiss each one. This never changes a client's actual compliance status; that only ever happens on the Compliance tab itself.</p>
+    </div>
+    <div id="caq-list" style="margin-top:1rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+  </div>
+
 </main>
 </div>
 
@@ -2549,6 +2577,7 @@ async function init() {
   await loadMatters();
   await loadClients();
   renderCalendar();
+  refreshComplianceActionsBadgeIfPermitted();
   showTab('clients');
   checkUserIdentity();
 }
@@ -3550,6 +3579,7 @@ let _complianceData = null;
 // Person dropdown, same GET /api/users pattern as loadMatterReviewStatusFilters().
 let _complianceExceptions = [];
 let _complianceUsers = [];
+let _complianceAiActionQueue = [];
 
 async function openComplianceModal(clientId) {
   _complianceClientId = clientId;
@@ -3567,13 +3597,14 @@ async function openComplianceModal(clientId) {
   document.getElementById('compliance-modal').style.display = 'flex';
 
   try {
-    const [clientRes, complianceRes, ownersRes, repsRes, exceptionsRes, usersRes] = await Promise.all([
+    const [clientRes, complianceRes, ownersRes, repsRes, exceptionsRes, usersRes, aiActionQueueRes] = await Promise.all([
       fetch(`${API}/api/clients/${clientId}`),
       fetch(`${API}/api/clients/${clientId}/compliance`),
       fetch(`${API}/api/clients/${clientId}/beneficial-owners`),
       fetch(`${API}/api/clients/${clientId}/authorized-representatives`),
       fetch(`${API}/api/clients/${clientId}/exceptions`),
       fetch(`${API}/api/users`),
+      fetch(`${API}/api/clients/${clientId}/ai-action-queue`),
     ]);
     const client = await clientRes.json();
     _complianceData = await complianceRes.json();
@@ -3589,6 +3620,12 @@ async function openComplianceModal(clientId) {
     // block the rest of the compliance form from loading and being usable.
     _complianceExceptions = exceptionsRes.ok ? await exceptionsRes.json() : [];
     _complianceUsers = usersRes.ok ? await usersRes.json() : [];
+    _complianceAiActionQueue = aiActionQueueRes.ok ? await aiActionQueueRes.json() : [];
+    if (!Array.isArray(_complianceAiActionQueue)) _complianceAiActionQueue = [];
+    // Client-modal view is Phase 1's per-client endpoint (all statuses,
+    // not just pending) filtered down to pending here -- consistent with
+    // the firm-wide tab only ever showing what still needs a decision.
+    _complianceAiActionQueue = _complianceAiActionQueue.filter(a => a.status === 'pending_review');
 
     document.getElementById('compliance-badge-row').innerHTML =
       complianceStatusChipHtml(_complianceData.compliance_status) +
@@ -3659,6 +3696,7 @@ async function openComplianceModal(clientId) {
     renderRepsList();
     renderConflictReviewedNote();
     renderComplianceExceptionsList();
+    renderClientAiActionQueueList();
   } catch(e) {
     document.getElementById('compliance-modal-status').className = 'status show error';
     document.getElementById('compliance-modal-status').textContent = `Error loading compliance data: ${e.message}`;
@@ -4027,6 +4065,88 @@ function renderComplianceExceptionsList() {
   }).join('');
 }
 
+// Secondary integration (Phase 2): same ai_action_queue data the
+// firm-wide Compliance Actions tab shows (CAQ_LEVEL_CHIP etc., defined
+// further down alongside renderComplianceActionsTab -- referenced here
+// only at call time, well after the whole script has already run once,
+// same as every other cross-section const reuse in this file), scoped
+// to just this client via GET /api/clients/{id}/ai-action-queue
+// (Phase 1's original endpoint, unchanged) and filtered to pending
+// items only in openComplianceModal() above.
+function renderClientAiActionQueueList() {
+  const el = document.getElementById('cc-ai-action-queue-list');
+  if (!el) return;
+  if (!_complianceAiActionQueue.length) {
+    el.innerHTML = '<em style="color:var(--green)">Nothing pending for this client.</em>';
+    return;
+  }
+  el.innerHTML = _complianceAiActionQueue.map(item => `
+    <div class="cc-exception-row" data-caq-id="${item.id}"
+         style="border:1px solid var(--border);border-radius:8px;padding:0.6rem 0.75rem;margin-bottom:0.5rem;background:var(--paper2)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+        <span class="chip ${CAQ_LEVEL_CHIP[item.escalation_level] || 'chip-gray'}" style="font-weight:700">${CAQ_LEVEL_LABEL[item.escalation_level] || item.action_type}</span>
+      </div>
+      <p style="font-size:0.82rem;margin-top:0.4rem">${escHtml(item.recommended_action)}</p>
+      ${item.draft_text != null ? `
+        <div class="form-group" style="margin-top:0.4rem">
+          <label style="font-size:0.72rem">Draft <span style="font-weight:400;color:var(--ink3)">(editable)</span></label>
+          <textarea class="cc-caq-draft-text" rows="3" style="font-size:0.8rem">${escHtml(item.draft_text)}</textarea>
+        </div>
+      ` : ''}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:0.5rem">
+        <span class="cc-caq-error" style="font-size:0.75rem;color:var(--red)"></span>
+        <div style="display:flex;gap:6px">
+          ${item.draft_text != null ? `<button class="btn btn-outline btn-sm" style="width:auto" onclick="_ccCaqReview('${item.id}','edited',this)">Save Edit</button>` : ''}
+          <button class="btn btn-outline btn-sm" style="width:auto" onclick="_ccCaqReview('${item.id}','approved',this)">✓ Approve</button>
+          <button class="btn btn-outline btn-sm" style="width:auto;color:var(--ink3)" onclick="_ccCaqReview('${item.id}','dismissed',this)">✕ Dismiss</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// Same non-mutation guarantee as caqReview() in the firm-wide tab -- only
+// ever PATCHes the queue item's own status/draft_text, never
+// compliance_exceptions. Kept as its own function (not a shared call
+// into caqReview()) only because it re-renders this modal's own list
+// element afterward, not the firm-wide tab's.
+async function _ccCaqReview(itemId, status, btnEl) {
+  const row = btnEl.closest('[data-caq-id]');
+  const errEl = row.querySelector('.cc-caq-error');
+  errEl.textContent = '';
+  const payload = { status };
+  if (status === 'edited') {
+    const textarea = row.querySelector('.cc-caq-draft-text');
+    payload.draft_text = textarea ? textarea.value : undefined;
+  }
+  const buttons = row.querySelectorAll('button');
+  buttons.forEach(b => b.disabled = true);
+  try {
+    const res = await fetch(`${API}/api/ai-action-queue/${itemId}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      errEl.textContent = data.detail || 'Failed to save.';
+      buttons.forEach(b => b.disabled = false);
+      return;
+    }
+    _complianceAiActionQueue = _complianceAiActionQueue.filter(a => a.id !== itemId);
+    renderClientAiActionQueueList();
+    // The firm-wide tab's own list is stale now if it's been loaded this
+    // session -- refresh it too so approving/dismissing from inside a
+    // client's own modal doesn't leave a ghost row there.
+    if (document.getElementById('tab-compliance-actions').style.display !== 'none') {
+      await renderComplianceActionsTab();
+    } else {
+      refreshComplianceActionsBadgeIfPermitted();
+    }
+  } catch(e) {
+    errEl.textContent = `Error: ${e.message}`;
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+
 function _onExceptionStatusChange(selectEl) {
   const row = selectEl.closest('.cc-exception-row');
   const wrap = row.querySelector('.cce-close-reason-wrap');
@@ -4213,7 +4333,7 @@ async function submitComplianceForm() {
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
 function showTab(tab) {
-  ['dashboard','capture','vault','search','matters','clients','my-portfolio','calendar','legalupdates','draft','contract-review','zlr','users','reports'].forEach(t => {
+  ['dashboard','capture','vault','search','matters','clients','my-portfolio','calendar','legalupdates','draft','contract-review','zlr','users','reports','compliance-actions'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
@@ -4227,6 +4347,7 @@ function showTab(tab) {
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
   if (tab === 'reports') { loadReportHistory(); document.getElementById('reports-picker').value = ''; _selectReport(''); }
+  if (tab === 'compliance-actions') renderComplianceActionsTab();
 }
 
 // ── Reports tab: pick-a-report, configure, then Generate ────────────────────
@@ -8320,6 +8441,129 @@ async function loadReportHistory() {
       </table>
     `;
   } catch(e) { el.innerHTML = '<em>Error loading report history.</em>'; }
+}
+
+// ── Compliance Actions (AI Action Queue, Phase 2 -- firm-wide view) ─────────
+// Reuses the same red/amber/green convention as Matter Health and Risk
+// Rating (CCS_RISK_CHIP above) -- escalation_level 3 (partner_escalation)
+// must read as immediately, visually distinct from level 1 (flag), the
+// same way a High risk rating reads distinct from Low.
+const CAQ_LEVEL_CHIP = { 1: 'chip-green', 2: 'chip-gold', 3: 'chip-red' };
+const CAQ_LEVEL_LABEL = { 1: 'Flag', 2: 'Draft', 3: 'Partner Escalation' };
+const CAQ_STATUS_CHIP = { pending_review: 'chip-gold', approved: 'chip-green', edited: 'chip-blue', dismissed: 'chip-gray' };
+const CAQ_STATUS_LABEL = { pending_review: 'Pending Review', approved: 'Approved', edited: 'Edited', dismissed: 'Dismissed' };
+let _complianceActionsQueue = [];
+
+async function renderComplianceActionsTab() {
+  const el = document.getElementById('caq-list');
+  el.innerHTML = '<em>Loading…</em>';
+  try {
+    const res = await fetch(`${API}/api/ai-action-queue`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load the compliance actions queue.</em>'; return; }
+    _complianceActionsQueue = await res.json();
+    _renderCaqList(el);
+    _refreshCaqBadge();
+  } catch(e) {
+    el.innerHTML = '<em>Error loading the compliance actions queue.</em>';
+  }
+}
+
+function _renderCaqList(el) {
+  el = el || document.getElementById('caq-list');
+  if (!_complianceActionsQueue.length) {
+    el.innerHTML = '<em style="color:var(--green)">Nothing pending — every AI-recommended action has been reviewed.</em>';
+    return;
+  }
+  el.innerHTML = _complianceActionsQueue.map(item => `
+    <div class="card" data-caq-id="${item.id}" style="margin-bottom:0.75rem">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+        <div>
+          <span class="chip ${CAQ_LEVEL_CHIP[item.escalation_level] || 'chip-gray'}" style="font-weight:700">${CAQ_LEVEL_LABEL[item.escalation_level] || item.action_type}</span>
+          <strong style="margin-left:8px;font-size:0.9rem">${escHtml(item.client_name)}</strong>
+          <span style="color:var(--ink3);font-size:0.8rem"> (${escHtml(item.client_number || '')})</span>
+        </div>
+        <span class="chip ${CAQ_STATUS_CHIP[item.status] || 'chip-gray'}">${CAQ_STATUS_LABEL[item.status] || item.status}</span>
+      </div>
+      <p style="font-size:0.82rem;color:var(--ink2);margin-top:0.5rem">
+        <strong>Underlying exception:</strong> ${escHtml(item.issue_label)}
+      </p>
+      <p style="font-size:0.82rem;margin-top:0.35rem"><strong>Recommended action:</strong> ${escHtml(item.recommended_action)}</p>
+      ${item.draft_text != null ? `
+        <div class="form-group" style="margin-top:0.5rem">
+          <label style="font-size:0.72rem">Draft <span style="font-weight:400;color:var(--ink3)">(editable — Save applies your edit without approving or dismissing)</span></label>
+          <textarea class="caq-draft-text" rows="4" style="font-size:0.82rem">${escHtml(item.draft_text)}</textarea>
+        </div>
+      ` : ''}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:0.6rem;flex-wrap:wrap">
+        <span class="caq-error" style="font-size:0.75rem;color:var(--red)"></span>
+        <div style="display:flex;gap:6px">
+          ${item.draft_text != null ? `<button class="btn btn-outline btn-sm" style="width:auto" onclick="caqReview('${item.id}','edited',this)">Save Edit</button>` : ''}
+          <button class="btn btn-outline btn-sm" style="width:auto" onclick="caqReview('${item.id}','approved',this)">✓ Approve</button>
+          <button class="btn btn-outline btn-sm" style="width:auto;color:var(--ink3)" onclick="caqReview('${item.id}','dismissed',this)">✕ Dismiss</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// No send capability anywhere -- these three actions only ever PATCH the
+// queue item's own status (and, for 'edited', its draft_text). None of
+// them touch compliance_exceptions -- see backend/main.py's
+// review_ai_action_queue_item() and its own DESIGN PRINCIPLE comment.
+async function caqReview(itemId, status, btnEl) {
+  const card = btnEl.closest('[data-caq-id]');
+  const errEl = card.querySelector('.caq-error');
+  errEl.textContent = '';
+  const payload = { status };
+  if (status === 'edited') {
+    const textarea = card.querySelector('.caq-draft-text');
+    payload.draft_text = textarea ? textarea.value : undefined;
+  }
+  const buttons = card.querySelectorAll('button');
+  buttons.forEach(b => b.disabled = true);
+  try {
+    const res = await fetch(`${API}/api/ai-action-queue/${itemId}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      errEl.textContent = data.detail || 'Failed to save.';
+      buttons.forEach(b => b.disabled = false);
+      return;
+    }
+    // Reviewed items drop off the (pending-only) firm-wide queue and the
+    // client modal's own list -- re-fetch rather than patch the row in
+    // place, same simple convention this codebase already uses elsewhere.
+    await renderComplianceActionsTab();
+    if (typeof _complianceClientId !== 'undefined' && _complianceClientId) {
+      await renderClientAiActionQueueList();
+    }
+  } catch(e) {
+    errEl.textContent = `Error: ${e.message}`;
+    buttons.forEach(b => b.disabled = false);
+  }
+}
+
+function _refreshCaqBadge() {
+  const badge = document.getElementById('caq-badge');
+  if (!badge) return;
+  const count = _complianceActionsQueue.length;
+  badge.textContent = count;
+  badge.style.display = count > 0 ? 'inline' : 'none';
+}
+
+// Called from init() for admin/partner (same roles the tab/endpoint are
+// gated to) so the badge has a real count on login, same convention as
+// the Calendar tab's cal-badge -- not everyone should pay for this
+// fetch, since secretary/associate can never see the tab anyway.
+async function refreshComplianceActionsBadgeIfPermitted() {
+  if (window._userRole === 'secretary' || window._userRole === 'associate') return;
+  try {
+    const res = await fetch(`${API}/api/ai-action-queue`);
+    if (!res.ok) return;
+    _complianceActionsQueue = await res.json();
+    _refreshCaqBadge();
+  } catch(e) { /* badge just stays hidden -- non-critical */ }
 }
 
 async function loadPracticeAreaBreakdown() {
