@@ -1869,6 +1869,10 @@ select{cursor:pointer}
 
     <div id="cc-beneficial-ownership-section" style="display:none;margin-top:0.5rem">
       <div class="form-section-label">BENEFICIAL OWNERSHIP — s15 / s17(b)</div>
+      <p style="font-size:0.8rem;color:var(--ink3);margin:0.25rem 0 0.6rem;line-height:1.45">
+        No fixed ownership percentage is used as a threshold — the Act's beneficial ownership
+        requirement is based on actual ownership or control, not a specific percentage.
+      </p>
       <div class="form-group">
         <label>Is the client itself the beneficial owner?</label>
         <select id="cc-is-beneficial-owner" onchange="onComplianceIsBoChange()">
@@ -2396,6 +2400,9 @@ select{cursor:pointer}
       </p>
       <p style="font-size:0.8rem;color:var(--ink3);margin-top:0.4rem;font-style:italic;line-height:1.4">
         This report is a compliance status and record index. Supporting identification, beneficial ownership, authority, and other documents are maintained in the client/matter file and are available for authorised review.
+      </p>
+      <p style="font-size:0.8rem;color:var(--ink3);margin-top:0.4rem;font-style:italic;line-height:1.4">
+        No fixed ownership percentage is used as a threshold for the BO Status column — the Act's beneficial ownership requirement is based on actual ownership or control, not a specific percentage.
       </p>
       <div style="margin-top:0.5rem">
         <button class="btn btn-primary" onclick="loadClientComplianceStatus()">▶ Generate</button>
@@ -9750,7 +9757,8 @@ function _renderCddReport(r) {
     `<span class="chip ${o.verification_status === 'Verified' ? 'chip-green' : o.verification_status === 'Pending' ? 'chip-gold' : 'chip-gray'}">${escHtml(o.verification_status)}</span>`,
   ]);
   const boSection = _cddSection('3. Beneficial Ownership',
-    _cddTable(['Name', 'Nationality', 'Ownership', 'Basis', 'Verification'], boRows));
+    '<p style="font-size:0.78rem;color:var(--ink3);margin:0 0 0.5rem;font-style:italic">No fixed ownership percentage is used as a threshold — the Act\'s beneficial ownership requirement is based on actual ownership or control, not a specific percentage.</p>'
+    + _cddTable(['Name', 'Nationality', 'Ownership', 'Basis', 'Verification'], boRows));
 
   const repRows = r.authorized_representatives.map(rep => [
     escHtml(rep.full_name), escHtml(rep.position_or_relationship || '—'),

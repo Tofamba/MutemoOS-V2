@@ -506,6 +506,54 @@ def test_no_beneficial_owners_gives_an_empty_list_not_an_error(monkeypatch):
     assert result["beneficial_owners"] == []
 
 
+# ── Beneficial-ownership threshold footnote (2026-09-14) ─────────────────
+# The Beneficial Ownership section has never used a fixed ownership-
+# percentage cutoff (ownership_percentage is nullable -- see backend/
+# main.py's own comment near beneficial_owners), but that design decision
+# previously lived only in a code comment, nowhere a regulator/auditor/
+# partner reading this report would see it. These just confirm the
+# plain-language note added to the on-screen/CSV/PDF renderings carries
+# the exact wording, not that the beneficial-ownership logic itself
+# changed (it didn't -- copy/documentation only).
+
+def test_csv_export_includes_beneficial_ownership_threshold_note(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export(str(client_id), _fake_request()))
+    rows = _csv_rows(response)
+    flat_rows = [row for row in rows if row]
+
+    idx = next(i for i, row in enumerate(flat_rows) if row[0] == "3. Beneficial Ownership")
+    assert flat_rows[idx + 1] == [
+        "No fixed ownership percentage is used as a threshold -- the Act's beneficial "
+        "ownership requirement is based on actual ownership or control, not a specific "
+        "percentage."
+    ]
+
+
+def test_pdf_export_includes_beneficial_ownership_threshold_note(monkeypatch):
+    import backend.main as m
+    client_id = uuid.uuid4()
+    client = _client_row(client_id, client_type="Individual")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, _partner())
+
+    response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
+
+    with pdfplumber.open(io.BytesIO(response.body)) as pdf:
+        text = " ".join(" ".join(page.extract_text().split()) for page in pdf.pages if page.extract_text())
+
+    assert (
+        "No fixed ownership percentage is used as a threshold -- the Act's beneficial "
+        "ownership requirement is based on actual ownership or control, not a specific "
+        "percentage."
+    ) in text
+
+
 # ── Person Acting for Client ────────────────────────────────────────────────
 
 def test_authorized_representatives_full_detail(monkeypatch):

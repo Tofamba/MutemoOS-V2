@@ -586,7 +586,11 @@ def test_csv_export_pep_column_reflects_true_false_and_unassessed(monkeypatch):
     _as_current_user(monkeypatch, m, partner)
 
     response = asyncio.run(client_compliance_status_report_export(_fake_request()))
-    rows = {r[1]: r for r in _csv_rows(response)[1:]}
+    # [1:4] -- exactly the 3 client rows this test seeds. Not [1:], since
+    # the export now ends with a blank row + a beneficial-ownership-
+    # threshold footnote row (2026-09-14) after the data, same convention
+    # as _client_aml_cdd_report_csv's own per-section notes.
+    rows = {r[1]: r for r in _csv_rows(response)[1:4]}
 
     assert rows["PEP Client"][6] == "Yes"
     assert rows["Clear Client"][6] == "No"
@@ -725,6 +729,51 @@ def test_pdf_export_shades_risk_rating_cells_by_rating(monkeypatch):
     # other column, including the Outstanding text, stays unshaded).
     assert len(colors) == 4
     _assert_colors_match(colors, expected)
+
+
+# ── Beneficial-ownership threshold footnote (2026-09-14) ─────────────────
+# The BO Status column has never used a fixed ownership-percentage cutoff
+# (ownership_percentage is nullable -- see backend/main.py's own comment
+# near beneficial_owners), but that design decision previously lived only
+# in a code comment, nowhere a regulator/auditor/partner reading an actual
+# export would see it. These just confirm the plain-language footnote
+# added to both exports carries the exact wording, not that the BO logic
+# itself changed (it didn't -- copy/documentation only).
+
+def test_csv_export_includes_beneficial_ownership_threshold_footnote(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Footnote Co")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, partner)
+
+    response = asyncio.run(client_compliance_status_report_export(_fake_request()))
+    rows = _csv_rows(response)
+
+    assert rows[-1] == [
+        "Note: No fixed ownership percentage is used as a threshold for the BO Status "
+        "column -- the Act's beneficial ownership requirement is based on actual "
+        "ownership or control, not a specific percentage."
+    ]
+
+
+def test_pdf_export_includes_beneficial_ownership_threshold_footnote(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Footnote Co")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, partner)
+
+    response = asyncio.run(client_compliance_status_report_export_pdf(_fake_request()))
+
+    with pdfplumber.open(io.BytesIO(response.body)) as pdf:
+        text = " ".join(" ".join(page.extract_text().split()) for page in pdf.pages if page.extract_text())
+
+    assert (
+        "No fixed ownership percentage is used as a threshold for the BO Status column -- "
+        "the Act's beneficial ownership requirement is based on actual ownership or control, "
+        "not a specific percentage."
+    ) in text
 
 
 # ── Summary endpoint (2026-09-03 design review) ──────────────────────────
