@@ -8498,7 +8498,16 @@ function _renderCaqList(el) {
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
         <div>
           <span class="chip ${CAQ_LEVEL_CHIP[item.escalation_level] || 'chip-gray'}" style="font-weight:700">${CAQ_LEVEL_LABEL[item.escalation_level] || item.action_type}</span>
-          <strong style="margin-left:8px;font-size:0.9rem">${escHtml(item.client_name)}</strong>
+          <!-- Same clickable-client-name pattern as the AML/Client Compliance
+               Register's own client column (_ccsRenderTable above) -- blue,
+               no underline, opens straight into the client's own compliance
+               view rather than making a lawyer search for the client
+               manually. Goes to openComplianceModal() specifically (not the
+               Register's openClientCddReportModal()) since that's this
+               item's own underlying compliance_exception's actual home. -->
+          <a href="#" onclick="event.preventDefault();openComplianceModal('${item.client_id}')"
+             title="Open ${escHtml(item.client_name)}'s compliance record"
+             style="margin-left:8px;font-size:0.9rem;font-weight:700;color:var(--blue);text-decoration:none">${escHtml(item.client_name)}</a>
           <span style="color:var(--ink3);font-size:0.8rem"> (${escHtml(item.client_number || '')})</span>
         </div>
         <span class="chip ${CAQ_STATUS_CHIP[item.status] || 'chip-gray'}">${CAQ_STATUS_LABEL[item.status] || item.status}</span>
