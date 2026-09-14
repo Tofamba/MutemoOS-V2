@@ -7216,6 +7216,15 @@ def _client_cdd_report_sections(report: dict) -> list:
              o.get("ownership_or_control_basis") or "—", o["verification_status"]]
             for o in report["beneficial_owners"]
         ],
+        # Optional key, only this section uses it -- CSV/PDF both check
+        # section.get("note") and render it if present (main.py, below).
+        # Same wording as the compliance modal's own note and the AML/
+        # Client Compliance Register's footnote, so a reader sees one
+        # consistent explanation wherever beneficial ownership shows up,
+        # not three slightly different ones.
+        "note": ("No fixed ownership percentage is used as a threshold -- the Act's beneficial "
+                 "ownership requirement is based on actual ownership or control, not a specific "
+                 "percentage."),
     })
 
     sections.append({
@@ -7304,6 +7313,8 @@ def _client_cdd_report_csv(report: dict) -> str:
     writer.writerow([])
     for section in _client_cdd_report_sections(report):
         writer.writerow([section["title"]])
+        if section.get("note"):
+            writer.writerow([section["note"]])
         writer.writerow(section["headers"])
         if section["rows"]:
             for row in section["rows"]:
@@ -7391,6 +7402,10 @@ def _build_client_cdd_pdf(report: dict) -> bytes:
     for section in _client_cdd_report_sections(report):
         pdf.set_font("Helvetica", "B", 11)
         pdf.cell(0, 7, _pdf_safe(section["title"]), new_x="LMARGIN", new_y="NEXT")
+        if section.get("note"):
+            pdf.set_font("Helvetica", "I", 8)
+            pdf.multi_cell(0, 4, _pdf_safe(section["note"]))
+            pdf.set_font("Helvetica", "", 10)
         if section["rows"]:
             layout = _CDD_SECTION_LAYOUT.get(section["title"])
             if layout:
@@ -9285,6 +9300,10 @@ async def client_compliance_status_report_export(request: Request):
     writer.writerow(_CCS_EXPORT_HEADERS)
     for r in rows:
         writer.writerow(_ccs_export_row(r))
+    writer.writerow([])
+    writer.writerow(["Note: No fixed ownership percentage is used as a threshold for the BO Status "
+                      "column -- the Act's beneficial ownership requirement is based on actual "
+                      "ownership or control, not a specific percentage."])
 
     filename = f"client_compliance_status_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
     return _csv_response(buf.getvalue(), filename)
@@ -9308,6 +9327,13 @@ def _build_client_compliance_status_pdf(rows: list) -> bytes:
     pdf.cell(0, 6, "AML / Client Compliance Register", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 5, "Money Laundering and Proceeds of Crime Act [Chapter 9:24]", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.multi_cell(0, 4, _pdf_safe(
+        "No fixed ownership percentage is used as a threshold for the BO Status column -- "
+        "the Act's beneficial ownership requirement is based on actual ownership or control, "
+        "not a specific percentage."
+    ))
+    pdf.set_font("Helvetica", "", 10)
     pdf.ln(3)
 
     if not rows:
