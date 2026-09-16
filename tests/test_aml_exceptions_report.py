@@ -782,3 +782,174 @@ def test_summary_associate_gets_403(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(aml_exceptions_summary(_fake_request()))
     assert exc_info.value.status_code == 403
+
+
+# ── include_resolved (2026-09-16, adversarial-audit follow-up) ───────────
+# An exception that was raised and properly dealt with must still be
+# visible on this report on request, not simply vanish the moment it's
+# Resolved/ClosedNoFurtherAction -- these fixtures create the resolved/
+# closed compliance_exceptions row directly (a fully Cleared client's
+# issue_code is no longer in the "currently unsatisfied" set, so
+# _sync_compliance_exceptions_for_client() leaves a pre-existing
+# Resolved/Closed row for it completely untouched -- see that function's
+# own docstring -- meaning this is exactly the real, persisted shape a
+# genuinely-dealt-with exception has, not a synthetic shortcut).
+
+def _resolved_exception(client_id, *, status="Resolved", resolved_at=None, closed_at=None, closed_reason=None):
+    return {
+        "id": uuid.uuid4(), "firm_id": FIRM_ID, "client_id": client_id,
+        "issue_code": "IDENTITY_NOT_VERIFIED", "issue_label": "Identity not verified",
+        "status": status, "responsible_user_id": None, "due_date": None, "notes": None,
+        "closed_reason": closed_reason, "resolved_at": resolved_at, "closed_at": closed_at,
+        "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        "updated_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+    }
+
+
+def _cleared_individual_compliance(client_id):
+    return _compliance(client_id, identity_verification_status="Verified", is_pep=False, conflict_check_reviewed=True)
+
+
+def test_include_resolved_defaults_to_false_and_excludes_resolved_items(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tendai Moyo", client_type="Individual")
+    pool = FakePool(clients=[client], compliance=[_cleared_individual_compliance(client["id"])])
+    pool.conn.compliance_exceptions = [
+        _resolved_exception(client["id"], resolved_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    ]
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request()))
+
+    assert rows == []
+
+
+def test_include_resolved_true_surfaces_resolved_and_closed_items(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    resolved_client = _client("Tendai Moyo", client_type="Individual")
+    closed_client = _client("Chiedza Bvumbe", client_type="Individual")
+    pool = FakePool(
+        clients=[resolved_client, closed_client],
+        compliance=[
+            _cleared_individual_compliance(resolved_client["id"]),
+            _cleared_individual_compliance(closed_client["id"]),
+        ],
+    )
+    pool.conn.compliance_exceptions = [
+        _resolved_exception(
+            resolved_client["id"], status="Resolved",
+            resolved_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        ),
+        _resolved_exception(
+            closed_client["id"], status="ClosedNoFurtherAction",
+            closed_at=datetime(2026, 9, 10, tzinfo=timezone.utc),
+            closed_reason="Client confirmed no ID document exists; matter closed instead.",
+        ),
+    ]
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request(), include_resolved=True))
+
+    assert len(rows) == 2
+    by_client = {r["client_name"]: r for r in rows}
+
+    resolved_row = by_client["Tendai Moyo"]
+    assert resolved_row["status"] == "Resolved"
+    assert resolved_row["resolved_on"] == "2026-09-01"
+    assert resolved_row["closed_reason"] == ""
+    assert resolved_row["due"] == ""
+
+    closed_row = by_client["Chiedza Bvumbe"]
+    assert closed_row["status"] == "Closed — No Further Action"
+    assert closed_row["resolved_on"] == "2026-09-10"
+    assert closed_row["closed_reason"] == "Client confirmed no ID document exists; matter closed instead."
+
+
+def test_include_resolved_true_still_includes_actionable_items_sorted_first(monkeypatch):
+    """Resolved/closed items are appended AFTER the actionable list, not
+    interleaved by priority -- an "outstanding work" list shouldn't have
+    already-dealt-with items competing for the top rows."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    open_client = _client("Munyaradzi Gwenzi", client_type="Individual")
+    resolved_client = _client("Tendai Moyo", client_type="Individual")
+    pool = FakePool(
+        clients=[open_client, resolved_client],
+        compliance=[_cleared_individual_compliance(resolved_client["id"])],
+    )
+    pool.conn.compliance_exceptions = [
+        _resolved_exception(resolved_client["id"], resolved_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    ]
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request(), include_resolved=True))
+
+    assert len(rows) >= 2
+    assert rows[-1]["client_name"] == "Tendai Moyo"
+    assert rows[-1]["status"] == "Resolved"
+    assert all(r["status"] not in ("Resolved", "Closed — No Further Action") for r in rows[:-1])
+
+
+def test_include_resolved_sorts_most_recently_resolved_first(monkeypatch):
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    older_client = _client("Believe Mangoma", client_type="Individual")
+    newer_client = _client("Rutendo Chikwavaire", client_type="Individual")
+    pool = FakePool(
+        clients=[older_client, newer_client],
+        compliance=[
+            _cleared_individual_compliance(older_client["id"]),
+            _cleared_individual_compliance(newer_client["id"]),
+        ],
+    )
+    pool.conn.compliance_exceptions = [
+        _resolved_exception(older_client["id"], resolved_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        _resolved_exception(newer_client["id"], resolved_at=datetime(2026, 9, 1, tzinfo=timezone.utc)),
+    ]
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request(), include_resolved=True))
+
+    assert [r["client_name"] for r in rows] == ["Rutendo Chikwavaire", "Believe Mangoma"]
+
+
+def test_actionable_rows_carry_empty_resolved_on_and_closed_reason(monkeypatch):
+    """Key shape stays identical across actionable and resolved rows
+    (empty string, never a missing key) -- so callers never need a
+    conditional key check."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Munyaradzi Gwenzi", client_type="Individual")
+    monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client]))
+    _as_current_user(monkeypatch, m, partner)
+
+    rows = asyncio.run(aml_exceptions_report(_fake_request(), include_resolved=True))
+
+    assert rows
+    assert all(r["resolved_on"] == "" and r["closed_reason"] == "" for r in rows)
+
+
+def test_default_export_and_summary_are_unaffected_by_resolved_items(monkeypatch):
+    """CSV/PDF/summary never pass include_resolved -- confirms a
+    resolved item stays invisible to them exactly as before this change."""
+    import backend.main as m
+    partner = {"id": uuid.uuid4(), "firm_id": FIRM_ID, "role": "partner", "display_name": "P"}
+    client = _client("Tendai Moyo", client_type="Individual")
+    pool = FakePool(clients=[client], compliance=[_cleared_individual_compliance(client["id"])])
+    pool.conn.compliance_exceptions = [
+        _resolved_exception(client["id"], resolved_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    ]
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, partner)
+
+    csv_response = asyncio.run(aml_exceptions_report_export(_fake_request()))
+    summary = asyncio.run(aml_exceptions_summary(_fake_request()))
+
+    assert _csv_rows(csv_response) == [["Priority", "Client", "Matter", "Issue", "Responsible Person", "Status", "Due"]]
+    assert summary["total"] == 0
