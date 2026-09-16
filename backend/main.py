@@ -6830,6 +6830,34 @@ async def list_ai_action_queue_for_client(client_id: str, request: Request):
     return [_row_to_ai_action_queue_item(dict(r)) for r in rows]
 
 
+@app.get("/api/clients/{client_id}/compliance-history")
+async def list_client_compliance_history(client_id: str, request: Request):
+    """
+    Real WHO/WHEN activity timeline for this client (2026-09-16,
+    adversarial-audit follow-up) -- closes the WHO/WHEN gap the Register,
+    AML Exceptions, and Matter AML Status reports all share, via one
+    shared drill-down rather than three separate report-column fixes.
+    Reuses _fetch_compliance_history() completely unchanged: that
+    function has logged real BO/PEP/conflict-check/exception/CDD-review
+    events into audit_logs since 2026-09-03 (via _log_compliance_event(),
+    called at every one of those mutation sites) but had zero callers
+    since its own report section was removed 2026-09-09 per partner
+    feedback -- no new tracking added here, purely surfacing what was
+    already being recorded correctly.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    cid = _parse_client_id(client_id)
+    async with _db_pool.acquire() as conn:
+        await _get_client_or_404(conn, cid)
+        matter_rows = await conn.fetch(
+            "SELECT id FROM matters WHERE client_id=$1 AND firm_id=$2 AND NOT is_sentinel",
+            cid, FIRM_ID
+        )
+        matter_ids = [m["id"] for m in matter_rows]
+        return await _fetch_compliance_history(conn, cid, matter_ids)
+
+
 @app.get("/api/ai-action-queue")
 async def list_ai_action_queue_firm_wide(request: Request):
     """
@@ -9410,13 +9438,23 @@ async def client_compliance_status_report_export_pdf(request: Request):
 
 _CDD_REVIEW_OUTSTANDING_LABEL = "CDD Review Outstanding"
 
-async def _fetch_aml_exceptions_rows(conn) -> list:
+async def _fetch_aml_exceptions_rows(conn, include_resolved: bool = False) -> list:
     """
     One row per currently-actionable compliance exception (Open/
     InProgress/AwaitingClient -- Resolved and ClosedNoFurtherAction are
     no longer "what do I need to deal with?", this report's own
     purpose), firm-wide, sorted High priority first (then by client name
     for a stable order within a priority tier).
+
+    include_resolved (2026-09-16, adversarial-audit follow-up): when
+    True, appends every Resolved/ClosedNoFurtherAction exception too --
+    same rows _sync_compliance_exceptions_for_client() already returns
+    per client, just not filtered out -- sorted most-recently-resolved
+    first, after the actionable rows. An exception that was raised and
+    properly dealt with should still be visible somewhere on this
+    report rather than silently vanishing the moment it's resolved;
+    default False keeps every existing caller (summary/CSV/PDF exports)
+    byte-identical to before this change.
 
     2026-09-07, Phase 2: reads the PERSISTED compliance_exceptions rows
     (via _sync_compliance_exceptions_for_client(), which materializes/
@@ -9444,13 +9482,16 @@ async def _fetch_aml_exceptions_rows(conn) -> list:
     system_actor = {"id": None, "firm_id": FIRM_ID, "display_name": "System", "role": "system"}
 
     actionable = []
+    resolved = []
     for c in client_rows:
         exceptions = await _sync_compliance_exceptions_for_client(conn, c["id"], system_actor)
         for e in exceptions:
             if e["status"] in ("Open", "InProgress", "AwaitingClient"):
                 actionable.append((c, e))
+            elif include_resolved and e["status"] in ("Resolved", "ClosedNoFurtherAction"):
+                resolved.append((c, e))
 
-    responsible_ids = [e.get("responsible_user_id") for _, e in actionable if e.get("responsible_user_id")]
+    responsible_ids = [e.get("responsible_user_id") for _, e in (actionable + resolved) if e.get("responsible_user_id")]
     names_by_user_id = {}
     if responsible_ids:
         user_rows = await conn.fetch(
@@ -9459,9 +9500,8 @@ async def _fetch_aml_exceptions_rows(conn) -> list:
         )
         names_by_user_id = {u["id"]: u["display_name"] for u in user_rows}
 
-    rows = []
-    for c, e in actionable:
-        rows.append({
+    def _row(c, e, resolved_on=None):
+        return {
             "exception_id": str(e["id"]),
             "priority": _priority_for_issue_code(e["issue_code"]),
             "client_id": str(c["id"]),
@@ -9472,25 +9512,44 @@ async def _fetch_aml_exceptions_rows(conn) -> list:
             "responsible_person": names_by_user_id.get(e.get("responsible_user_id")) or "Compliance Officer",
             "status": _EXCEPTION_STATUS_LABELS.get(e["status"], e["status"]),
             "due": str(e["due_date"]) if e.get("due_date") else "",
-        })
+            # Both empty on every actionable row -- only ever populated on a
+            # resolved/closed row below, kept present on every row regardless
+            # (rather than an optional key) so callers never need a
+            # conditional key check.
+            "resolved_on": resolved_on.date().isoformat() if resolved_on else "",
+            "closed_reason": e.get("closed_reason") or "" if e["status"] == "ClosedNoFurtherAction" else "",
+        }
 
+    rows = [_row(c, e) for c, e in actionable]
     priority_order = {"High": 0, "Medium": 1, "Low": 2}
     rows.sort(key=lambda r: (priority_order.get(r["priority"], 9), r["client_name"] or ""))
+
+    if include_resolved:
+        resolved_rows = [(c, e, e.get("resolved_at") or e.get("closed_at")) for c, e in resolved]
+        resolved_rows.sort(key=lambda t: t[2] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+        rows.extend(_row(c, e, resolved_on) for c, e, resolved_on in resolved_rows)
+
     return rows
 
 @app.get("/api/reports/aml-exceptions")
-async def aml_exceptions_report(request: Request):
+async def aml_exceptions_report(request: Request, include_resolved: bool = False):
     """
     Firm-wide AML exceptions list: every outstanding compliance item
     across every client, prioritized -- "what do I need to deal with?",
     the third of the three management questions this report family
     answers (alongside the Register's "where do we stand?" and the
     Individual Client report's "show me everything for this client").
+
+    include_resolved=true (2026-09-16) appends every Resolved/Closed
+    item too -- see _fetch_aml_exceptions_rows()'s own docstring.
+    Default False, so existing callers (the on-screen table's own
+    default load, and the summary/CSV/PDF endpoints below, which never
+    pass this) are completely unaffected.
     """
     user = await get_current_user(request)
     _check_permission(user, "reports:client_compliance_status")
     async with _db_pool.acquire() as conn:
-        rows = await _fetch_aml_exceptions_rows(conn)
+        rows = await _fetch_aml_exceptions_rows(conn, include_resolved=include_resolved)
     return rows
 
 @app.get("/api/reports/aml-exceptions-summary")

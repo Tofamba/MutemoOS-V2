@@ -2067,6 +2067,16 @@ select{cursor:pointer}
     <div class="form-section-label">COMPLIANCE ACTIONS <span style="font-weight:400;text-transform:none;color:var(--ink3)">(AI-recommended follow-ups pending review — see the firm-wide Compliance Actions tab for every client)</span></div>
     <div id="cc-ai-action-queue-list" style="margin-bottom:1rem;font-size:0.82rem;color:var(--ink3)">Loading…</div>
 
+    <!-- 2026-09-16, adversarial-audit follow-up: WHO did each compliance
+         action and WHEN, read-only, for this specific client -- reuses
+         audit_logs (already recording every BO/PEP/conflict-check/
+         exception mutation) and cdd_reviews, merged into one timeline by
+         the existing _fetch_compliance_history() (built 2026-09-03, had
+         zero callers since 2026-09-09 until this endpoint). No new
+         tracking; purely surfacing what was already being recorded. -->
+    <div class="form-section-label">COMPLIANCE HISTORY <span style="font-weight:400;text-transform:none;color:var(--ink3)">(who did what, and when — read-only)</span></div>
+    <div id="cc-compliance-history-list" style="margin-bottom:1rem;font-size:0.82rem;color:var(--ink3)">Loading…</div>
+
     <div class="form-section-label">RETENTION — s24 <span style="font-weight:400;text-transform:none;color:var(--ink3)">(flag only, no automatic deletion)</span></div>
     <div class="form-row">
       <div class="form-group">
@@ -2445,6 +2455,14 @@ select{cursor:pointer}
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <input type="text" id="ae-search" placeholder="🔍 Search client or issue…" oninput="_aeSetSearch(this.value)"
             style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
+          <!-- 2026-09-16, adversarial-audit follow-up: an exception that
+               was raised and properly dealt with should never simply
+               disappear with no record -- toggling this re-fetches with
+               include_resolved=true and appends every Resolved/Closed
+               item after the actionable list (see _aeRenderTable()). -->
+          <label style="display:flex;align-items:center;gap:5px;font-size:0.8rem;color:var(--ink3);cursor:pointer">
+            <input type="checkbox" id="ae-show-resolved" style="width:auto" onchange="loadAmlExceptions()"/> Show resolved/closed
+          </label>
           <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadAmlExceptionsCsv()">⬇ Download CSV</button>
           <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadAmlExceptionsPdf()">⬇ Download PDF</button>
         </div>
@@ -3606,6 +3624,9 @@ let _complianceData = null;
 let _complianceExceptions = [];
 let _complianceUsers = [];
 let _complianceAiActionQueue = [];
+// Compliance History (2026-09-16) -- read-only WHO/WHEN timeline, fetched
+// fresh every time the modal opens, same convention as the lists above.
+let _complianceHistory = [];
 
 async function openComplianceModal(clientId) {
   _complianceClientId = clientId;
@@ -3623,7 +3644,7 @@ async function openComplianceModal(clientId) {
   document.getElementById('compliance-modal').style.display = 'flex';
 
   try {
-    const [clientRes, complianceRes, ownersRes, repsRes, exceptionsRes, usersRes, aiActionQueueRes] = await Promise.all([
+    const [clientRes, complianceRes, ownersRes, repsRes, exceptionsRes, usersRes, aiActionQueueRes, historyRes] = await Promise.all([
       fetch(`${API}/api/clients/${clientId}`),
       fetch(`${API}/api/clients/${clientId}/compliance`),
       fetch(`${API}/api/clients/${clientId}/beneficial-owners`),
@@ -3631,6 +3652,7 @@ async function openComplianceModal(clientId) {
       fetch(`${API}/api/clients/${clientId}/exceptions`),
       fetch(`${API}/api/users`),
       fetch(`${API}/api/clients/${clientId}/ai-action-queue`),
+      fetch(`${API}/api/clients/${clientId}/compliance-history`),
     ]);
     const client = await clientRes.json();
     _complianceData = await complianceRes.json();
@@ -3648,6 +3670,10 @@ async function openComplianceModal(clientId) {
     _complianceUsers = usersRes.ok ? await usersRes.json() : [];
     _complianceAiActionQueue = aiActionQueueRes.ok ? await aiActionQueueRes.json() : [];
     if (!Array.isArray(_complianceAiActionQueue)) _complianceAiActionQueue = [];
+    // Compliance History degrades independently too, same convention as
+    // exceptions/users/ai-action-queue above.
+    _complianceHistory = historyRes.ok ? await historyRes.json() : [];
+    if (!Array.isArray(_complianceHistory)) _complianceHistory = [];
     // Client-modal view is Phase 1's per-client endpoint (all statuses,
     // not just pending) filtered down to pending here -- consistent with
     // the firm-wide tab only ever showing what still needs a decision.
@@ -3723,6 +3749,7 @@ async function openComplianceModal(clientId) {
     renderConflictReviewedNote();
     renderComplianceExceptionsList();
     renderClientAiActionQueueList();
+    renderComplianceHistoryList();
   } catch(e) {
     document.getElementById('compliance-modal-status').className = 'status show error';
     document.getElementById('compliance-modal-status').textContent = `Error loading compliance data: ${e.message}`;
@@ -4129,6 +4156,40 @@ function renderClientAiActionQueueList() {
       </div>
     </div>
   `).join('');
+}
+
+// Compliance History (2026-09-16, adversarial-audit follow-up): a real
+// WHO/WHEN timeline for this client, via GET .../compliance-history
+// (backed by _fetch_compliance_history() in backend/main.py -- already
+// logging BO/PEP/conflict-check/exception/CDD-review events into
+// audit_logs since 2026-09-03, just never surfaced anywhere since its
+// own report section was removed 2026-09-09). Read-only -- this list
+// never changes a client's actual compliance status; that only ever
+// happens on this same modal's own form fields, same principle as the
+// Compliance Actions section above. Newest first, since "what just
+// happened" matters more here than a strict audit-trail read order.
+function renderComplianceHistoryList() {
+  const el = document.getElementById('cc-compliance-history-list');
+  if (!el) return;
+  if (!_complianceHistory.length) {
+    el.innerHTML = '<em style="color:var(--ink3)">No recorded compliance activity for this client yet.</em>';
+    return;
+  }
+  const events = [..._complianceHistory].reverse();
+  el.innerHTML = `
+    <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      ${events.map((ev, i) => `
+        <div style="display:flex;gap:10px;padding:0.5rem 0.75rem;background:${i % 2 ? 'var(--paper2)' : 'var(--white)'};${i > 0 ? 'border-top:1px solid var(--border)' : ''}">
+          <div style="flex:0 0 88px;color:var(--ink3);font-size:0.76rem;white-space:nowrap">${escHtml(ev.date || '—')}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600">${escHtml(ev.event)}</div>
+            <div style="color:var(--ink3)">${escHtml(ev.result)}</div>
+          </div>
+          <div style="flex:0 0 auto;color:var(--ink3);font-size:0.76rem;white-space:nowrap">${escHtml(ev.user || 'Unknown')}</div>
+        </div>
+      `).join('')}
+    </div>
+  `;
 }
 
 // Same non-mutation guarantee as caqReview() in the firm-wide tab -- only
@@ -9204,13 +9265,16 @@ const AE_PRIORITY_ORDER = { 'High': 0, 'Medium': 1, 'Low': 2 };
 const AE_PRIORITY_CHIP = { 'High': 'chip-red', 'Medium': 'chip-gold', 'Low': 'chip-gray' };
 
 const AE_COLUMNS = [
-  { key: 'priority', label: 'Priority', width: '9%' },
-  { key: 'client_name', label: 'Client', width: '18%' },
-  { key: 'matter', label: 'Matter', width: '10%' },
-  { key: 'issue', label: 'Issue', width: '27%' },
-  { key: 'responsible_person', label: 'Responsible Person', width: '16%' },
-  { key: 'status', label: 'Status', width: '10%' },
-  { key: 'due', label: 'Due', width: '10%' },
+  { key: 'priority', label: 'Priority', width: '8%' },
+  { key: 'client_name', label: 'Client', width: '16%' },
+  { key: 'matter', label: 'Matter', width: '8%' },
+  { key: 'issue', label: 'Issue', width: '24%' },
+  { key: 'responsible_person', label: 'Responsible Person', width: '14%' },
+  { key: 'status', label: 'Status', width: '12%' },
+  { key: 'due', label: 'Due', width: '9%' },
+  // Empty for every actionable row, populated only when Show resolved/
+  // closed is on -- see _fetch_aml_exceptions_rows()'s include_resolved.
+  { key: 'resolved_on', label: 'Resolved On', width: '9%' },
 ];
 
 function _aeSetSearch(value) {
@@ -9269,15 +9333,18 @@ function _aeRenderTable() {
       <tbody>
         ${rows.map(r => {
           const priorityChip = AE_PRIORITY_CHIP[r.priority] || 'chip-gray';
+          const isResolved = r.status === 'Resolved' || r.status === 'Closed — No Further Action';
+          const statusTitle = r.closed_reason ? ` title="${escHtml(r.closed_reason)}"` : '';
           return `
-            <tr style="border-bottom:1px solid var(--border)">
+            <tr style="border-bottom:1px solid var(--border);${isResolved ? 'color:var(--ink3)' : ''}">
               <td style="padding:6px 8px"><span class="chip ${priorityChip}">${escHtml(r.priority)}</span></td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.client_name)}">${escHtml(r.client_name)}</td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.matter || '—')}</td>
               <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(r.issue)}</td>
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.responsible_person)}</td>
-              <td style="padding:6px 8px">${escHtml(r.status)}</td>
+              <td style="padding:6px 8px"${statusTitle}>${escHtml(r.status)}${r.closed_reason ? ' 🛈' : ''}</td>
               <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.due || '—')}</td>
+              <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.resolved_on || '—')}</td>
             </tr>
           `;
         }).join('')}
@@ -9318,9 +9385,13 @@ async function loadAmlExceptions() {
   document.getElementById('ae-results').style.display = 'block';
   const el = document.getElementById('aml-exceptions-list');
   const statusEl = document.getElementById('ae-status');
+  // Show resolved/closed (2026-09-16) -- summary intentionally always
+  // reflects actionable-only counts regardless of this toggle, same
+  // "outstanding work" framing the summary tiles have always had.
+  const includeResolved = document.getElementById('ae-show-resolved')?.checked || false;
   try {
     const [rowsRes, summaryRes] = await Promise.all([
-      fetch(`${API}/api/reports/aml-exceptions`),
+      fetch(`${API}/api/reports/aml-exceptions?include_resolved=${includeResolved}`),
       fetch(`${API}/api/reports/aml-exceptions-summary`),
     ]);
     if (!rowsRes.ok) { el.innerHTML = '<em>Could not load AML exceptions.</em>'; return; }
