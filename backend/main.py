@@ -5150,6 +5150,62 @@ async def admin_reset_chromadb(request: Request):
 
     return {"status": "success", "deleted_collections": deleted}
 
+@app.get("/api/admin/verify-legal-update-ingestion")
+async def admin_verify_legal_update_ingestion(request: Request, search: str = ""):
+    """
+    TEMP (2026-09-16): read-only ingestion-consistency check for one or more
+    legal_updates rows -- same "don't trust status:complete alone" pattern
+    this project already ran for the Constitution/FIU-guidance ingestions.
+    Compares the row's own recorded chunk_count against the REAL COUNT(*)
+    from chunks, and against how many of those exact chunk ids Chroma's
+    legal collection actually holds vectors for -- three numbers that
+    should always agree, and don't necessarily just because status says
+    'complete'. `search` filters by source_name/reference/filename ILIKE so
+    a specific document can be found by a distinctive fragment without
+    knowing its UUID; omitted, returns the 20 most recent rows.
+    """
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        if search:
+            rows = await conn.fetch(
+                "SELECT * FROM legal_updates WHERE firm_id=$1 AND "
+                "(source_name ILIKE $2 OR reference ILIKE $2 OR filename ILIKE $2) "
+                "ORDER BY uploaded_at DESC",
+                FIRM_ID, f"%{search}%"
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM legal_updates WHERE firm_id=$1 ORDER BY uploaded_at DESC LIMIT 20",
+                FIRM_ID
+            )
+        _, legal_col, _ = get_chroma_collections()
+        results = []
+        for row in rows:
+            r = dict(row)
+            chunk_rows = await conn.fetch(
+                "SELECT id FROM chunks WHERE firm_id=$1 AND document_id=$2 AND chunk_source='legal'",
+                FIRM_ID, r["id"]
+            )
+            chunk_ids = [c["id"] for c in chunk_rows]
+            chroma_got = legal_col.get(ids=chunk_ids) if chunk_ids else {"ids": []}
+            results.append({
+                "id": str(r["id"]),
+                "filename": r["filename"],
+                "source_name": r["source_name"],
+                "reference": r["reference"],
+                "source_type": r["source_type"],
+                "legal_source_type": r["legal_source_type"],
+                "authority_strength": r["authority_strength"],
+                "status": r["status"],
+                "word_count": r["word_count"],
+                "recorded_chunk_count": r["chunk_count"],
+                "actual_postgres_chunk_count": len(chunk_ids),
+                "actual_chroma_vector_count": len(chroma_got["ids"]),
+                "uploaded_at": r["uploaded_at"].isoformat() if r["uploaded_at"] else None,
+                "validity_flag": r.get("validity_flag"),
+            })
+    return results
+
 @app.post("/api/admin/reindex-from-db")
 async def reindex_from_db(request: Request):
     """
