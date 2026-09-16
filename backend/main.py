@@ -5150,6 +5150,40 @@ async def admin_reset_chromadb(request: Request):
 
     return {"status": "success", "deleted_collections": deleted}
 
+@app.get("/api/admin/dump-legal-update-text")
+async def admin_dump_legal_update_text(request: Request, document_id: str):
+    """
+    TEMP (2026-09-16): reassembles one legal_updates document's full text
+    from its chunks, ordered by chunk_index, for a systematic read-through
+    -- e.g. comparing the RBZ AML/CFT/CPF Guideline against the existing
+    FIU Guidance for Legal Professionals concept-by-concept. Read-only,
+    admin-token gated. To be removed once this comparison is complete.
+    """
+    require_admin_token(request)
+    try:
+        doc_id = _uuid_mod.UUID(document_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT filename, source_name, reference FROM legal_updates WHERE firm_id=$1 AND id=$2",
+            FIRM_ID, doc_id
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="legal_updates row not found")
+        chunk_rows = await conn.fetch(
+            "SELECT chunk_index, text FROM chunks WHERE firm_id=$1 AND document_id=$2 AND chunk_source='legal' "
+            "ORDER BY chunk_index ASC",
+            FIRM_ID, doc_id
+        )
+    return {
+        "filename": row["filename"],
+        "source_name": row["source_name"],
+        "reference": row["reference"],
+        "chunk_count": len(chunk_rows),
+        "text": "\n\n".join(c["text"] for c in chunk_rows),
+    }
+
 @app.post("/api/admin/reindex-from-db")
 async def reindex_from_db(request: Request):
     """
