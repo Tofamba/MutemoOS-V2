@@ -5206,6 +5206,38 @@ async def admin_verify_legal_update_ingestion(request: Request, search: str = ""
             })
     return results
 
+@app.get("/api/admin/grep-legal-chunks")
+async def admin_grep_legal_chunks(request: Request, text: str):
+    """
+    TEMP (2026-09-16): exact-text grep across every legal chunk's raw text
+    (chunk_source='legal'), case-insensitive ILIKE -- for confirming which
+    specific document_id a provision actually lives in, independent of
+    semantic retrieval ranking (which can surface a similar provision from
+    a DIFFERENT document ahead of the one actually being checked). Joins
+    back to legal_updates for source_name/reference so a hit is
+    immediately attributable, not just a bare document_id.
+    """
+    require_admin_token(request)
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT c.document_id, c.chunk_index, c.text, l.source_name, l.reference, l.filename "
+            "FROM chunks c JOIN legal_updates l ON l.id = c.document_id "
+            "WHERE c.firm_id=$1 AND c.chunk_source='legal' AND c.text ILIKE $2 "
+            "ORDER BY l.uploaded_at DESC, c.chunk_index ASC",
+            FIRM_ID, f"%{text}%"
+        )
+    return [
+        {
+            "document_id": str(r["document_id"]),
+            "chunk_index": r["chunk_index"],
+            "source_name": r["source_name"],
+            "reference": r["reference"],
+            "filename": r["filename"],
+            "text": r["text"],
+        }
+        for r in rows
+    ]
+
 @app.post("/api/admin/reindex-from-db")
 async def reindex_from_db(request: Request):
     """
