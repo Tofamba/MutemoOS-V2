@@ -240,6 +240,10 @@ async def run_migrations():
         ALTER TABLE matters DROP CONSTRAINT IF EXISTS matters_matter_risk_check;
         ALTER TABLE matters ADD CONSTRAINT matters_matter_risk_check
             CHECK (matter_risk IN ('Low', 'Medium', 'High', 'NotAssessed'));
+        -- Risk rating rationale (2026-09-17) -- matter-level sibling of
+        -- client_compliance.risk_rating_reason above; same free-text, no
+        -- enum, aml_scope_reason pattern. Required going forward only.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS matter_risk_reason TEXT;
 
         -- Matter review safety net (2026-08-30): every matter gets a soft
         -- "please look at this" nudge date, distinct from next_deadline
@@ -664,6 +668,18 @@ async def run_migrations():
         ALTER TABLE client_compliance DROP CONSTRAINT IF EXISTS client_compliance_aml_scope_check;
         ALTER TABLE client_compliance ADD CONSTRAINT client_compliance_aml_scope_check
             CHECK (aml_scope IN ('NotAssessed', 'InScope', 'OutOfScope'));
+
+        -- Risk rating rationale (2026-09-17, adversarial audit -- a client
+        -- could be marked High/Medium/Low with zero documented reason why;
+        -- also independently required by the FIU Guidance for Legal
+        -- Professionals itself, s.37: "The rationale for any risk rating
+        -- assigned by the legal professionals must be documented and
+        -- supported by appropriate evidence within the risk assessment").
+        -- Free-text, no enum -- same aml_scope_reason pattern (matters,
+        -- line ~231). Required going forward only (see update_client_
+        -- compliance()'s transition check) -- existing pre-fix ratings
+        -- with no reason are NOT retroactively blocked.
+        ALTER TABLE client_compliance ADD COLUMN IF NOT EXISTS risk_rating_reason TEXT;
 
         -- PEP Review Due (2026-09-10, FIU "Guidance for Legal Professionals
         -- on the Risk Based Approach to Implementation of AML/CFT/CPF
@@ -3778,6 +3794,7 @@ class MatterUpdate(BaseModel):
     aml_scope: Optional[str] = None
     aml_scope_reason: Optional[str] = None
     matter_risk: Optional[str] = None
+    matter_risk_reason: Optional[str] = None
 
 class ClientCreate(BaseModel):
     full_name: str
@@ -3892,6 +3909,11 @@ class ClientComplianceUpdate(BaseModel):
     source_of_funds: Optional[str] = None
     enhanced_monitoring_required: Optional[bool] = None
     risk_rating: Optional[str] = None
+    # Free-text rationale, required when risk_rating is actually transitioning
+    # to a real level (see update_client_compliance()) -- same aml_scope_reason
+    # pattern, no enum. Not retroactively required for records set before
+    # 2026-09-17.
+    risk_rating_reason: Optional[str] = None
     # Manual, pending firm policy on a matter-type-to-Act-activity mapping --
     # see AML_SCOPE_VALUES above. Not auto-computed.
     aml_scope: Optional[str] = None
@@ -4540,6 +4562,7 @@ _DEFAULT_CLIENT_COMPLIANCE = {
     "source_of_funds": None,
     "enhanced_monitoring_required": False,
     "risk_rating": "NotAssessed",
+    "risk_rating_reason": None,
     "aml_scope": "NotAssessed",
     "relationship_ended_date": None,
     "retained_until": None,
@@ -4723,6 +4746,11 @@ def _row_to_compliance_event(row) -> dict:
         old_label = _display_label(details.get("old")) if details.get("old") else None
         new_label = _display_label(details["new"])
         result = f"{old_label} → {new_label}" if old_label else new_label
+        # RISK_RATING_CHANGED / MATTER_RISK_SET (2026-09-17) carry the
+        # rationale a lawyer gave for the change, same "— {reason}" suffix
+        # convention as the exceptions issue/reason case below.
+        if details.get("reason"):
+            result += f" — {details['reason']}"
     elif "owner_name" in details:
         result = details["owner_name"]
     elif "issue" in details:
@@ -6136,6 +6164,28 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         existing = await conn.fetchrow(
             "SELECT * FROM client_compliance WHERE client_id=$1 AND firm_id=$2", cid, FIRM_ID
         )
+        # Risk rating rationale (2026-09-17, closing the confirmed
+        # adversarial-audit gap -- also independently required by the FIU
+        # Guidance's own s.37) -- required only when risk_rating is
+        # actually TRANSITIONING to a real level (Low/Medium/High)
+        # different from what's currently stored, and the reason must be
+        # present in THIS same request. Checked via before/after
+        # comparison rather than "risk_rating present => reason required",
+        # because the compliance modal always resends risk_rating
+        # unchanged on every save (batch form) -- a naive check would make
+        # it impossible to ever save an unrelated field on an existing
+        # Low/Medium/High client set before this fix. Existing no-reason
+        # records are never retroactively blocked; only a genuine change
+        # triggers this.
+        if "risk_rating" in fields:
+            old_risk_before = (dict(existing) if existing else {}).get("risk_rating") or "NotAssessed"
+            new_risk_target = fields["risk_rating"]
+            if (new_risk_target != "NotAssessed" and new_risk_target != old_risk_before
+                    and not fields.get("risk_rating_reason")):
+                raise HTTPException(
+                    status_code=422,
+                    detail="risk_rating_reason is required when changing risk_rating to Low, Medium, or High."
+                )
         try:
             if existing:
                 set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
@@ -6190,7 +6240,10 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
         new_risk = row.get("risk_rating") or "NotAssessed"
         old_risk = old.get("risk_rating") or "NotAssessed"
         if new_risk != old_risk:
-            await _log_compliance_event(conn, user, "CLIENT", cid, "RISK_RATING_CHANGED", {"old": old_risk, "new": new_risk})
+            risk_change_details = {"old": old_risk, "new": new_risk}
+            if row.get("risk_rating_reason"):
+                risk_change_details["reason"] = row["risk_rating_reason"]
+            await _log_compliance_event(conn, user, "CLIENT", cid, "RISK_RATING_CHANGED", risk_change_details)
         last_cdd_review_date = await _fetch_last_cdd_review_date(conn, cid)
         # This PATCH can move any of identity/BO-assessment/PEP/senior
         # management approval/risk rating/conflict check -- i.e. every one
@@ -7125,6 +7178,7 @@ async def _fetch_client_aml_cdd_report(conn, cid, user: dict) -> dict:
             "pep_position": compliance.get("pep_position"),
             "pep_country": compliance.get("pep_country"),
             "risk_rating": compliance.get("risk_rating") or "NotAssessed",
+            "risk_rating_reason": compliance.get("risk_rating_reason"),
             "source_of_wealth": compliance.get("source_of_wealth"),
             "source_of_funds": compliance.get("source_of_funds"),
             "enhanced_monitoring_required": compliance.get("enhanced_monitoring_required", False),
@@ -7274,6 +7328,7 @@ def _client_cdd_report_sections(report: dict) -> list:
                           f"{pep['senior_management_approved_by_name']} — {pep['senior_management_approved_date']}"
                           if pep.get("senior_management_approved_by_name") else "Not yet approved"])
     pep_rows.append(["Client Risk Rating", _display_label(pep["risk_rating"])])
+    pep_rows.append(["Risk Rating Reason", pep.get("risk_rating_reason") or "Not recorded"])
     pep_rows.append(["Source of Wealth", pep.get("source_of_wealth") or "Not recorded"])
     pep_rows.append(["Source of Funds", pep.get("source_of_funds") or "Not recorded"])
     pep_rows.append(["Enhanced Monitoring", "Required" if pep.get("enhanced_monitoring_required") else "Not required"])
@@ -7291,11 +7346,12 @@ def _client_cdd_report_sections(report: dict) -> list:
 
     sections.append({
         "title": "7. Matters for this Client",
-        "headers": ["Matter", "Status", "AML Scope", "Reason for AML Scope", "Matter Risk"],
+        "headers": ["Matter", "Status", "AML Scope", "Reason for AML Scope", "Matter Risk", "Risk Reason"],
         "rows": [
             [f"{mt.get('matter_number') or mt.get('number') or '(unnumbered)'} — {mt['name']}",
              mt.get("status") or "—", _display_label(mt.get("aml_scope") or "NotAssessed"),
-             mt.get("aml_scope_reason") or "—", _display_label(mt.get("matter_risk") or "NotAssessed")]
+             mt.get("aml_scope_reason") or "—", _display_label(mt.get("matter_risk") or "NotAssessed"),
+             mt.get("matter_risk_reason") or "—"]
             for mt in report["matters"]
         ],
     })
@@ -7376,7 +7432,7 @@ def _client_cdd_report_csv(report: dict) -> str:
 _CDD_SECTION_LAYOUT = {
     "3. Beneficial Ownership":        {"col_pcts": (18, 14, 10, 40, 18), "wrap_cols": {3}},   # Basis
     "5. PEP / Risk Assessment":       {"col_pcts": (25, 75),             "wrap_cols": {1}},   # Status
-    "7. Matters for this Client":     {"col_pcts": (30, 12, 13, 32, 13), "wrap_cols": {0, 3}},  # Matter, Reason
+    "7. Matters for this Client":     {"col_pcts": (28, 11, 12, 27, 12, 10), "wrap_cols": {0, 3, 5}},  # Matter, Reason, Risk Reason
     "8. Supporting Document Index":   {"col_pcts": (30, 15, 15, 40),     "wrap_cols": {3}},   # File
     # 9. Exceptions / Follow-up (2026-09-07, Phase 2; was Section 10 until
     # Compliance History's removal renumbered it): Issue carries
@@ -7599,9 +7655,28 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
         before = None
         if aml_fields_touched:
             before = await conn.fetchrow(
-                "SELECT aml_scope, matter_risk FROM matters WHERE id=$1 AND firm_id=$2",
+                "SELECT aml_scope, matter_risk, matter_risk_reason FROM matters WHERE id=$1 AND firm_id=$2",
                 _uuid_mod.UUID(matter_id), FIRM_ID
             )
+
+        # Risk rating rationale (2026-09-17) -- matter-level sibling of the
+        # same transition check in update_client_compliance(): required
+        # only when matter_risk is actually changing to a real level
+        # different from what's currently stored, and the reason must be
+        # present in THIS same request. The matter panel is one-field-per-
+        # PATCH, so its risk-select control must bundle matter_risk and
+        # matter_risk_reason into a single PATCH for this to ever be
+        # satisfiable through that UI (see updateMatterRisk() in
+        # index.html).
+        if "matter_risk" in fields:
+            old_risk_before = (before["matter_risk"] if before else None) or "NotAssessed"
+            new_risk_target = fields["matter_risk"]
+            if (new_risk_target != "NotAssessed" and new_risk_target != old_risk_before
+                    and not fields.get("matter_risk_reason")):
+                raise HTTPException(
+                    status_code=422,
+                    detail="matter_risk_reason is required when changing matter_risk to Low, Medium, or High."
+                )
 
         set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields.keys()))
         values = list(fields.values())
@@ -7620,8 +7695,11 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             new_risk = row.get("matter_risk") or "NotAssessed"
             old_risk = before["matter_risk"] or "NotAssessed"
             if new_risk != old_risk:
+                risk_change_details = {"old": old_risk, "new": new_risk}
+                if row.get("matter_risk_reason"):
+                    risk_change_details["reason"] = row["matter_risk_reason"]
                 await _log_compliance_event(
-                    conn, user, "MATTER", row["id"], "MATTER_RISK_SET", {"old": old_risk, "new": new_risk}
+                    conn, user, "MATTER", row["id"], "MATTER_RISK_SET", risk_change_details
                 )
     if not row:
         raise HTTPException(status_code=404, detail="Matter not found")
@@ -9251,6 +9329,7 @@ async def _fetch_client_compliance_roster_rows(conn) -> list:
             "missing": status["missing"],
             "is_pep": compliance.get("is_pep"),
             "risk_rating": compliance.get("risk_rating") or "NotAssessed",
+            "risk_rating_reason": compliance.get("risk_rating_reason") or "",
             "bo_status": _compute_bo_status(client_dict, compliance, owners),
             "matter_count": matter_counts.get(c["id"], 0),
             "last_cdd_review_date": str(last_review) if last_review else None,
@@ -9302,12 +9381,13 @@ async def client_compliance_status_summary(request: Request):
 # Shared by the CSV and PDF exports and the frontend table so there's one
 # place this order/wording lives, not three that could drift apart.
 _CCS_EXPORT_HEADERS = ["Client No.", "Client", "Type", "AML Scope", "CDD Status",
-                       "Risk", "PEP", "BO Status", "Matters", "Last CDD Review", "Outstanding"]
+                       "Risk", "Risk Reason", "PEP", "BO Status", "Matters", "Last CDD Review", "Outstanding"]
 
 def _ccs_export_row(r: dict) -> list:
     return [
         r["client_number"] or "", r["client_name"] or "", r["client_type"] or "",
         _display_label(r["aml_scope"]), r["compliance_status"], _display_label(r["risk_rating"]),
+        r.get("risk_rating_reason") or "",
         "Yes" if r["is_pep"] is True else ("No" if r["is_pep"] is False else "Not assessed"),
         _display_label(r["bo_status"]), r["matter_count"], r.get("last_cdd_review_date") or "Never",
         "; ".join(r["missing"]),
@@ -9375,14 +9455,17 @@ def _build_client_compliance_status_pdf(rows: list) -> bytes:
         # "Never" column, same 8% as AML Scope -- Outstanding's own share
         # trimmed from 31 to 23 to make room without shrinking any other
         # column.
-        col_pcts = (7, 15, 7, 8, 9, 6, 5, 7, 5, 8, 23)
+        col_pcts = (7, 14, 6, 8, 9, 6, 8, 5, 6, 5, 8, 18)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_ccs_export_row(r) for r in rows]
         # Risk (col 5) shaded by risk_rating (2026-09-09) -- same
         # High/Medium/Low/Not Assessed color convention as the on-screen
-        # Register and every other Risk Rating display in the app.
+        # Register and every other Risk Rating display in the app. Risk
+        # Reason (col 6, 2026-09-17) is free text -- wrapped, not
+        # truncated, same convention as every other open-ended compliance
+        # text column in these reports.
         _mp_pdf_table(
-            pdf, _CCS_EXPORT_HEADERS, col_widths, table_rows,
+            pdf, _CCS_EXPORT_HEADERS, col_widths, table_rows, wrap_cols={6},
             cell_colors=lambda ri, ci: _pdf_color_for_risk_rating(rows[ri]["risk_rating"]) if ci == 5 else None,
         )
     return bytes(pdf.output())
@@ -9674,6 +9757,7 @@ async def _fetch_matter_aml_status_rows(conn) -> list:
             "aml_scope": m["aml_scope"] or "NotAssessed",
             "matter_risk": m["matter_risk"] or "NotAssessed",
             "aml_scope_reason": m["aml_scope_reason"] or "",
+            "matter_risk_reason": m["matter_risk_reason"] or "",
             "status": m["status"] or "Active",
         }
         for m in rows
@@ -9691,13 +9775,13 @@ async def matter_aml_status_report(request: Request):
     async with _db_pool.acquire() as conn:
         return await _fetch_matter_aml_status_rows(conn)
 
-_MATTER_AML_HEADERS = ["Client", "Matter", "AML Scope", "Matter Risk", "Reason", "Matter Status"]
+_MATTER_AML_HEADERS = ["Client", "Matter", "AML Scope", "Matter Risk", "Risk Reason", "Reason", "Matter Status"]
 
 def _matter_aml_export_row(r: dict) -> list:
     return [
         r["client_name"], f"{r['matter_number']} — {r['matter_name']}",
         _display_label(r["aml_scope"]), _display_label(r["matter_risk"]),
-        r["aml_scope_reason"], r["status"],
+        r["matter_risk_reason"], r["aml_scope_reason"], r["status"],
     ]
 
 @app.get("/api/reports/matter-aml-status-export")
@@ -9758,13 +9842,18 @@ def _build_matter_aml_status_pdf(rows: list) -> bytes:
         # more room than its original pre-fix 21% -- and since all three
         # now wrap, none needs to be huge to avoid truncation, just
         # enough to keep the average row to 2-3 lines rather than 5+.
-        col_pcts = (16, 24, 11, 11, 28, 10)
+        # Risk Reason (col 4, 2026-09-17) inserted between Matter Risk and
+        # the existing aml_scope_reason "Reason" column (now col 5) --
+        # Matter Risk's own index (3) is unchanged, so the cell_colors
+        # check below stays correct without modification. Width taken
+        # proportionally from Client/Matter/Reason's existing shares.
+        col_pcts = (15, 22, 10, 10, 15, 18, 10)
         col_widths = [pct * usable_width / 100 for pct in col_pcts]
         table_rows = [_matter_aml_export_row(r) for r in rows]
         # Matter Risk (col 3) shaded by matter_risk (2026-09-09) -- same
         # convention as Risk in the Register PDF above.
         _mp_pdf_table(
-            pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4},
+            pdf, _MATTER_AML_HEADERS, col_widths, table_rows, wrap_cols={0, 1, 4, 5},
             cell_colors=lambda ri, ci: _pdf_color_for_risk_rating(rows[ri]["matter_risk"]) if ci == 3 else None,
         )
     return bytes(pdf.output())

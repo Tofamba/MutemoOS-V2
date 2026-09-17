@@ -338,6 +338,7 @@ def _matter(client_id, **kwargs):
         "next_deadline": None, "next_deadline_note": None,
         "amount_billed": None, "amount_received": None,
         "aml_scope": "NotAssessed", "aml_scope_reason": None, "matter_risk": "NotAssessed",
+        "matter_risk_reason": None,
         "is_sentinel": False,
     }
     row.update(kwargs)
@@ -1155,7 +1156,7 @@ def test_pdf_export_wraps_long_matter_name_and_reason_for_aml_scope(monkeypatch)
 
     response = asyncio.run(client_aml_cdd_report_export_pdf(str(client_id), _fake_request()))
     tables = _pdf_tables_by_header(response)
-    matter_rows = tables[("Matter", "Status", "AML Scope", "Reason for AML Scope", "Matter Risk")][0]
+    matter_rows = tables[("Matter", "Status", "AML Scope", "Reason for AML Scope", "Matter Risk", "Risk Reason")][0]
 
     assert len(matter_rows) == 1
     assert matter_rows[0][0] == f"TC-001-01 - {long_name.replace(chr(8212), '-')}"

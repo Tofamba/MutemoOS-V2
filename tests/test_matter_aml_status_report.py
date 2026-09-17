@@ -76,6 +76,7 @@ def _matter(client_id=None, client_name=None, **overrides):
         "id": uuid.uuid4(), "firm_id": FIRM_ID, "client_id": client_id, "client_name": client_name,
         "name": "Acquisition of commercial property", "number": None, "matter_number": None,
         "status": "Active", "aml_scope": "NotAssessed", "aml_scope_reason": None, "matter_risk": "NotAssessed",
+        "matter_risk_reason": None,
         "is_sentinel": False, "created_at": datetime.now(timezone.utc),
     }
     row.update(overrides)
@@ -267,6 +268,7 @@ def test_csv_export_columns_and_content(monkeypatch):
     matter = _matter(
         client_name="Anchorflow Holdings", name="Acquisition of commercial property",
         matter_number="DU-002-01", aml_scope="InScope", matter_risk="High",
+        matter_risk_reason="High-value immovable property transaction.",
         aml_scope_reason="Transaction involves acquisition of immovable property.", status="Active",
     )
     monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
@@ -275,13 +277,14 @@ def test_csv_export_columns_and_content(monkeypatch):
     response = asyncio.run(matter_aml_status_report_export(_fake_request()))
     rows = _csv_rows(response)
 
-    assert rows[0] == ["Client", "Matter", "AML Scope", "Matter Risk", "Reason", "Matter Status"]
+    assert rows[0] == ["Client", "Matter", "AML Scope", "Matter Risk", "Risk Reason", "Reason", "Matter Status"]
     assert rows[1][0] == "Anchorflow Holdings"
     assert rows[1][1] == "DU-002-01 — Acquisition of commercial property"
     assert rows[1][2] == "In Scope"
     assert rows[1][3] == "High"
-    assert rows[1][4] == "Transaction involves acquisition of immovable property."
-    assert rows[1][5] == "Active"
+    assert rows[1][4] == "High-value immovable property transaction."
+    assert rows[1][5] == "Transaction involves acquisition of immovable property."
+    assert rows[1][6] == "Active"
 
 
 # ── PDF export ────────────────────────────────────────────────────────────
