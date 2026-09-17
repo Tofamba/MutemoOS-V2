@@ -10378,6 +10378,595 @@ async def my_portfolio_export_pdf(request: Request):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+# ═══ Five self-scoped practice reports (2026-09-18) ═══════════════════════
+# Same access tier and scoping contract as My Portfolio, directly above --
+# matter:read (every real role), no lawyer_id parameter anywhere, always
+# derived server-side from the authenticated session's own user id via
+# _self_scoped_user_id() below. A caller cannot supply another lawyer's id
+# to see their data; there is no parameter to supply it in. Every query
+# also filters by the module's FIRM_ID constant, the same tenant boundary
+# every other function in this file already uses (see
+# docs/MULTI_TENANCY_ARCHITECTURE_AUDIT_2026-09.md) -- not a new mechanism,
+# just applied consistently here too.
+#
+# Per the implementation brief this batch was built against: no new
+# tracking, no duplicated Matter Health/Matter Progress/My Portfolio/
+# deadline/calendar/review-status calculations -- each report below reuses
+# the real, existing function that already computes its data (cited in
+# each report's own comment) and only adds the glue to reshape/merge/
+# export it. None of these five log to report_history -- that table
+# stays exactly what it was (the RBZ Compliance Export's own regulatory
+# audit trail; see that section's own comment above for why), not a
+# general "every report generation" log.
+
+def _self_scoped_user_id(user: dict) -> Optional["_uuid_mod.UUID"]:
+    """None for the synthetic AUTH_ENABLED=False dev user (no real session
+    identity to scope by) -- every report below treats that the same way
+    _empty_my_portfolio() does: an honest empty result, not firm-wide data
+    under a self-scoped label and not a crash."""
+    return _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+
+# ── Report 1: My Active Matters Summary ─────────────────────────────────────
+# Reuses _compute_my_portfolio() completely unchanged -- this is that same
+# computation's Volume/Status + Practice Area sections, formalized into its
+# own downloadable CSV/PDF from the Reports tab (My Portfolio's own tab
+# only ever showed these on-screen, and its existing export bundles all
+# five of its sections together, including compliance/billing data that
+# doesn't belong in a matter-summary report).
+
+def _my_active_matters_summary_from_portfolio(portfolio: dict) -> dict:
+    return {
+        "lawyer_name": portfolio.get("lawyer_name"),
+        "matter_count": portfolio["volume"]["matter_count"],
+        "matters_by_status": portfolio["volume"]["matters_by_status"],
+        "practice_areas": portfolio["practice_areas"],
+    }
+
+@app.get("/api/reports/my-active-matters-summary")
+async def my_active_matters_summary_report(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    return _my_active_matters_summary_from_portfolio(portfolio)
+
+def _build_my_active_matters_summary_csv(summary: dict) -> str:
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["My Active Matters Summary", summary.get("lawyer_name") or ""])
+    writer.writerow(["Generated", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")])
+    writer.writerow([])
+    writer.writerow(["== Status Breakdown =="])
+    writer.writerow(["Total Matters", summary["matter_count"]])
+    writer.writerow([])
+    writer.writerow(["Status", "Matter Count"])
+    for status, count in summary["matters_by_status"].items():
+        writer.writerow([status, count])
+    writer.writerow([])
+    writer.writerow(["== Practice Area Split =="])
+    writer.writerow(["Practice Area", "Matter Count"])
+    for pa in summary["practice_areas"]:
+        writer.writerow([pa["practice_area"], pa["matter_count"]])
+    return buf.getvalue()
+
+def _build_my_active_matters_summary_pdf(summary: dict) -> bytes:
+    from fpdf import FPDF
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, _pdf_safe(f"My Active Matters Summary — {summary.get('lawyer_name') or ''}"),
+              new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, _pdf_safe(f"Status Breakdown — {summary['matter_count']} total matters"), new_x="LMARGIN", new_y="NEXT")
+    status_rows = [[s, str(c)] for s, c in summary["matters_by_status"].items()]
+    _mp_pdf_table(pdf, ["Status", "Matter Count"], [usable_width * 0.7, usable_width * 0.3], status_rows)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Practice Area Split", new_x="LMARGIN", new_y="NEXT")
+    if summary["practice_areas"]:
+        pa_rows = [[pa["practice_area"], str(pa["matter_count"])] for pa in summary["practice_areas"]]
+        _mp_pdf_table(pdf, ["Practice Area", "Matter Count"], [usable_width * 0.7, usable_width * 0.3], pa_rows)
+    else:
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.cell(0, 6, "No matters on file.", new_x="LMARGIN", new_y="NEXT")
+    return bytes(pdf.output())
+
+@app.get("/api/reports/my-active-matters-summary-export")
+async def my_active_matters_summary_export(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    summary = _my_active_matters_summary_from_portfolio(portfolio)
+    csv_content = _build_my_active_matters_summary_csv(summary)
+    filename = f"my_active_matters_summary_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(csv_content, filename)
+
+@app.get("/api/reports/my-active-matters-summary-export-pdf")
+async def my_active_matters_summary_export_pdf(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    summary = _my_active_matters_summary_from_portfolio(portfolio)
+    pdf_bytes = _build_my_active_matters_summary_pdf(summary)
+    filename = f"my_active_matters_summary_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+# ── Report 2: Matter Status & Progress Report ───────────────────────────────
+# One row per the lawyer's own matter, merging two already-existing
+# per-matter views by matter id -- no new health/stage/activity logic:
+#   - matter_health + last real activity: _fetch_matter_review_status_rows(),
+#     the exact function Matter Review Status and My Portfolio already call,
+#     lawyer-scoped via its own lawyer_id param.
+#   - current stage (Matter Progress Tracker): _row_to_matter()'s own
+#     stage_info computation (backend/matter_stages.py), the same function
+#     every matter-detail response already runs through.
+
+_MATTER_HEALTH_PDF_COLOR_KEYS = {
+    "red": ("red_bg", "red"), "amber": ("gold_bg", "gold"),
+    "blue": ("navy_bg", "navy"), "green": ("green_bg", "green"),
+    "grey": ("gray_bg", "gray"),
+}
+
+def _pdf_color_for_matter_health(status: Optional[str]) -> tuple:
+    """Same red/amber/blue/green/grey palette matterHealthChipHtml() uses
+    on-screen (frontend/index.html) -- reuses _MP_PDF_COLORS's existing
+    tints, no new palette."""
+    bg_key, fg_key = _MATTER_HEALTH_PDF_COLOR_KEYS.get(status, _MATTER_HEALTH_PDF_COLOR_KEYS["grey"])
+    return _MP_PDF_COLORS[bg_key], _MP_PDF_COLORS[fg_key]
+
+async def _fetch_matter_status_progress_rows(conn, user_id) -> list:
+    review_rows = await _fetch_matter_review_status_rows(conn, lawyer_id=user_id, client_id=None, status=None)
+    matter_rows = await conn.fetch(
+        "SELECT * FROM matters WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel",
+        FIRM_ID, user_id
+    )
+    stage_by_matter = {}
+    for m in matter_rows:
+        full = _row_to_matter(dict(m))
+        stage_by_matter[full["id"]] = full.get("stage_info")
+
+    result = []
+    for r in review_rows:
+        row = dict(r)
+        row["stage_info"] = stage_by_matter.get(row["matter_id"])
+        result.append(row)
+    return result
+
+@app.get("/api/reports/matter-status-progress")
+async def matter_status_progress_report(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    user_id = _self_scoped_user_id(user)
+    if user_id is None:
+        return []
+    async with _db_pool.acquire() as conn:
+        return await _fetch_matter_status_progress_rows(conn, user_id)
+
+_MSP_HEADERS = ["Matter", "Status", "Health", "Health Reasons", "Current Stage", "Last Activity"]
+
+def _matter_status_progress_export_row(r: dict) -> list:
+    health = r.get("matter_health") or {}
+    stage_info = r.get("stage_info")
+    current_stage = stage_info["current_stage"] if stage_info and stage_info.get("current_stage") else "—"
+    return [
+        f"{r.get('matter_number') or '(unnumbered)'} — {r.get('matter_name') or ''}",
+        r.get("status") or "",
+        health.get("status").capitalize() if health.get("status") else "—",
+        "; ".join(health.get("reasons") or []),
+        current_stage,
+        r.get("last_activity_text") or "",
+    ]
+
+async def _matter_status_progress_rows_or_empty(request: Request) -> list:
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    user_id = _self_scoped_user_id(user)
+    if user_id is None:
+        return []
+    async with _db_pool.acquire() as conn:
+        return await _fetch_matter_status_progress_rows(conn, user_id)
+
+@app.get("/api/reports/matter-status-progress-export")
+async def matter_status_progress_report_export(request: Request):
+    rows = await _matter_status_progress_rows_or_empty(request)
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_MSP_HEADERS)
+    for r in rows:
+        writer.writerow(_matter_status_progress_export_row(r))
+    filename = f"matter_status_progress_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(buf.getvalue(), filename)
+
+@app.get("/api/reports/matter-status-progress-export-pdf")
+async def matter_status_progress_report_export_pdf(request: Request):
+    rows = await _matter_status_progress_rows_or_empty(request)
+    from fpdf import FPDF
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Matter Status & Progress Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    if not rows:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, "No matters on file.", new_x="LMARGIN", new_y="NEXT")
+    else:
+        usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+        col_pcts = (22, 10, 12, 26, 15, 15)
+        col_widths = [pct * usable_width / 100 for pct in col_pcts]
+        table_rows = [_matter_status_progress_export_row(r) for r in rows]
+        _mp_pdf_table(
+            pdf, _MSP_HEADERS, col_widths, table_rows, wrap_cols={0, 3, 5},
+            cell_colors=lambda ri, ci: _pdf_color_for_matter_health((rows[ri].get("matter_health") or {}).get("status")) if ci == 2 else None,
+        )
+    pdf_bytes = bytes(pdf.output())
+    filename = f"matter_status_progress_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+# ── Report 3: Client Activity Report ────────────────────────────────────────
+# One row per real recorded activity event, across every client the lawyer
+# created (clients.created_by=user_id -- the same ownership boundary "My
+# Clients" already uses; My Portfolio's own docstring above cites this same
+# field). Merges two sources into the exact {"date","event","user","result"}
+# shape _fetch_compliance_history() already uses, so they compose into one
+# timeline with no special-casing:
+#   - _fetch_compliance_history() itself, reused completely unchanged, for
+#     every BO/PEP/conflict-check/risk-rating/exception/CDD-review event.
+#   - _fetch_client_general_activity() (new, below) for progress_notes and
+#     documents -- already-recorded data, not new tracking, just not
+#     previously surfaced outside a single matter's own panel.
+#
+# CONFIRMED GAP (audited before building this, not discovered after):
+# matters.status has no history table, only a current value, so "status
+# changed from X to Y" cannot appear here -- there is nothing to read.
+# Search Vault and Draft Document usage are excluded for the same reason
+# found in this cycle's own investigation: only plain Search Vault queries
+# are logged at all (audit_logs, action='SEARCH', target_type='QUERY',
+# target_id=NULL), and that NULL target_id means a search can never be
+# attributed to a specific client even for the one path that IS logged.
+# Building either would be new tracking, explicitly out of scope here.
+
+async def _fetch_client_general_activity(conn, matter_ids: list) -> list:
+    if not matter_ids:
+        return []
+    notes = await conn.fetch(
+        "SELECT created_at, text, author FROM progress_notes WHERE matter_id = ANY($1) ORDER BY created_at ASC",
+        matter_ids
+    )
+    docs = await conn.fetch(
+        "SELECT uploaded_at, filename, uploaded_by FROM documents WHERE matter_id = ANY($1) ORDER BY uploaded_at ASC",
+        matter_ids
+    )
+    uploader_ids = [d["uploaded_by"] for d in docs if d.get("uploaded_by")]
+    names_by_user = {}
+    if uploader_ids:
+        user_rows = await conn.fetch("SELECT id, display_name FROM users WHERE id = ANY($1)", uploader_ids)
+        names_by_user = {u["id"]: u["display_name"] for u in user_rows}
+
+    events = []
+    for n in notes:
+        events.append({
+            "date": n["created_at"].date().isoformat() if n["created_at"] else None,
+            "event": "Progress note added",
+            "user": n["author"] or "Unknown",
+            "result": _truncate_preview(n["text"]),
+        })
+    for d in docs:
+        events.append({
+            "date": d["uploaded_at"].date().isoformat() if d["uploaded_at"] else None,
+            "event": "Document uploaded",
+            "user": names_by_user.get(d["uploaded_by"], "Unknown"),
+            "result": d["filename"] or "",
+        })
+    return events
+
+async def _fetch_client_activity_rows(conn, user_id) -> list:
+    client_rows = await conn.fetch(
+        "SELECT id, full_name FROM clients WHERE firm_id=$1 AND created_by=$2 ORDER BY full_name ASC",
+        FIRM_ID, user_id
+    )
+    result = []
+    for c in client_rows:
+        matter_id_rows = await conn.fetch(
+            "SELECT id FROM matters WHERE client_id=$1 AND firm_id=$2 AND NOT is_sentinel",
+            c["id"], FIRM_ID
+        )
+        matter_ids = [m["id"] for m in matter_id_rows]
+        events = await _fetch_client_general_activity(conn, matter_ids)
+        events += await _fetch_compliance_history(conn, c["id"], matter_ids)
+        for e in events:
+            result.append({"client_id": str(c["id"]), "client_name": c["full_name"], **e})
+    result.sort(key=lambda r: r["date"] or "", reverse=True)
+    return result
+
+@app.get("/api/reports/client-activity")
+async def client_activity_report(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    user_id = _self_scoped_user_id(user)
+    if user_id is None:
+        return []
+    async with _db_pool.acquire() as conn:
+        return await _fetch_client_activity_rows(conn, user_id)
+
+_CLIENT_ACTIVITY_HEADERS = ["Date", "Client", "Event", "User", "Details"]
+
+def _client_activity_export_row(r: dict) -> list:
+    return [r.get("date") or "", r.get("client_name") or "", r.get("event") or "",
+            r.get("user") or "", r.get("result") or ""]
+
+async def _client_activity_rows_or_empty(request: Request) -> list:
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    user_id = _self_scoped_user_id(user)
+    if user_id is None:
+        return []
+    async with _db_pool.acquire() as conn:
+        return await _fetch_client_activity_rows(conn, user_id)
+
+@app.get("/api/reports/client-activity-export")
+async def client_activity_report_export(request: Request):
+    rows = await _client_activity_rows_or_empty(request)
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_CLIENT_ACTIVITY_HEADERS)
+    for r in rows:
+        writer.writerow(_client_activity_export_row(r))
+    filename = f"client_activity_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(buf.getvalue(), filename)
+
+@app.get("/api/reports/client-activity-export-pdf")
+async def client_activity_report_export_pdf(request: Request):
+    rows = await _client_activity_rows_or_empty(request)
+    from fpdf import FPDF
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Client Activity Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    if not rows:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, "No recorded activity for your clients yet.", new_x="LMARGIN", new_y="NEXT")
+    else:
+        usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+        col_pcts = (10, 18, 20, 15, 37)
+        col_widths = [pct * usable_width / 100 for pct in col_pcts]
+        table_rows = [_client_activity_export_row(r) for r in rows]
+        _mp_pdf_table(pdf, _CLIENT_ACTIVITY_HEADERS, col_widths, table_rows, wrap_cols={4})
+    pdf_bytes = bytes(pdf.output())
+    filename = f"client_activity_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+# ── Report 4: Deadline & Calendar Report ────────────────────────────────────
+# Two already-existing sources merged into one soonest-first list, no new
+# deadline/calendar concept introduced:
+#   - matters.next_deadline/next_deadline_note -- the same single
+#     "critical date" field matter_health.py and the reminder digest
+#     already key off, scoped the same created_by=user_id way every other
+#     self-scoped view in this section is.
+#   - calendar_events, via _calendar_visibility_clause(), the exact same
+#     visibility rule GET /api/calendar already uses -- not a second,
+#     looser calendar query. Only upcoming (date >= today) calendar events
+#     are included -- a past calendar entry (a hearing that already
+#     happened) isn't "upcoming or overdue" the way a missed deadline is.
+
+async def _fetch_deadline_calendar_rows(conn, user, user_id) -> list:
+    today_iso = date.today().isoformat()
+    deadline_rows = await conn.fetch(
+        "SELECT name, matter_number, number, client_name, next_deadline, next_deadline_note "
+        "FROM matters WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel AND next_deadline IS NOT NULL "
+        "ORDER BY next_deadline ASC",
+        FIRM_ID, user_id
+    )
+    where, params = _calendar_visibility_clause(user)
+    event_rows = await conn.fetch(
+        f"SELECT * FROM calendar_events WHERE {where} AND date >= CURRENT_DATE "
+        f"ORDER BY date ASC, time ASC NULLS LAST",
+        *params
+    )
+
+    rows = []
+    for m in deadline_rows:
+        d_iso = m["next_deadline"].isoformat()
+        rows.append({
+            "date": d_iso, "type": "Matter Deadline",
+            "title": m["next_deadline_note"] or "Deadline",
+            "matter_name": f"{m['matter_number'] or m['number'] or '(unnumbered)'} — {m['name']}",
+            "client_name": m["client_name"] or "",
+            "overdue": d_iso < today_iso,
+        })
+    for e in event_rows:
+        ev = _row_to_event(dict(e))
+        rows.append({
+            "date": ev["date"], "type": ev["event_type"].capitalize() if ev.get("event_type") else "Calendar Event",
+            "title": ev["title"], "matter_name": ev.get("matter_name") or "",
+            "client_name": "", "overdue": False,
+        })
+    rows.sort(key=lambda r: r["date"] or "")
+    return rows
+
+async def _deadline_calendar_rows_or_empty(request: Request) -> list:
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    user_id = _self_scoped_user_id(user)
+    if user_id is None:
+        return []
+    async with _db_pool.acquire() as conn:
+        return await _fetch_deadline_calendar_rows(conn, user, user_id)
+
+@app.get("/api/reports/deadline-calendar")
+async def deadline_calendar_report(request: Request):
+    return await _deadline_calendar_rows_or_empty(request)
+
+_DEADLINE_CALENDAR_HEADERS = ["Date", "Type", "Title", "Matter", "Client", "Overdue"]
+
+def _deadline_calendar_export_row(r: dict) -> list:
+    return [r.get("date") or "", r.get("type") or "", r.get("title") or "",
+            r.get("matter_name") or "", r.get("client_name") or "",
+            "Yes" if r.get("overdue") else "No"]
+
+@app.get("/api/reports/deadline-calendar-export")
+async def deadline_calendar_report_export(request: Request):
+    rows = await _deadline_calendar_rows_or_empty(request)
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_DEADLINE_CALENDAR_HEADERS)
+    for r in rows:
+        writer.writerow(_deadline_calendar_export_row(r))
+    filename = f"deadline_calendar_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(buf.getvalue(), filename)
+
+@app.get("/api/reports/deadline-calendar-export-pdf")
+async def deadline_calendar_report_export_pdf(request: Request):
+    rows = await _deadline_calendar_rows_or_empty(request)
+    from fpdf import FPDF
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, "Deadline & Calendar Report", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+    if not rows:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.cell(0, 6, "No upcoming deadlines or calendar events.", new_x="LMARGIN", new_y="NEXT")
+    else:
+        usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+        col_pcts = (10, 14, 26, 26, 16, 8)
+        col_widths = [pct * usable_width / 100 for pct in col_pcts]
+        table_rows = [_deadline_calendar_export_row(r) for r in rows]
+        _mp_pdf_table(
+            pdf, _DEADLINE_CALENDAR_HEADERS, col_widths, table_rows, wrap_cols={2, 3},
+            cell_colors=lambda ri, ci: ((_MP_PDF_COLORS["red_bg"], _MP_PDF_COLORS["red"]) if ci == 5 and rows[ri].get("overdue") else None),
+        )
+    pdf_bytes = bytes(pdf.output())
+    filename = f"deadline_calendar_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+# ── Report 5: Workload & Capacity Snapshot ──────────────────────────────────
+# Reuses _compute_my_portfolio() completely unchanged, same as Report 1 --
+# a different slice of the exact same computation: Volume/Status + Practice
+# Areas (matches Report 1) plus Review Status counts (overdue/due soon/
+# never reviewed), framed as workload/capacity rather than an active-matters
+# listing. Deliberately excludes compliance/billing -- neither is a
+# workload or capacity signal.
+
+def _workload_capacity_from_portfolio(portfolio: dict) -> dict:
+    return {
+        "lawyer_name": portfolio.get("lawyer_name"),
+        "matter_count": portfolio["volume"]["matter_count"],
+        "matters_by_status": portfolio["volume"]["matters_by_status"],
+        "practice_areas": portfolio["practice_areas"],
+        "review_status": {
+            "overdue_count": portfolio["review_status"]["overdue_count"],
+            "due_soon_count": portfolio["review_status"]["due_soon_count"],
+            "never_reviewed_count": portfolio["review_status"]["never_reviewed_count"],
+        },
+    }
+
+@app.get("/api/reports/workload-capacity")
+async def workload_capacity_report(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    return _workload_capacity_from_portfolio(portfolio)
+
+def _build_workload_capacity_csv(snapshot: dict) -> str:
+    import csv, io as _io
+    buf = _io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Workload & Capacity Snapshot", snapshot.get("lawyer_name") or ""])
+    writer.writerow(["Generated", datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")])
+    writer.writerow([])
+    writer.writerow(["== Status Breakdown =="])
+    writer.writerow(["Total Matters", snapshot["matter_count"]])
+    writer.writerow([])
+    writer.writerow(["Status", "Matter Count"])
+    for status, count in snapshot["matters_by_status"].items():
+        writer.writerow([status, count])
+    writer.writerow([])
+    writer.writerow(["== Practice Area Split =="])
+    writer.writerow(["Practice Area", "Matter Count"])
+    for pa in snapshot["practice_areas"]:
+        writer.writerow([pa["practice_area"], pa["matter_count"]])
+    writer.writerow([])
+    writer.writerow(["== Review Status =="])
+    writer.writerow(["Overdue", snapshot["review_status"]["overdue_count"]])
+    writer.writerow(["Due Soon", snapshot["review_status"]["due_soon_count"]])
+    writer.writerow(["Never Reviewed", snapshot["review_status"]["never_reviewed_count"]])
+    return buf.getvalue()
+
+def _build_workload_capacity_pdf(snapshot: dict) -> bytes:
+    from fpdf import FPDF
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 8, _pdf_safe(FIRM_NAME), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, _pdf_safe(f"Workload & Capacity Snapshot — {snapshot.get('lawyer_name') or ''}"),
+              new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, _pdf_safe(f"Status Breakdown — {snapshot['matter_count']} total matters"), new_x="LMARGIN", new_y="NEXT")
+    status_rows = [[s, str(c)] for s, c in snapshot["matters_by_status"].items()]
+    _mp_pdf_table(pdf, ["Status", "Matter Count"], [usable_width * 0.7, usable_width * 0.3], status_rows)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Practice Area Split", new_x="LMARGIN", new_y="NEXT")
+    if snapshot["practice_areas"]:
+        pa_rows = [[pa["practice_area"], str(pa["matter_count"])] for pa in snapshot["practice_areas"]]
+        _mp_pdf_table(pdf, ["Practice Area", "Matter Count"], [usable_width * 0.7, usable_width * 0.3], pa_rows)
+    else:
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.cell(0, 6, "No matters on file.", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Review Status", new_x="LMARGIN", new_y="NEXT")
+    rs = snapshot["review_status"]
+    rs_rows = [["Overdue", str(rs["overdue_count"])], ["Due Soon", str(rs["due_soon_count"])],
+               ["Never Reviewed", str(rs["never_reviewed_count"])]]
+    _mp_pdf_table(pdf, ["Review Status", "Matter Count"], [usable_width * 0.7, usable_width * 0.3], rs_rows)
+    return bytes(pdf.output())
+
+@app.get("/api/reports/workload-capacity-export")
+async def workload_capacity_report_export(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    snapshot = _workload_capacity_from_portfolio(portfolio)
+    csv_content = _build_workload_capacity_csv(snapshot)
+    filename = f"workload_capacity_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return _csv_response(csv_content, filename)
+
+@app.get("/api/reports/workload-capacity-export-pdf")
+async def workload_capacity_report_export_pdf(request: Request):
+    portfolio = await _resolve_my_portfolio(request)
+    snapshot = _workload_capacity_from_portfolio(portfolio)
+    pdf_bytes = _build_workload_capacity_pdf(snapshot)
+    filename = f"workload_capacity_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(content=pdf_bytes, media_type="application/pdf",
+                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
 # ── Reports (SMS Usage by Firm) ─────────────────────────────────────────────
 # Operator-tier, not firm-tier: gated by require_admin_token(), the same
 # shared-secret pattern used for this session's temporary backfill/verify

@@ -2326,12 +2326,29 @@ select{cursor:pointer}
       <select id="reports-picker" onchange="_selectReport(this.value)"
         style="font-size:0.85rem;padding:6px 10px;margin-top:0.5rem;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:260px">
         <option value="">— Choose a report —</option>
-        <option value="rbz">⬇ RBZ Compliance Export</option>
-        <option value="practice-area">📂 Matters by Practice Area</option>
-        <option value="matter-review-status">🗂 Matter Review Status</option>
-        <option value="client-compliance-status">🛡 AML / Client Compliance Register</option>
-        <option value="aml-exceptions">⚠ AML Exceptions / Action Required</option>
-        <option value="matter-aml-status">🗂 Matter AML Status</option>
+        <!-- My Reports (2026-09-18) -- self-scoped, every lawyer, same
+             access tier as My Portfolio: each of these five always shows
+             the signed-in lawyer's own data only, never another lawyer's
+             (no lawyer_id parameter exists to ask for someone else's).
+             Grouped separately from the firm-wide reports below, which
+             are partner/admin-tier and show every lawyer's data at once. -->
+        <optgroup label="My Reports">
+          <option value="my-active-matters-summary">📁 My Active Matters Summary</option>
+          <option value="matter-status-progress">📈 Matter Status &amp; Progress Report</option>
+          <option value="client-activity">🗒 Client Activity Report</option>
+          <option value="deadline-calendar">📅 Deadline &amp; Calendar Report</option>
+          <option value="workload-capacity">⚖ Workload &amp; Capacity Snapshot</option>
+        </optgroup>
+        <optgroup label="Firm Reports">
+          <option value="practice-area">📂 Matters by Practice Area</option>
+          <option value="matter-review-status">🗂 Matter Review Status</option>
+        </optgroup>
+        <optgroup label="Compliance Reports">
+          <option value="rbz">⬇ RBZ Compliance Export</option>
+          <option value="client-compliance-status">🛡 AML / Client Compliance Register</option>
+          <option value="aml-exceptions">⚠ AML Exceptions / Action Required</option>
+          <option value="matter-aml-status">🗂 Matter AML Status</option>
+        </optgroup>
       </select>
     </div>
 
@@ -2492,6 +2509,109 @@ select{cursor:pointer}
         </div>
         <div id="ma-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
         <div id="matter-aml-status-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <!-- ═══ My Reports (2026-09-18) -- self-scoped, same access tier and
+         "nothing renders until Generate" convention as every report
+         above; each always shows the signed-in lawyer's own data only. ═══ -->
+
+    <div class="card" id="report-panel-my-active-matters-summary" style="display:none;margin-top:1rem">
+      <div class="card-title">📁 My Active Matters Summary</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Your own active matters — status breakdown and practice area split. Same data My Portfolio already shows on-screen, as its own downloadable report.
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadMyActiveMattersSummary()">▶ Generate</button>
+      </div>
+      <div id="mams-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMyActiveMattersSummaryCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMyActiveMattersSummaryPdf()">⬇ Download PDF</button>
+        </div>
+        <div id="mams-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="mams-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card" id="report-panel-matter-status-progress" style="display:none;margin-top:1rem">
+      <div class="card-title">📈 Matter Status &amp; Progress Report</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Every one of your own matters — computed health (same signal shown on the matter panel and Matter Review Status), current stage, and last real activity.
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadMatterStatusProgress()">▶ Generate</button>
+      </div>
+      <div id="msp-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="msp-search" placeholder="🔍 Search matter…" oninput="_mspSetSearch(this.value)"
+            style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterStatusProgressCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadMatterStatusProgressPdf()">⬇ Download PDF</button>
+        </div>
+        <div id="msp-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="msp-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card" id="report-panel-client-activity" style="display:none;margin-top:1rem">
+      <div class="card-title">🗒 Client Activity Report</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Recent activity for clients you created — progress notes, document uploads, and compliance events (BO/PEP/conflict-check/risk-rating/exceptions/CDD reviews), most recent first.
+      </p>
+      <p style="font-size:0.8rem;color:var(--ink3);margin-top:0.4rem;font-style:italic;line-height:1.4">
+        Does not include a history of matter status changes (only the current status is stored, not a change log) or Search Vault/Draft Document usage (not attributable to a specific client in what's currently tracked).
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadClientActivity()">▶ Generate</button>
+      </div>
+      <div id="ca-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="ca-search" placeholder="🔍 Search client or event…" oninput="_caSetSearch(this.value)"
+            style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadClientActivityCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadClientActivityPdf()">⬇ Download PDF</button>
+        </div>
+        <div id="ca-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="ca-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card" id="report-panel-deadline-calendar" style="display:none;margin-top:1rem">
+      <div class="card-title">📅 Deadline &amp; Calendar Report</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Upcoming and overdue deadlines on your own matters, plus your upcoming calendar events, soonest first.
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadDeadlineCalendar()">▶ Generate</button>
+      </div>
+      <div id="dc-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="dc-search" placeholder="🔍 Search title, matter, or client…" oninput="_dcSetSearch(this.value)"
+            style="font-size:0.8rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper);min-width:220px"/>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadDeadlineCalendarCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadDeadlineCalendarPdf()">⬇ Download PDF</button>
+        </div>
+        <div id="dc-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="dc-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card" id="report-panel-workload-capacity" style="display:none;margin-top:1rem">
+      <div class="card-title">⚖ Workload &amp; Capacity Snapshot</div>
+      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">
+        Your own caseload at a glance — matter volume by status, practice area split, and review-status breakdown (overdue / due soon / never reviewed).
+      </p>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-primary" onclick="loadWorkloadCapacity()">▶ Generate</button>
+      </div>
+      <div id="wc-results" style="display:none;margin-top:0.75rem">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadWorkloadCapacityCsv()">⬇ Download CSV</button>
+          <button class="btn btn-outline" style="font-size:0.8rem" onclick="downloadWorkloadCapacityPdf()">⬇ Download PDF</button>
+        </div>
+        <div id="wc-status" style="margin-top:0.4rem;font-size:0.8rem"></div>
+        <div id="wc-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
       </div>
     </div>
 
@@ -4494,7 +4614,12 @@ function showTab(tab) {
 // it was Tofamba's own AT cost-attribution view, not a firm-facing report;
 // see backend/main.py's sms_usage_by_firm_report() for where it now lives
 // (operator-only, require_admin_token()).
-const REPORT_PANEL_KEYS = ['rbz', 'practice-area', 'matter-review-status', 'client-compliance-status', 'aml-exceptions', 'matter-aml-status'];
+const REPORT_PANEL_KEYS = [
+  'rbz', 'practice-area', 'matter-review-status', 'client-compliance-status', 'aml-exceptions', 'matter-aml-status',
+  // My Reports (2026-09-18) -- self-scoped, same "hidden until chosen,
+  // nothing renders until Generate" convention as every report above.
+  'my-active-matters-summary', 'matter-status-progress', 'client-activity', 'deadline-calendar', 'workload-capacity',
+];
 let _mrsFiltersLoaded = false;
 let _mrsHasGenerated = false;
 
@@ -9876,6 +10001,334 @@ async function downloadMatterAmlStatusPdf() {
     statusEl.textContent = `Error: ${e.message}`;
     statusEl.style.color = 'var(--red)';
   }
+}
+
+// ═══ My Reports (2026-09-18) -- self-scoped, every lawyer ══════════════════
+// Same "Generate on click, download via a Content-Disposition filename"
+// convention every report above already uses -- no new download pattern.
+// Each report's own backend endpoint derives the caller's identity from
+// their session; there is no id parameter anywhere in these fetch calls.
+
+// Shared tiny helper -- every CSV/PDF download button in this app repeats
+// this exact blob-to-anchor-click sequence; factored out once here rather
+// than adding a 6th/7th/8th/9th/10th copy of it for these five reports.
+async function _downloadReportFile(endpoint, fallbackFilename, statusEl) {
+  statusEl.textContent = 'Generating…';
+  statusEl.style.color = '';
+  try {
+    const res = await fetch(`${API}${endpoint}`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Failed to generate export');
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : fallbackFilename;
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    statusEl.textContent = `✓ ${fallbackFilename.endsWith('.pdf') ? 'PDF' : 'CSV'} downloaded.`;
+    statusEl.style.color = 'var(--green)';
+  } catch(e) {
+    statusEl.textContent = `Error: ${e.message}`;
+    statusEl.style.color = 'var(--red)';
+  }
+}
+
+// ── My Active Matters Summary ───────────────────────────────────────────────
+async function loadMyActiveMattersSummary() {
+  document.getElementById('mams-results').style.display = 'block';
+  const el = document.getElementById('mams-list');
+  el.innerHTML = 'Loading…';
+  try {
+    const res = await fetch(`${API}/api/reports/my-active-matters-summary`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load this report.</em>'; return; }
+    const summary = await res.json();
+    const statusRows = Object.entries(summary.matters_by_status || {});
+    const paRows = summary.practice_areas || [];
+    el.innerHTML = `
+      <div style="font-weight:600;margin-bottom:0.4rem">Status Breakdown — ${summary.matter_count} total matter${summary.matter_count === 1 ? '' : 's'}</div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:1rem">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--gold2)"><th style="padding:4px 8px 4px 0">Status</th><th style="padding:4px 8px">Matter Count</th></tr></thead>
+        <tbody>${statusRows.map(([s, c]) => `<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px 4px 0">${escHtml(s)}</td><td style="padding:4px 8px">${c}</td></tr>`).join('')}</tbody>
+      </table>
+      <div style="font-weight:600;margin-bottom:0.4rem">Practice Area Split</div>
+      ${paRows.length ? `
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="text-align:left;border-bottom:1px solid var(--gold2)"><th style="padding:4px 8px 4px 0">Practice Area</th><th style="padding:4px 8px">Matter Count</th></tr></thead>
+          <tbody>${paRows.map(pa => `<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px 4px 0">${escHtml(pa.practice_area)}</td><td style="padding:4px 8px">${pa.matter_count}</td></tr>`).join('')}</tbody>
+        </table>
+      ` : '<em style="color:var(--ink3)">No matters on file.</em>'}
+    `;
+  } catch(e) { el.innerHTML = '<em>Error loading this report.</em>'; }
+}
+function downloadMyActiveMattersSummaryCsv() {
+  _downloadReportFile('/api/reports/my-active-matters-summary-export', 'my_active_matters_summary.csv', document.getElementById('mams-status'));
+}
+function downloadMyActiveMattersSummaryPdf() {
+  _downloadReportFile('/api/reports/my-active-matters-summary-export-pdf', 'my_active_matters_summary.pdf', document.getElementById('mams-status'));
+}
+
+// ── Matter Status & Progress Report ─────────────────────────────────────────
+let _mspRows = [];
+let _mspSearch = '';
+const MSP_HEALTH_CHIP = { red: 'chip-red', amber: 'chip-gold', blue: 'chip-blue', green: 'chip-green', grey: 'chip-gray' };
+const MSP_HEALTH_LABEL = { red: '🔴 Red', amber: '🟡 Amber', blue: '🔵 Blue', green: '🟢 Green', grey: '⚪ Grey' };
+
+async function loadMatterStatusProgress() {
+  document.getElementById('msp-results').style.display = 'block';
+  const el = document.getElementById('msp-list');
+  const statusEl = document.getElementById('msp-status');
+  try {
+    const res = await fetch(`${API}/api/reports/matter-status-progress`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load this report.</em>'; return; }
+    _mspRows = await res.json();
+    if (!_mspRows.length) { el.innerHTML = '<em>No matters on file.</em>'; statusEl.textContent = ''; return; }
+    _mspRenderTable();
+  } catch(e) { el.innerHTML = '<em>Error loading this report.</em>'; }
+}
+function _mspSetSearch(value) {
+  _mspSearch = (value || '').trim().toLowerCase();
+  _mspRenderTable();
+}
+function _mspRenderTable() {
+  const el = document.getElementById('msp-list');
+  const statusEl = document.getElementById('msp-status');
+  let rows = _mspRows;
+  if (_mspSearch) {
+    rows = rows.filter(r => (r.matter_name || '').toLowerCase().includes(_mspSearch) || (r.matter_number || '').toLowerCase().includes(_mspSearch));
+  }
+  if (!rows.length) { el.innerHTML = _mspRows.length ? '<em>No matters match this search.</em>' : '<em>No matters on file.</em>'; statusEl.textContent = ''; return; }
+  el.innerHTML = `
+    <div style="overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup><col style="width:26%"><col style="width:10%"><col style="width:12%"><col style="width:16%"><col style="width:36%"></colgroup>
+      <thead>
+        <tr style="text-align:left">
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Matter</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Status</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Health</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Current Stage</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Last Activity</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => {
+          const health = r.matter_health || {};
+          const chip = MSP_HEALTH_CHIP[health.status] || 'chip-gray';
+          const label = MSP_HEALTH_LABEL[health.status] || health.status || '—';
+          const title = (health.reasons || []).join('; ');
+          const stage = r.stage_info && r.stage_info.current_stage ? r.stage_info.current_stage : '—';
+          return `
+            <tr style="border-bottom:1px solid var(--border)">
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_number || '')} — ${escHtml(r.matter_name || '')}</td>
+              <td style="padding:6px 8px">${escHtml(r.status || '')}</td>
+              <td style="padding:6px 8px"><span class="chip ${chip}" title="${escHtml(title)}">${label}</span></td>
+              <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(stage)}</td>
+              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(r.last_activity_text || '')}</td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+  statusEl.textContent = `${rows.length} matter${rows.length === 1 ? '' : 's'}${_mspSearch ? ` (filtered from ${_mspRows.length})` : ''}`;
+  statusEl.style.color = 'var(--ink3)';
+}
+function downloadMatterStatusProgressCsv() {
+  _downloadReportFile('/api/reports/matter-status-progress-export', 'matter_status_progress.csv', document.getElementById('msp-status'));
+}
+function downloadMatterStatusProgressPdf() {
+  _downloadReportFile('/api/reports/matter-status-progress-export-pdf', 'matter_status_progress.pdf', document.getElementById('msp-status'));
+}
+
+// ── Client Activity Report ──────────────────────────────────────────────────
+let _caRows = [];
+let _caSearch = '';
+
+async function loadClientActivity() {
+  document.getElementById('ca-results').style.display = 'block';
+  const el = document.getElementById('ca-list');
+  const statusEl = document.getElementById('ca-status');
+  try {
+    const res = await fetch(`${API}/api/reports/client-activity`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load this report.</em>'; return; }
+    _caRows = await res.json();
+    if (!_caRows.length) { el.innerHTML = '<em>No recorded activity for your clients yet.</em>'; statusEl.textContent = ''; return; }
+    _caRenderTable();
+  } catch(e) { el.innerHTML = '<em>Error loading this report.</em>'; }
+}
+function _caSetSearch(value) {
+  _caSearch = (value || '').trim().toLowerCase();
+  _caRenderTable();
+}
+function _caRenderTable() {
+  const el = document.getElementById('ca-list');
+  const statusEl = document.getElementById('ca-status');
+  let rows = _caRows;
+  if (_caSearch) {
+    rows = rows.filter(r => (r.client_name || '').toLowerCase().includes(_caSearch) || (r.event || '').toLowerCase().includes(_caSearch));
+  }
+  if (!rows.length) { el.innerHTML = _caRows.length ? '<em>No activity matches this search.</em>' : '<em>No recorded activity for your clients yet.</em>'; statusEl.textContent = ''; return; }
+  el.innerHTML = `
+    <div style="overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup><col style="width:10%"><col style="width:18%"><col style="width:18%"><col style="width:14%"><col style="width:40%"></colgroup>
+      <thead>
+        <tr style="text-align:left">
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Date</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Client</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Event</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">User</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.date || '')}</td>
+            <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_name || '')}</td>
+            <td style="padding:6px 8px">${escHtml(r.event || '')}</td>
+            <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.user || '')}</td>
+            <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(r.result || '')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+  statusEl.textContent = `${rows.length} event${rows.length === 1 ? '' : 's'}${_caSearch ? ` (filtered from ${_caRows.length})` : ''}`;
+  statusEl.style.color = 'var(--ink3)';
+}
+function downloadClientActivityCsv() {
+  _downloadReportFile('/api/reports/client-activity-export', 'client_activity.csv', document.getElementById('ca-status'));
+}
+function downloadClientActivityPdf() {
+  _downloadReportFile('/api/reports/client-activity-export-pdf', 'client_activity.pdf', document.getElementById('ca-status'));
+}
+
+// ── Deadline & Calendar Report ──────────────────────────────────────────────
+let _dcRows = [];
+let _dcSearch = '';
+
+async function loadDeadlineCalendar() {
+  document.getElementById('dc-results').style.display = 'block';
+  const el = document.getElementById('dc-list');
+  const statusEl = document.getElementById('dc-status');
+  try {
+    const res = await fetch(`${API}/api/reports/deadline-calendar`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load this report.</em>'; return; }
+    _dcRows = await res.json();
+    if (!_dcRows.length) { el.innerHTML = '<em>No upcoming deadlines or calendar events.</em>'; statusEl.textContent = ''; return; }
+    _dcRenderTable();
+  } catch(e) { el.innerHTML = '<em>Error loading this report.</em>'; }
+}
+function _dcSetSearch(value) {
+  _dcSearch = (value || '').trim().toLowerCase();
+  _dcRenderTable();
+}
+function _dcRenderTable() {
+  const el = document.getElementById('dc-list');
+  const statusEl = document.getElementById('dc-status');
+  let rows = _dcRows;
+  if (_dcSearch) {
+    rows = rows.filter(r =>
+      (r.title || '').toLowerCase().includes(_dcSearch) ||
+      (r.matter_name || '').toLowerCase().includes(_dcSearch) ||
+      (r.client_name || '').toLowerCase().includes(_dcSearch)
+    );
+  }
+  if (!rows.length) { el.innerHTML = _dcRows.length ? '<em>Nothing matches this search.</em>' : '<em>No upcoming deadlines or calendar events.</em>'; statusEl.textContent = ''; return; }
+  el.innerHTML = `
+    <div style="overflow:auto;max-height:60vh;border:1px solid var(--border);border-radius:8px">
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed">
+      <colgroup><col style="width:10%"><col style="width:14%"><col style="width:26%"><col style="width:26%"><col style="width:16%"><col style="width:8%"></colgroup>
+      <thead>
+        <tr style="text-align:left">
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Date</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Type</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Title</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Matter</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Client</th>
+          <th style="padding:6px 8px;position:sticky;top:0;background:var(--paper2);border-bottom:1px solid var(--gold2)">Overdue</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:6px 8px;white-space:nowrap">${escHtml(r.date || '')}</td>
+            <td style="padding:6px 8px">${escHtml(r.type || '')}</td>
+            <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${escHtml(r.title || '')}</td>
+            <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.matter_name || '')}</td>
+            <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(r.client_name || '')}</td>
+            <td style="padding:6px 8px">${r.overdue ? '<span class="chip chip-red">Overdue</span>' : ''}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+    </div>
+  `;
+  statusEl.textContent = `${rows.length} item${rows.length === 1 ? '' : 's'}${_dcSearch ? ` (filtered from ${_dcRows.length})` : ''}`;
+  statusEl.style.color = 'var(--ink3)';
+}
+function downloadDeadlineCalendarCsv() {
+  _downloadReportFile('/api/reports/deadline-calendar-export', 'deadline_calendar.csv', document.getElementById('dc-status'));
+}
+function downloadDeadlineCalendarPdf() {
+  _downloadReportFile('/api/reports/deadline-calendar-export-pdf', 'deadline_calendar.pdf', document.getElementById('dc-status'));
+}
+
+// ── Workload & Capacity Snapshot ────────────────────────────────────────────
+async function loadWorkloadCapacity() {
+  document.getElementById('wc-results').style.display = 'block';
+  const el = document.getElementById('wc-list');
+  el.innerHTML = 'Loading…';
+  try {
+    const res = await fetch(`${API}/api/reports/workload-capacity`);
+    if (!res.ok) { el.innerHTML = '<em>Could not load this report.</em>'; return; }
+    const snap = await res.json();
+    const statusRows = Object.entries(snap.matters_by_status || {});
+    const paRows = snap.practice_areas || [];
+    const rs = snap.review_status || {};
+    el.innerHTML = `
+      <div style="font-weight:600;margin-bottom:0.4rem">Status Breakdown — ${snap.matter_count} total matter${snap.matter_count === 1 ? '' : 's'}</div>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:1rem">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--gold2)"><th style="padding:4px 8px 4px 0">Status</th><th style="padding:4px 8px">Matter Count</th></tr></thead>
+        <tbody>${statusRows.map(([s, c]) => `<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px 4px 0">${escHtml(s)}</td><td style="padding:4px 8px">${c}</td></tr>`).join('')}</tbody>
+      </table>
+      <div style="font-weight:600;margin-bottom:0.4rem">Practice Area Split</div>
+      ${paRows.length ? `
+        <table style="width:100%;border-collapse:collapse;margin-bottom:1rem">
+          <thead><tr style="text-align:left;border-bottom:1px solid var(--gold2)"><th style="padding:4px 8px 4px 0">Practice Area</th><th style="padding:4px 8px">Matter Count</th></tr></thead>
+          <tbody>${paRows.map(pa => `<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px 4px 0">${escHtml(pa.practice_area)}</td><td style="padding:4px 8px">${pa.matter_count}</td></tr>`).join('')}</tbody>
+        </table>
+      ` : '<em style="color:var(--ink3)">No matters on file.</em>'}
+      <div style="font-weight:600;margin-bottom:0.4rem">Review Status</div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--gold2)"><th style="padding:4px 8px 4px 0">Review Status</th><th style="padding:4px 8px">Matter Count</th></tr></thead>
+        <tbody>
+          <tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px 4px 0">Overdue</td><td style="padding:4px 8px">${rs.overdue_count ?? 0}</td></tr>
+          <tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px 4px 0">Due Soon</td><td style="padding:4px 8px">${rs.due_soon_count ?? 0}</td></tr>
+          <tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 8px 4px 0">Never Reviewed</td><td style="padding:4px 8px">${rs.never_reviewed_count ?? 0}</td></tr>
+        </tbody>
+      </table>
+    `;
+  } catch(e) { el.innerHTML = '<em>Error loading this report.</em>'; }
+}
+function downloadWorkloadCapacityCsv() {
+  _downloadReportFile('/api/reports/workload-capacity-export', 'workload_capacity.csv', document.getElementById('wc-status'));
+}
+function downloadWorkloadCapacityPdf() {
+  _downloadReportFile('/api/reports/workload-capacity-export-pdf', 'workload_capacity.pdf', document.getElementById('wc-status'));
 }
 
 // ── Individual Client AML / CDD Report modal ────────────────────────────────
