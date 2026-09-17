@@ -2495,10 +2495,26 @@ select{cursor:pointer}
       </div>
     </div>
 
+    <!-- Report History (2026-09-18, collapsed by default) -- was
+         permanently rendered in full below the report picker, on the
+         reasoning that it's "a short audit log, not a rendered report
+         table" (see showTab()'s own comment above). On real firm data
+         that stopped being true: it's every RBZ Compliance Export
+         generation ever, uncapped and unpaginated, and grew to occupy
+         roughly half the page -- exactly the "dump everything by
+         default" problem this tab's own restructure (same comment)
+         was written to avoid for every OTHER report. Collapsed behind
+         a toggle now, same "nothing renders until you ask for it"
+         discipline, and lazy-fetched only on first expand (see
+         toggleReportHistory()) rather than eagerly on every tab open. -->
     <div class="card" style="margin-top:1rem">
-      <div class="card-title">🕘 Report History</div>
-      <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Every export generated, so the firm can show a record of regular reporting.</p>
-      <div id="report-history-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3)">Loading…</div>
+      <div class="card-title" style="cursor:pointer;user-select:none" onclick="toggleReportHistory()">
+        <span id="report-history-toggle-icon">▶</span> 🕘 Report History
+      </div>
+      <div id="report-history-body" style="display:none;margin-top:0.5rem">
+        <p style="font-size:0.85rem;color:var(--ink3)">Every export generated, so the firm can show a record of regular reporting.</p>
+        <div id="report-history-list" style="margin-top:0.75rem;font-size:0.85rem;color:var(--ink3);max-height:50vh;overflow:auto">Loading…</div>
+      </div>
     </div>
   </div>
 
@@ -4461,7 +4477,7 @@ function showTab(tab) {
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
   if (tab === 'zlr') renderZlrTab();
-  if (tab === 'reports') { loadReportHistory(); document.getElementById('reports-picker').value = ''; _selectReport(''); }
+  if (tab === 'reports') { document.getElementById('reports-picker').value = ''; _selectReport(''); _collapseReportHistory(); }
   if (tab === 'compliance-actions') renderComplianceActionsTab();
 }
 
@@ -8586,6 +8602,10 @@ async function generateComplianceExport(format) {
 
     statusEl.textContent = '✓ Export downloaded.';
     statusEl.style.color = 'var(--green)';
+    // Refresh even if the section is currently collapsed -- an explicit,
+    // one-off click, not the eager-on-tab-open load this was split out
+    // of, so it's cheap and means the just-generated entry is already
+    // there the moment a reviewer expands History.
     loadReportHistory();
   } catch(e) {
     statusEl.textContent = `Error: ${e.message}`;
@@ -8593,11 +8613,40 @@ async function generateComplianceExport(format) {
   }
 }
 
+// Report History (2026-09-18) -- collapsed by default (see the card's own
+// markup comment above for why); lazy-fetched on first expand and cached
+// (_reportHistoryLoaded) so re-toggling doesn't re-fetch. generateComplianceExport()
+// above still refreshes it directly after a new export, which also sets
+// the loaded flag via loadReportHistory() itself, not a second copy of it.
+let _reportHistoryLoaded = false;
+
+function toggleReportHistory() {
+  const body = document.getElementById('report-history-body');
+  const icon = document.getElementById('report-history-toggle-icon');
+  const isOpen = body.style.display !== 'none';
+  if (isOpen) {
+    body.style.display = 'none';
+    icon.textContent = '▶';
+    return;
+  }
+  body.style.display = 'block';
+  icon.textContent = '▼';
+  if (!_reportHistoryLoaded) loadReportHistory();
+}
+
+function _collapseReportHistory() {
+  const body = document.getElementById('report-history-body');
+  const icon = document.getElementById('report-history-toggle-icon');
+  if (body) body.style.display = 'none';
+  if (icon) icon.textContent = '▶';
+}
+
 async function loadReportHistory() {
   const el = document.getElementById('report-history-list');
   try {
     const res = await fetch(`${API}/api/reports/history`);
     if (!res.ok) { el.innerHTML = '<em>Could not load report history.</em>'; return; }
+    _reportHistoryLoaded = true;
     const history = await res.json();
     if (!history.length) { el.innerHTML = '<em>No reports generated yet.</em>'; return; }
     el.innerHTML = `
