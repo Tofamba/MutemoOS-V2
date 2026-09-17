@@ -15774,6 +15774,25 @@ def build_reminder_email_body(events: list, review_matters: Optional[list] = Non
     week_items     = [e for e in events if 1 < (e.get("days_until") or 0) <= 7]
     later_items    = [e for e in events if (e.get("days_until") or 0) > 7]
 
+    def _event_notes_and_attendees(e):
+        """Shared by fmt_text/fmt_html below -- every field the Add Event
+        form actually captures (backend/main.py's CalendarEvent model)
+        should appear here where it has a value; these two were the real
+        gap (title/type/time/court/matter context were already rendered).
+        Reuses the same data _row_to_event() already put on the dict --
+        no new tracking. Notes truncated the same way every other
+        open-ended free-text preview in this app is (_truncate_preview,
+        the Matter Review Status/Client Activity convention) so one long
+        note can't make the whole email unwieldy. Attendee names/emails
+        comma-joined, same "name or email" fallback build_invite_ics()
+        already uses. Both return None (not an empty string) when the
+        event genuinely has nothing to show -- callers omit the field
+        entirely rather than printing an empty "Notes:" line."""
+        notes = _truncate_preview(e["notes"]) if e.get("notes") else None
+        attendee_names = [a.get("name") or a.get("email") for a in (e.get("attendees") or []) if a.get("name") or a.get("email")]
+        attendees = ", ".join(attendee_names) if attendee_names else None
+        return notes, attendees
+
     def fmt_text(e):
         bits = [EVENT_TYPE_LABELS.get(e.get("event_type"), "Event") + ":", e.get("title", "")]
         if e.get("time"):  bits.append(f"at {e['time']}")
@@ -15781,10 +15800,15 @@ def build_reminder_email_body(events: list, review_matters: Optional[list] = Non
         body = " ".join(bits)
         prefix = _matter_identity_prefix(e)
         if prefix:
-            return f"{prefix}: {body}"
-        if e.get("matter_name"):  # no linked matter/client \u2014 old trailing display, unchanged
-            return f"{body} ({e['matter_name']})"
-        return body
+            line = f"{prefix}: {body}"
+        elif e.get("matter_name"):  # no linked matter/client \u2014 old trailing display, unchanged
+            line = f"{body} ({e['matter_name']})"
+        else:
+            line = body
+        notes, attendees = _event_notes_and_attendees(e)
+        if notes:      line += f" | Notes: {notes}"
+        if attendees:  line += f" | Attendees: {attendees}"
+        return line
 
     def fmt_review_text(m):
         prefix = _matter_identity_prefix(m) or m.get("name", "")
@@ -15831,11 +15855,18 @@ def build_reminder_email_body(events: list, review_matters: Optional[list] = Non
                 meta.append(_escape_html(e["matter_name"]))
             title_html = _escape_html(e.get("title", ""))
         meta_str = " \u00b7 ".join(meta)
+        notes, attendees = _event_notes_and_attendees(e)
+        extra_html = ""
+        if notes:
+            extra_html += f'<div style="font-size:12px;color:#4a4a44;margin-top:2px">{_escape_html(notes)}</div>'
+        if attendees:
+            extra_html += f'<div style="font-size:12px;color:#6b6b64;margin-top:2px">With: {_escape_html(attendees)}</div>'
         return (
             f'<div style="padding:8px 0;border-bottom:1px solid #e8e4da">'
             f'<span style="font-size:11px;font-weight:700;color:#b8922a;text-transform:uppercase;letter-spacing:0.5px">{type_chip}</span><br/>'
             f'<strong>{title_html}</strong><br/>'
             f'<span style="font-size:13px;color:#6b6b64">{meta_str}</span>'
+            f'{extra_html}'
             f'</div>'
         )
 

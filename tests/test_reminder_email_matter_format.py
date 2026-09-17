@@ -122,3 +122,93 @@ def test_email_event_with_nothing_at_all_still_renders():
     text, html = build_reminder_email_body([_event()])
     assert "Filing deadline tomorrow" in text
     assert "None" not in text and "None" not in html
+
+
+# ── notes / attendees (2026-09-18: every Add Event form field should ──────
+# appear in the reminder email where it has a value -- title/type/time/
+# court/matter context were already rendered (covered above); notes and
+# attendees were the real, confirmed gap. Reuses the exact event data
+# already stored (_row_to_event() already puts notes/attendees on the
+# dict) -- a template fix, no new tracking.
+
+def test_email_shows_notes_when_present():
+    text, html = build_reminder_email_body([_event(notes="Bring the signed lease and ID copies")])
+    assert "Notes: Bring the signed lease and ID copies" in text
+    assert "Bring the signed lease and ID copies" in html
+
+
+def test_email_omits_notes_field_entirely_when_absent():
+    """No value for this event -- no "Notes:" label at all, not an empty one."""
+    text, html = build_reminder_email_body([_event()])
+    assert "Notes:" not in text
+    assert "Notes" not in html
+
+
+def test_email_truncates_a_long_note_same_as_other_previews():
+    long_note = "A" * 250
+    text, html = build_reminder_email_body([_event(notes=long_note)])
+    # Same _truncate_preview() convention as Matter Review Status/Client
+    # Activity -- 160 chars then an ellipsis, not the full 250.
+    assert "A" * 250 not in text
+    assert "A" * 250 not in html
+    assert "…" in text
+    assert "…" in html
+
+
+def test_email_shows_attendees_by_name_when_present():
+    text, html = build_reminder_email_body([_event(
+        attendees=[{"email": "t.moyo@example.com", "name": "Tendai Moyo"},
+                   {"email": "r.rusike@example.com", "name": "Rufaro Rusike"}],
+    )])
+    assert "Attendees: Tendai Moyo, Rufaro Rusike" in text
+    assert "Tendai Moyo, Rufaro Rusike" in html
+
+
+def test_email_attendee_with_no_name_falls_back_to_email():
+    text, html = build_reminder_email_body([_event(
+        attendees=[{"email": "t.moyo@example.com", "name": None}],
+    )])
+    assert "Attendees: t.moyo@example.com" in text
+    assert "t.moyo@example.com" in html
+
+
+def test_email_omits_attendees_field_entirely_when_absent_or_empty():
+    text, html = build_reminder_email_body([_event(attendees=[])])
+    assert "Attendees:" not in text
+    assert "With:" not in html
+    text2, html2 = build_reminder_email_body([_event()])  # no attendees key at all (matter-deadline shape)
+    assert "Attendees:" not in text2
+    assert "With:" not in html2
+
+
+def test_email_shows_both_notes_and_attendees_together():
+    text, html = build_reminder_email_body([_event(
+        notes="Discuss settlement offer",
+        attendees=[{"email": "client@example.com", "name": "Client Rep"}],
+    )])
+    assert "Notes: Discuss settlement offer" in text
+    assert "Attendees: Client Rep" in text
+    assert "Discuss settlement offer" in html
+    assert "Client Rep" in html
+
+
+def test_email_type_matter_context_and_court_already_present_not_a_regression():
+    """Confirms, on real code (not the earlier screenshots), that Type,
+    Matter context, and Court/Location were already rendered before this
+    fix -- only Notes/Attendees were the real gap. A full-field event
+    shows everything at once."""
+    text, html = build_reminder_email_body([_event(
+        event_type="meeting", title="Client Meeting", court="Harare Magistrates Court",
+        matter_number="NGM-010-01", case_number="HC 55/26", resolved_client_name="Test Client",
+        notes="Discuss next steps", attendees=[{"email": "a@example.com", "name": "Attendee A"}],
+    )])
+    assert "Client Meeting" in text and "Deadline / Dies" not in text
+    assert "Harare Magistrates Court" in text
+    assert "NGM-010-01 (HC 55/26) — Test Client" in text
+    assert "Discuss next steps" in text
+    assert "Attendee A" in text
+    assert "Client Meeting" in html
+    assert "Harare Magistrates Court" in html
+    assert "NGM-010-01 (HC 55/26) — Test Client" in html
+    assert "Discuss next steps" in html
+    assert "Attendee A" in html
