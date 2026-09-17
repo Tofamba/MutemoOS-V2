@@ -5472,6 +5472,19 @@ async def admin_backfill_chunk_hashes(request: Request):
 # own summary count. Returns actual Postgres/Chroma content_hash values
 # side by side for a sample of real chunk_ids per source. Remove alongside
 # the backfill endpoint once no longer needed.
+@app.get("/api/admin/verify-lawyer-client-activity")
+async def admin_verify_lawyer_client_activity(request: Request, lawyer_id: str):
+    """TEMP -- read-only, X-Admin-Token gated, same convention as this
+    session's other temporary verify endpoints. Checks the Client
+    Activity Report's real output for a specific real lawyer_id on
+    staging (whose account this admin token holder can't log in as
+    directly) without needing their own session cookie. Added, used,
+    removed -- see the matching removal commit."""
+    require_admin_token(request)
+    uid = _uuid_mod.UUID(lawyer_id)
+    async with _db_pool.acquire() as conn:
+        return await _fetch_client_activity_rows(conn, uid)
+
 @app.get("/api/admin/verify-chunk-hashes")
 async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
     require_admin_token(request)
