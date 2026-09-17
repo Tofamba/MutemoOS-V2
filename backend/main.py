@@ -5472,6 +5472,34 @@ async def admin_backfill_chunk_hashes(request: Request):
 # own summary count. Returns actual Postgres/Chroma content_hash values
 # side by side for a sample of real chunk_ids per source. Remove alongside
 # the backfill endpoint once no longer needed.
+@app.get("/api/admin/preview-reminder-email")
+async def admin_preview_reminder_email(request: Request):
+    """TEMP -- read-only, X-Admin-Token gated, same convention as this
+    session's other temporary verify endpoints. Runs the exact real query
+    /api/reminders/test uses (real upcoming calendar_events, no synthetic
+    data) through build_reminder_email_body() and returns the built
+    text/html WITHOUT sending anything, so the real rendered output for
+    whatever real event(s) exist right now can be inspected directly.
+    Added, used, removed -- see the matching removal commit."""
+    require_admin_token(request)
+    today = datetime.utcnow().date()
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM calendar_events
+            WHERE firm_id=$1 AND date >= $2
+            ORDER BY date ASC, time ASC NULLS LAST
+            LIMIT 10
+        """, FIRM_ID, today)
+    events = [_row_to_event(r) for r in rows]
+    for e in events:
+        try:
+            event_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            e["days_until"] = (event_date - today).days
+        except Exception:
+            e["days_until"] = 99
+    text, html = build_reminder_email_body(events)
+    return {"event_count": len(events), "events": events, "text": text, "html": html}
+
 @app.get("/api/admin/verify-chunk-hashes")
 async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
     require_admin_token(request)
