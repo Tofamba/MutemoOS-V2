@@ -510,19 +510,20 @@ def test_csv_export_includes_full_outstanding_list_not_just_a_count(monkeypatch)
     rows = _csv_rows(response)
 
     assert rows[0] == ["Client No.", "Client", "Type", "AML Scope", "CDD Status",
-                        "Risk", "PEP", "BO Status", "Matters", "Last CDD Review", "Outstanding"]
+                        "Risk", "Risk Reason", "PEP", "BO Status", "Matters", "Last CDD Review", "Outstanding"]
     assert rows[1][0] == "EB-004"
     assert rows[1][1] == "Estate Late Bvumbe"
     assert rows[1][2] == "Estate"
     assert rows[1][3] == "Not Assessed"  # aml_scope, never set -> default, display-labeled
     assert rows[1][4] == "Action Required"
     assert rows[1][5] == "Not Assessed"  # risk_rating, display-labeled (was raw "NotAssessed")
-    assert rows[1][6] == "Not assessed"  # PEP column keeps its own existing wording
-    assert rows[1][7] == "Not Assessed"  # bo_status -- legal-person type, is_bo never set
-    assert rows[1][8] == "0"
-    assert rows[1][9] == "Never"  # last_cdd_review_date -- no cdd_reviews fixture supplied
-    assert "Identity not verified" in rows[1][10]
-    assert "Beneficial ownership not assessed" in rows[1][10]
+    assert rows[1][6] == ""  # risk_rating_reason, never set
+    assert rows[1][7] == "Not assessed"  # PEP column keeps its own existing wording
+    assert rows[1][8] == "Not Assessed"  # bo_status -- legal-person type, is_bo never set
+    assert rows[1][9] == "0"
+    assert rows[1][10] == "Never"  # last_cdd_review_date -- no cdd_reviews fixture supplied
+    assert "Identity not verified" in rows[1][11]
+    assert "Beneficial ownership not assessed" in rows[1][11]
 
 
 # ── Last CDD Review column (2026-09-04) ────────────────────────────────────
@@ -592,9 +593,9 @@ def test_csv_export_pep_column_reflects_true_false_and_unassessed(monkeypatch):
     # as _client_aml_cdd_report_csv's own per-section notes.
     rows = {r[1]: r for r in _csv_rows(response)[1:4]}
 
-    assert rows["PEP Client"][6] == "Yes"
-    assert rows["Clear Client"][6] == "No"
-    assert rows["Unassessed Client"][6] == "Not assessed"
+    assert rows["PEP Client"][7] == "Yes"
+    assert rows["Clear Client"][7] == "No"
+    assert rows["Unassessed Client"][7] == "Not assessed"
 
 
 # ── PDF export (2026-09-03 design review) ────────────────────────────────

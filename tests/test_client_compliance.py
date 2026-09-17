@@ -458,7 +458,7 @@ def test_compliance_status_cleared_once_pep_approved(monkeypatch):
             senior_management_approved_by=approver_id,
             senior_management_approved_date="2026-08-01",
             conflict_check_reviewed=True,
-            risk_rating="Medium",
+            risk_rating="Medium", risk_rating_reason="Established client, low-value routine matter.",
         ),
         None,
     ))
@@ -516,7 +516,7 @@ def test_pep_risk_rating_set_clears_normally(monkeypatch):
             senior_management_approved_by=approver_id,
             senior_management_approved_date="2026-08-01",
             conflict_check_reviewed=True,
-            risk_rating="High",
+            risk_rating="High", risk_rating_reason="Politically exposed, cross-border assets.",
         ),
         None,
     ))
@@ -926,11 +926,15 @@ def test_update_client_compliance_logs_risk_rating_changed_with_old_and_new(monk
     pool = FakePool(clients=[client])
     monkeypatch.setattr(m, "_db_pool", pool)
 
-    asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(risk_rating="High"), None))
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(risk_rating="High", risk_rating_reason="Cash-intensive business."),
+        None,
+    ))
 
     logs = [l for l in pool.conn.audit_logs if l["action"] == "RISK_RATING_CHANGED"]
     assert len(logs) == 1
-    assert logs[0]["details"] == {"old": "NotAssessed", "new": "High"}
+    assert logs[0]["details"] == {"old": "NotAssessed", "new": "High", "reason": "Cash-intensive business."}
 
 
 def test_update_client_compliance_unrelated_field_logs_nothing(monkeypatch):
@@ -952,3 +956,156 @@ def test_update_client_compliance_unrelated_field_logs_nothing(monkeypatch):
 
     actions = {l["action"] for l in pool.conn.audit_logs}
     assert actions <= {"COMPLIANCE_EXCEPTION_OPENED"}
+
+
+# ── Risk rating rationale (2026-09-17, closing the confirmed adversarial-
+# audit gap -- also independently required by the FIU Guidance's own s.37)
+# ────────────────────────────────────────────────────────────────────────
+# risk_rating_reason is required ONLY when risk_rating is genuinely
+# TRANSITIONING to a real level (Low/Medium/High) different from what's
+# currently stored -- checked via before/after comparison, not "risk_rating
+# present => reason required". This distinction matters here specifically
+# because the compliance modal is a batch-save form that always resends
+# risk_rating on every save (see submitComplianceForm() in index.html) --
+# a naive check would make it impossible to ever save an unrelated field
+# on an existing Low/Medium/High client set before this fix. See tests/
+# test_matter_aml_scope.py's own equivalent section for the matter-level
+# (matter_risk/matter_risk_reason) counterpart.
+
+def test_risk_rating_reason_required_when_setting_a_real_level(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(risk_rating="High"), None))
+    assert exc_info.value.status_code == 422
+    assert "risk_rating_reason" in exc_info.value.detail
+
+
+def test_risk_rating_reason_not_required_when_setting_not_assessed(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(risk_rating="High", risk_rating_reason="Cash-intensive business."),
+        None,
+    ))
+
+    result = asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(risk_rating="NotAssessed"), None
+    ))
+    assert result["risk_rating"] == "NotAssessed"
+
+
+def test_risk_rating_reason_required_when_changing_between_two_real_levels(monkeypatch):
+    """Low -> High (not just NotAssessed -> a real level) still counts as
+    a genuine transition and still requires a reason."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(risk_rating="Low", risk_rating_reason="Established, low-value client."),
+        None,
+    ))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(update_client_compliance(str(client["id"]), ClientComplianceUpdate(risk_rating="High"), None))
+    assert exc_info.value.status_code == 422
+
+
+def test_risk_rating_reason_accepted_on_a_genuine_transition(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    result = asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(risk_rating="High", risk_rating_reason="Cash-intensive business, cross-border transactions."),
+        None,
+    ))
+    assert result["risk_rating"] == "High"
+    assert result["risk_rating_reason"] == "Cash-intensive business, cross-border transactions."
+
+
+def test_existing_no_reason_risk_rating_not_retroactively_blocked(monkeypatch):
+    """A client already at High risk with no reason (set before this fix)
+    must NOT be blocked from an unrelated field save -- this is a
+    going-forward requirement, not a punitive backfill. Simulated here by
+    writing directly into the fake compliance row (bypassing validation),
+    same as a real pre-fix production record would look."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    pool.conn.compliance[client["id"]] = {
+        "id": uuid.uuid4(), "client_id": client["id"], "firm_id": m.FIRM_ID,
+        **m._DEFAULT_CLIENT_COMPLIANCE, "risk_rating": "High", "risk_rating_reason": None,
+        "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+    }
+
+    result = asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(source_of_wealth="Salary"), None
+    ))
+    assert result["source_of_wealth"] == "Salary"
+    assert result["risk_rating"] == "High"
+
+
+def test_resending_same_risk_rating_with_no_reason_does_not_error(monkeypatch):
+    """The compliance modal always resends risk_rating on every save (the
+    'always resend every field' batch pattern) -- re-sending the SAME
+    already-stored value (no real transition) must never require a
+    reason, even with none on file."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    pool.conn.compliance[client["id"]] = {
+        "id": uuid.uuid4(), "client_id": client["id"], "firm_id": m.FIRM_ID,
+        **m._DEFAULT_CLIENT_COMPLIANCE, "risk_rating": "High", "risk_rating_reason": None,
+        "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+    }
+
+    result = asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(risk_rating="High", source_of_wealth="Salary"), None
+    ))
+    assert result["risk_rating"] == "High"
+    assert result["source_of_wealth"] == "Salary"
+
+
+def test_risk_rating_changed_log_includes_reason_when_provided(monkeypatch):
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+
+    asyncio.run(update_client_compliance(
+        str(client["id"]),
+        ClientComplianceUpdate(risk_rating="Medium", risk_rating_reason="Foreign beneficial owner."),
+        None,
+    ))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "RISK_RATING_CHANGED"]
+    assert len(logs) == 1
+    assert logs[0]["details"]["reason"] == "Foreign beneficial owner."
+
+
+def test_risk_rating_changed_log_has_no_reason_key_when_none_on_file(monkeypatch):
+    """A client with no stored reason at all (e.g. a grandfathered
+    pre-fix record) transitioning down to NotAssessed -- 'reason' should
+    be entirely absent from the log details, not an empty string."""
+    client = _client_row(m.FIRM_ID, client_type="Individual")
+    pool = FakePool(clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    pool.conn.compliance[client["id"]] = {
+        "id": uuid.uuid4(), "client_id": client["id"], "firm_id": m.FIRM_ID,
+        **m._DEFAULT_CLIENT_COMPLIANCE, "risk_rating": "High", "risk_rating_reason": None,
+        "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc),
+    }
+
+    asyncio.run(update_client_compliance(
+        str(client["id"]), ClientComplianceUpdate(risk_rating="NotAssessed"), None
+    ))
+
+    logs = [l for l in pool.conn.audit_logs if l["action"] == "RISK_RATING_CHANGED"]
+    assert len(logs) == 1
+    assert "reason" not in logs[0]["details"]

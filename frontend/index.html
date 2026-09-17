@@ -1958,6 +1958,10 @@ select{cursor:pointer}
       </div>
     </div>
     <div class="form-group">
+      <label>Risk Rating Reason <span style="color:var(--ink3);font-weight:400">(required when changing to Low/Medium/High)</span></label>
+      <input type="text" id="cc-risk-rating-reason" placeholder="e.g. Cash-intensive business, cross-border transactions."/>
+    </div>
+    <div class="form-group">
       <label>AML Scope (manual, pending firm policy)</label>
       <select id="cc-aml-scope">
         <option value="NotAssessed">Not Assessed</option>
@@ -3627,6 +3631,11 @@ let _complianceAiActionQueue = [];
 // Compliance History (2026-09-16) -- read-only WHO/WHEN timeline, fetched
 // fresh every time the modal opens, same convention as the lists above.
 let _complianceHistory = [];
+// Risk rating rationale (2026-09-17) -- the risk_rating value as loaded
+// when the modal opened, so submitComplianceForm() can tell a genuine
+// change (reason required) from this batch form's own "always resend
+// every field" pattern resending an unchanged value (never required).
+let _complianceOriginalRiskRating = 'NotAssessed';
 
 async function openComplianceModal(clientId) {
   _complianceClientId = clientId;
@@ -3711,6 +3720,8 @@ async function openComplianceModal(clientId) {
     document.getElementById('cc-identity-status').value = _complianceData.identity_verification_status || 'Unverified';
     document.getElementById('cc-risk-rating').value = _complianceData.risk_rating || 'NotAssessed';
     _syncRiskChip(document.getElementById('cc-risk-rating'), document.getElementById('cc-risk-rating-chip'));
+    document.getElementById('cc-risk-rating-reason').value = _complianceData.risk_rating_reason || '';
+    _complianceOriginalRiskRating = _complianceData.risk_rating || 'NotAssessed';
     document.getElementById('cc-aml-scope').value = _complianceData.aml_scope || 'NotAssessed';
     document.getElementById('cc-is-pep').value = _complianceData.is_pep === true ? 'true' : _complianceData.is_pep === false ? 'false' : '';
     document.getElementById('cc-pep-basis').value = _complianceData.pep_basis || '';
@@ -4365,10 +4376,27 @@ async function submitComplianceForm() {
   // (Optional fields — None means "don't touch"), keeping the payload honest.
   Object.keys(clientPayload).forEach(k => clientPayload[k] === null && delete clientPayload[k]);
 
+  // Risk rating rationale (2026-09-17) -- client-side pre-check mirroring
+  // update_client_compliance()'s own transition validation, so a lawyer
+  // is prompted immediately rather than after a round trip. Compared
+  // against _complianceOriginalRiskRating (the value when the modal
+  // opened), not just "is risk_rating present" -- this batch form always
+  // resends risk_rating on every save, so a naive check would block
+  // saving an unrelated field on an existing Low/Medium/High client.
+  const newRiskRating = document.getElementById('cc-risk-rating').value;
+  const riskRatingReason = document.getElementById('cc-risk-rating-reason').value.trim();
+  if (newRiskRating !== 'NotAssessed' && newRiskRating !== _complianceOriginalRiskRating && !riskRatingReason) {
+    statusMsg.className = 'status show error';
+    statusMsg.textContent = 'Please enter a Risk Rating Reason — required when changing risk rating to Low, Medium, or High.';
+    document.getElementById('cc-risk-rating-reason').focus();
+    return;
+  }
+
   const isPepRaw = document.getElementById('cc-is-pep').value;
   const compliancePayload = {
     identity_verification_status: document.getElementById('cc-identity-status').value,
-    risk_rating: document.getElementById('cc-risk-rating').value,
+    risk_rating: newRiskRating,
+    risk_rating_reason: riskRatingReason || null,
     aml_scope: document.getElementById('cc-aml-scope').value,
     source_of_wealth: document.getElementById('cc-source-of-wealth').value.trim() || null,
     source_of_funds: document.getElementById('cc-source-of-funds').value.trim() || null,
@@ -5083,8 +5111,9 @@ async function renderMatterPanel(id) {
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:80px">MATTER RISK</label>
-            <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
-                    onchange="updateMatterField('${id}','matter_risk',this.value)">
+            <select id="matter-risk-select-${id}" data-prev-value="${matter.matter_risk || 'NotAssessed'}"
+                    style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+                    onchange="updateMatterRisk('${id}',this.value)">
               ${[['NotAssessed','Not Assessed'],['Low','Low'],['Medium','Medium'],['High','High']].map(([v,label]) =>
                 `<option value="${v}" ${(matter.matter_risk || 'NotAssessed')===v?'selected':''}>${label}</option>`
               ).join('')}
@@ -5098,6 +5127,13 @@ async function renderMatterPanel(id) {
             style="flex:1;min-width:220px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
             onchange="updateMatterField('${id}','aml_scope_reason',this.value)"
             placeholder="e.g. Transaction involves acquisition of immovable property."/>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+          <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:130px">RISK RATING REASON</label>
+          <input type="text" id="matter-risk-reason-${id}" value="${escHtml(matter.matter_risk_reason || '')}"
+            style="flex:1;min-width:220px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+            onchange="updateMatterField('${id}','matter_risk_reason',this.value)"
+            placeholder="Required when Matter Risk is Low, Medium, or High -- e.g. Cash-intensive business."/>
         </div>
       </div>
 
@@ -5368,6 +5404,67 @@ async function updateMatterField(matterId, field, value) {
   // the fix belongs here, not per-field. window.scrollY (not a
   // container's scrollTop) is correct: the matters tab has no scrolling
   // container of its own, the page itself scrolls.
+  const scrollY = window.scrollY;
+  renderMattersList();
+  if (wasOpen) {
+    const docsEl = document.getElementById(`matter-docs-${matterId}`);
+    const icon = document.getElementById(`expand-icon-${matterId}`);
+    if (docsEl) docsEl.classList.add('open');
+    if (icon) icon.textContent = '▼';
+    await renderMatterPanel(matterId);
+  }
+  window.scrollTo(0, scrollY);
+}
+
+// Matter Risk (2026-09-17, risk rating rationale) -- a dedicated handler,
+// NOT the generic updateMatterField above, because backend/update_matter()
+// requires matter_risk_reason in the SAME request whenever matter_risk
+// genuinely changes to a real level. updateMatterField sends one field per
+// independent PATCH, so it could never satisfy that same-request check at
+// all -- this bundles matter_risk and the reason input's current value
+// into a single PATCH instead. Prompts for the reason immediately if it's
+// still blank when a real change is made, same "ask right when the change
+// happens" UX the requirement calls for, rather than silently failing.
+async function updateMatterRisk(matterId, newValue) {
+  const selectEl = document.getElementById(`matter-risk-select-${matterId}`);
+  const reasonEl = document.getElementById(`matter-risk-reason-${matterId}`);
+  const prevValue = selectEl?.dataset.prevValue || 'NotAssessed';
+  let reason = reasonEl ? reasonEl.value.trim() : '';
+
+  if (newValue !== 'NotAssessed' && newValue !== prevValue && !reason) {
+    reason = (prompt('Reason for this risk rating (required):') || '').trim();
+    if (!reason) {
+      if (selectEl) selectEl.value = prevValue;
+      return;
+    }
+  }
+
+  let res, data;
+  try {
+    res = await fetch(`${API}/api/matters/${matterId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ matter_risk: newValue, matter_risk_reason: reason || null })
+    });
+    data = await res.json().catch(() => ({}));
+  } catch(e) {
+    if (selectEl) selectEl.value = prevValue;
+    alert('Failed to update Matter Risk: network error.');
+    return;
+  }
+  if (!res.ok) {
+    if (selectEl) selectEl.value = prevValue;
+    alert(data.detail || 'Failed to update Matter Risk.');
+    return;
+  }
+
+  const m = matters.find(mm => mm.id === matterId);
+  if (m) Object.assign(m, data);
+  if (reasonEl) reasonEl.value = reason;
+  if (selectEl) selectEl.dataset.prevValue = newValue;
+
+  // Same open-panel/scroll preservation dance as updateMatterField.
+  const wasOpen = document.getElementById(`matter-docs-${matterId}`)?.classList.contains('open');
   const scrollY = window.scrollY;
   renderMattersList();
   if (wasOpen) {
@@ -9010,9 +9107,10 @@ function _ccsToggleExpand(clientId) {
 
 // Column order/labels (2026-09-03, partner design review) match a sample
 // report as closely as possible: Client No. | Client | Type | AML Scope |
-// CDD Status | Risk | PEP | BO Status | Matters | Outstanding. Mirrors
-// backend/main.py's _CCS_EXPORT_HEADERS -- same order, same wording,
-// there's no separate frontend-only convention for this report.
+// CDD Status | Risk | Risk Reason | PEP | BO Status | Matters | Outstanding.
+// Mirrors backend/main.py's _CCS_EXPORT_HEADERS -- same order, same
+// wording, there's no separate frontend-only convention for this report.
+// Risk Reason (2026-09-17) added right after Risk.
 const CCS_COLUMNS = [
   { key: 'client_number', label: 'Client No.', width: '7%' },
   { key: 'client_name', label: 'Client', width: '15%' },
@@ -9020,11 +9118,12 @@ const CCS_COLUMNS = [
   { key: 'aml_scope', label: 'AML Scope', width: '8%' },
   { key: 'compliance_status', label: 'CDD Status', width: '9%' },
   { key: 'risk_rating', label: 'Risk', width: '6%' },
+  { key: 'risk_rating_reason', label: 'Risk Reason', width: '14%' },
   { key: 'is_pep', label: 'PEP', width: '5%' },
   { key: 'bo_status', label: 'BO Status', width: '7%' },
   { key: 'matter_count', label: 'Matters', width: '5%' },
   { key: 'last_cdd_review_date', label: 'Last CDD Review', width: '8%' },
-  { key: 'missing', label: 'Outstanding', width: '23%' },
+  { key: 'missing', label: 'Outstanding', width: '9%' },
 ];
 
 function _ccsRenderTable() {
@@ -9113,6 +9212,7 @@ function _ccsRenderTable() {
               <td style="padding:3px 8px"><span class="chip ${amlScopeChip}">${escHtml(_ccsLabel(r.aml_scope))}</span></td>
               <td style="padding:3px 8px"><span class="chip ${statusChip}">${escHtml(r.compliance_status)}</span></td>
               <td style="padding:3px 8px"><span class="chip ${riskChip}">${escHtml(_ccsLabel(r.risk_rating))}</span></td>
+              <td style="padding:3px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.risk_rating_reason ? escHtml(r.risk_rating_reason) : '<span style="color:var(--ink3)">—</span>'}</td>
               <td style="padding:3px 8px">${pepText}</td>
               <td style="padding:3px 8px"><span class="chip ${boStatusChip}">${escHtml(_ccsLabel(r.bo_status))}</span></td>
               <td style="padding:3px 8px;text-align:right">${r.matter_count ?? 0}</td>
@@ -9481,11 +9581,12 @@ let _maSort = { key: 'client_name', dir: 1 };
 let _maSearch = '';
 
 const MA_COLUMNS = [
-  { key: 'client_name', label: 'Client', width: '18%' },
-  { key: 'matter_number', label: 'Matter', width: '24%' },
-  { key: 'aml_scope', label: 'AML Scope', width: '12%' },
-  { key: 'matter_risk', label: 'Matter Risk', width: '10%' },
-  { key: 'aml_scope_reason', label: 'Reason', width: '28%' },
+  { key: 'client_name', label: 'Client', width: '16%' },
+  { key: 'matter_number', label: 'Matter', width: '20%' },
+  { key: 'aml_scope', label: 'AML Scope', width: '10%' },
+  { key: 'matter_risk', label: 'Matter Risk', width: '9%' },
+  { key: 'matter_risk_reason', label: 'Risk Reason', width: '17%' },
+  { key: 'aml_scope_reason', label: 'Reason', width: '20%' },
   { key: 'status', label: 'Matter Status', width: '8%' },
 ];
 
@@ -9552,6 +9653,7 @@ function _maRenderTable() {
               <td style="padding:6px 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.matter_name)}">${escHtml(r.matter_number)} — ${escHtml(r.matter_name)}</td>
               <td style="padding:6px 8px"><span class="chip ${amlScopeChip}">${escHtml(_ccsLabel(r.aml_scope))}</span></td>
               <td style="padding:6px 8px"><span class="chip ${riskChip}">${escHtml(_ccsLabel(r.matter_risk))}</span></td>
+              <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.matter_risk_reason ? escHtml(r.matter_risk_reason) : '<span style="color:var(--ink3)">—</span>'}</td>
               <td style="padding:6px 8px;white-space:normal;word-break:break-word;line-height:1.35">${r.aml_scope_reason ? escHtml(r.aml_scope_reason) : '<span style="color:var(--ink3)">—</span>'}</td>
               <td style="padding:6px 8px">${escHtml(r.status)}</td>
             </tr>
@@ -9851,6 +9953,7 @@ function _renderCddReport(r) {
         : '<span style="color:var(--red)">Not yet approved</span>'],
     ] : []),
     ['Client Risk Rating', `<span class="chip ${CCS_RISK_CHIP[pep.risk_rating] || 'chip-gray'}">${escHtml(_ccsLabel(pep.risk_rating))}</span>`],
+    ['Risk Rating Reason', escHtml(pep.risk_rating_reason || 'Not recorded')],
     ['Source of Wealth', escHtml(pep.source_of_wealth || 'Not recorded')],
     ['Source of Funds', escHtml(pep.source_of_funds || 'Not recorded')],
     ['Enhanced Monitoring', pep.enhanced_monitoring_required ? 'Required' : 'Not required'],
@@ -9869,9 +9972,10 @@ function _renderCddReport(r) {
     `<span class="chip ${CCS_AML_SCOPE_CHIP[mt.aml_scope] || 'chip-gray'}">${escHtml(_ccsLabel(mt.aml_scope))}</span>`,
     mt.aml_scope_reason ? escHtml(mt.aml_scope_reason) : '<span style="color:var(--ink3)">—</span>',
     `<span class="chip ${CCS_RISK_CHIP[mt.matter_risk] || 'chip-gray'}">${escHtml(_ccsLabel(mt.matter_risk))}</span>`,
+    mt.matter_risk_reason ? escHtml(mt.matter_risk_reason) : '<span style="color:var(--ink3)">—</span>',
   ]);
   const mattersSection = _cddSection('7. Matters for this Client',
-    _cddTable(['Matter', 'Status', 'AML Scope', 'Reason for AML Scope', 'Matter Risk'], matterRows) +
+    _cddTable(['Matter', 'Status', 'AML Scope', 'Reason for AML Scope', 'Matter Risk', 'Risk Reason'], matterRows) +
     (r.matters.length > 1
       ? '<p style="font-size:0.75rem;color:var(--ink3);margin-top:0.25rem">The same client can have differently-scoped matters — AML applicability depends on the actual work being done, not the client relationship as a whole.</p>'
       : ''));
