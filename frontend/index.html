@@ -8687,6 +8687,18 @@ function _renderCaqList(el) {
           <textarea class="caq-draft-text" rows="4" style="font-size:0.82rem">${escHtml(item.draft_text)}</textarea>
         </div>
       ` : ''}
+      <!-- Investigator Context (2026-09-18) -- a compact preview of this
+           client's existing Compliance History plus a count of any OTHER
+           open exceptions, lazy-fetched only on expand (not eagerly for
+           every item -- see toggleCaqInvestigatorContext() below). A
+           summary/preview only: "View full compliance record" below is
+           the real drill-down, not a second copy of it crammed in here. -->
+      <div style="margin-top:0.5rem">
+        <button type="button" class="btn btn-outline btn-sm" style="width:auto;font-size:0.75rem"
+                onclick="toggleCaqInvestigatorContext('${item.id}', this)">🔍 Investigator Context</button>
+        <div class="caq-investigator-context" id="caq-investigator-${item.id}"
+             style="display:none;margin-top:0.5rem;padding:0.5rem 0.75rem;background:var(--paper);border-radius:6px;font-size:0.78rem"></div>
+      </div>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:0.6rem;flex-wrap:wrap">
         <span class="caq-error" style="font-size:0.75rem;color:var(--red)"></span>
         <div style="display:flex;gap:6px">
@@ -8697,6 +8709,79 @@ function _renderCaqList(el) {
       </div>
     </div>
   `).join('');
+}
+
+// Investigator Context (2026-09-18) -- lazy-fetched only when a reviewer
+// actually expands it, not eagerly for every item in the queue (this list
+// can be long, and most items are approved/dismissed without ever needing
+// the surrounding history). Cached per item id so toggling closed and
+// back open doesn't re-fetch; the cache is intentionally never
+// invalidated by caqReview() below -- approving/dismissing an item removes
+// its whole card from the list on the next render anyway, so there's
+// nothing stale left for the cache to serve.
+const _caqInvestigatorCache = {};
+
+async function toggleCaqInvestigatorContext(itemId, btnEl) {
+  const box = document.getElementById(`caq-investigator-${itemId}`);
+  if (!box) return;
+  const isOpen = box.style.display !== 'none';
+  if (isOpen) {
+    box.style.display = 'none';
+    btnEl.textContent = '🔍 Investigator Context';
+    return;
+  }
+  box.style.display = 'block';
+  btnEl.textContent = '🔍 Hide Investigator Context';
+  if (_caqInvestigatorCache[itemId]) {
+    box.innerHTML = _caqInvestigatorCache[itemId];
+    return;
+  }
+  box.innerHTML = '<em>Loading…</em>';
+  try {
+    const res = await fetch(`${API}/api/ai-action-queue/${itemId}/investigator-context`);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      box.innerHTML = `<em style="color:var(--red)">${escHtml(data.detail || 'Could not load investigator context.')}</em>`;
+      return;
+    }
+    const ctx = await res.json();
+    const html = _renderCaqInvestigatorContext(ctx);
+    _caqInvestigatorCache[itemId] = html;
+    box.innerHTML = html;
+  } catch(e) {
+    box.innerHTML = `<em style="color:var(--red)">Error: ${escHtml(e.message)}</em>`;
+  }
+}
+
+// Pure render -- {"date","event","user","result"} events, same shape
+// _fetch_compliance_history() has always returned (see backend/main.py).
+// A preview only (server already caps this at 5, newest first) -- "View
+// full compliance record" below is the real drill-down, into the exact
+// same openComplianceModal() the client-name link at the top of this
+// card already uses.
+function _renderCaqInvestigatorContext(ctx) {
+  const events = ctx.recent_events || [];
+  const eventsHtml = events.length
+    ? `<ul style="margin:0.35rem 0 0;padding-left:1.1rem">${events.map(ev => `
+        <li style="margin-bottom:0.2rem">
+          <span style="color:var(--ink3)">${escHtml(ev.date || '—')}</span>
+          — <strong>${escHtml(ev.event || '')}</strong>${ev.result && ev.result !== '—' ? `: ${escHtml(ev.result)}` : ''}
+          ${ev.user ? `<span style="color:var(--ink3)"> (${escHtml(ev.user)})</span>` : ''}
+        </li>`).join('')}</ul>`
+    : '<p style="margin:0.35rem 0 0;color:var(--ink3)"><em>No prior compliance history recorded for this client.</em></p>';
+  const otherCount = ctx.other_open_exceptions_count || 0;
+  const otherText = otherCount > 0
+    ? `<span style="color:var(--red);font-weight:600">${otherCount} other open exception${otherCount === 1 ? '' : 's'}</span> on this client`
+    : '<span style="color:var(--green)">No other open exceptions</span> on this client';
+  return `
+    <div><strong>Recent activity</strong> (most recent first):</div>
+    ${eventsHtml}
+    <div style="margin-top:0.5rem">${otherText}</div>
+    <div style="margin-top:0.4rem">
+      <a href="#" onclick="event.preventDefault();openComplianceModal('${ctx.client_id}')"
+         style="color:var(--blue);text-decoration:none;font-size:0.76rem">View full compliance record →</a>
+    </div>
+  `;
 }
 
 // No send capability anywhere -- these three actions only ever PATCH the
