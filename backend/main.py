@@ -6813,6 +6813,63 @@ async def list_ai_action_queue_firm_wide(request: Request):
     return items
 
 
+@app.get("/api/ai-action-queue/{item_id}/investigator-context")
+async def ai_action_queue_investigator_context(item_id: str, request: Request):
+    """
+    Compact investigator summary for a single ai_action_queue item's
+    detail view (2026-09-18, "surface surrounding history, not just what
+    triggered this one item"). Reuses _fetch_compliance_history()
+    completely unchanged -- same function GET .../compliance-history
+    above already calls -- so this adds no new tracking, purely composes
+    data that's already being recorded. Read-only against
+    compliance_exceptions, same DESIGN PRINCIPLE as every other function
+    in this section: never touches it, only counts its current state.
+
+    A preview, not the full timeline -- capped at the 5 most recent
+    events, newest first. "View full history" is the client's own
+    compliance modal (openComplianceModal() in index.html), which already
+    reads the same underlying data with no cap.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "client:read")
+    try:
+        iid = _uuid_mod.UUID(item_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="item_id must be a valid UUID")
+    async with _db_pool.acquire() as conn:
+        item_row = await conn.fetchrow(
+            "SELECT client_id, compliance_exception_id FROM ai_action_queue WHERE id=$1 AND firm_id=$2",
+            iid, FIRM_ID
+        )
+        if not item_row:
+            raise HTTPException(status_code=404, detail="Action queue item not found")
+        cid = item_row["client_id"]
+
+        matter_rows = await conn.fetch(
+            "SELECT id FROM matters WHERE client_id=$1 AND firm_id=$2 AND NOT is_sentinel",
+            cid, FIRM_ID
+        )
+        matter_ids = [m["id"] for m in matter_rows]
+        history = await _fetch_compliance_history(conn, cid, matter_ids)
+
+        # "Other" -- excludes this item's own underlying exception, since
+        # that one is already shown as this item's "Underlying exception"
+        # line; the investigator wants to know what ELSE is open on this
+        # client, not to be told about the thing they're already looking at.
+        other_open_exceptions_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM compliance_exceptions WHERE firm_id=$1 AND client_id=$2 "
+            "AND status IN ('Open', 'InProgress', 'AwaitingClient') AND id != $3",
+            FIRM_ID, cid, item_row["compliance_exception_id"]
+        )
+
+    recent_events = list(reversed(history))[:5]
+    return {
+        "client_id": str(cid),
+        "recent_events": recent_events,
+        "other_open_exceptions_count": other_open_exceptions_count,
+    }
+
+
 @app.patch("/api/ai-action-queue/{item_id}")
 async def review_ai_action_queue_item(item_id: str, update: AiActionQueueReview, request: Request):
     """
