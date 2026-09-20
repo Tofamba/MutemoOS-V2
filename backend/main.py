@@ -5554,6 +5554,109 @@ async def admin_backfill_chunk_hashes(request: Request):
 # own summary count. Returns actual Postgres/Chroma content_hash values
 # side by side for a sample of real chunk_ids per source. Remove alongside
 # the backfill endpoint once no longer needed.
+# TEMPORARY (staging only, never for main) -- fixture for verifying the
+# content-aware taxonomy backfill end to end on the real endpoint. Staging
+# has no NULL-classification rows of its own (all 8 legal_updates are
+# classified), so this seeds clearly-marked synthetic rows covering every
+# decision the backfill makes, then removes them. Admin-token gated; touches
+# only rows with the deterministic ids below. Remove with the matching
+# removal commit once staging verification is confirmed.
+_TEMP_BF_NS = _uuid_mod.UUID("bf000000-0000-4000-8000-000000000001")
+_TEMP_BF_BOT = "This website uses a security service to protect against malicious bots. This page is displayed while the website verifies you are not a bot."
+
+def _temp_bf_fixture():
+    def d(name): return _uuid_mod.uuid5(_TEMP_BF_NS, name)
+    real = "Section 1 of this Act provides that every person shall comply with the obligations set out herein. " * 30  # ~3,000 chars
+    # (name, source_type, filename, reference, court, validity_flag, [chunk texts])
+    lu = [
+        ("real_act", "legislation", "ZZ-TEST Real Act.pdf", "", None, None, [real] * 3),
+        ("si_stub", "statutory_instrument", "ZZ-TEST Unknown Legislation", "", None, None, [_TEMP_BF_BOT]),
+        ("header_stub", "legislation", "ZZ-TEST Header_Only_Act.txt", "", None, None,
+         ["URL: https://zimlii.org/akn/zw/act/1971/6/eng@2024-12-31 TITLE: ZZ-TEST Header Only Act " + "x" * 880]),
+        ("ghost", "legislation", "ZZ-TEST Ghost Act.pdf", "", None, None, []),
+        ("journal", "legislation", "Amendments to the Zimbabwean Labour Act Chapter 2801.docx", "", None, None, [real] * 3),
+        ("sc_judgment", "case_law", "ZZ-TEST v State (SC 1 of 2026) 2026 ZWSC 1 (1 January 2026).pdf", "", "Supreme Court of Zimbabwe", None, [real] * 3),
+        ("foreign_judgment", "case_law", "ZZ-TEST SA Judgement.pdf", "", "Constitutional Court of South Africa", None, [real] * 3),
+        ("flagged_act", "legislation", "ZZ-TEST Disputed Amendment Act.pdf", "Constitution of Zimbabwe Amendment Act ZZ-TEST", None,
+         "Enactment challenged — ZZ-TEST", [real] * 3),
+        ("news", "news", "ZZ-TEST headline", "", None, None, ["## [Local News](https://www.newsday.co.zw/x) short article text " * 6]),
+    ]
+    zlr = [
+        ("z_hc", "ZZ-TEST HC case", "ZZ-TEST S v HC", "Zimbabwe", "High Court, Harare", [real]),
+        ("z_cc", "ZZ-TEST CC case", "ZZ-TEST S v CC", "Zimbabwe", "Constitutional Court of Zimbabwe", [real]),
+        ("z_wrong_labour", "ZZ-TEST Treger 2025 ZWSC 8.docx", "ZZ-TEST Treger v Dube", "Zimbabwe", "Labour Court", [real]),
+        ("z_wrong_supreme", "ZZ-TEST Dandira 2026 ZWHHC 12.pdf", "ZZ-TEST Dandira v Zimpost", "Zimbabwe", "Supreme Court", [real]),
+        ("z_blank", "ZZ-TEST MATRIMONIAL SUMMONS.doc", None, "Zimbabwe", None, [real]),
+        ("z_foreign", "ZZ-TEST judgment.txt", None, "Other", None, [real]),
+    ]
+    return d, lu, zlr
+
+
+@app.post("/api/admin/temp-backfill-test-fixture-cleanup")
+async def temp_backfill_test_fixture_cleanup(request: Request):
+    require_admin_token(request)
+    d, lu, zlr = _temp_bf_fixture()
+    lu_ids = [d(x[0]) for x in lu]
+    zlr_ids = [d(x[0]) for x in zlr]
+    async with _db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM chunks WHERE document_id = ANY($1::uuid[])", lu_ids + zlr_ids)
+        await conn.execute("DELETE FROM legal_updates WHERE id = ANY($1::uuid[])", lu_ids)
+        await conn.execute("DELETE FROM zlr_entries WHERE id = ANY($1::uuid[])", zlr_ids)
+    return {"cleaned": True, "removed_ids": len(lu_ids) + len(zlr_ids)}
+
+
+@app.post("/api/admin/temp-backfill-test-fixture-seed")
+async def temp_backfill_test_fixture_seed(request: Request):
+    require_admin_token(request)
+    d, lu, zlr = _temp_bf_fixture()
+    seeded = 0
+    async with _db_pool.acquire() as conn:
+        all_ids = [d(x[0]) for x in lu] + [d(x[0]) for x in zlr]
+        await conn.execute("DELETE FROM chunks WHERE document_id = ANY($1::uuid[])", all_ids)
+        await conn.execute("DELETE FROM legal_updates WHERE id = ANY($1::uuid[])", [d(x[0]) for x in lu])
+        await conn.execute("DELETE FROM zlr_entries WHERE id = ANY($1::uuid[])", [d(x[0]) for x in zlr])
+        for name, st, fname, ref, court, vflag, chunks in lu:
+            await conn.execute("""
+                INSERT INTO legal_updates (id, firm_id, filename, source_type, source_name, reference, court, validity_flag,
+                                           chunk_count, status, uploaded_at)
+                VALUES ($1,$2,$3,$4,'ZZ-TEST',$5,$6,$7,$8,'complete',NOW())""",
+                d(name), FIRM_ID, fname, st, ref, court, vflag, len(chunks))
+            for i, text in enumerate(chunks):
+                await conn.execute("""
+                    INSERT INTO chunks (id, firm_id, document_id, matter_id, chunk_source, text, chunk_index, page_number,
+                                        source_type, source_name, reference, created_at)
+                    VALUES ($1,$2,$3,'legal_updates','legal',$4,$5,1,$6,'ZZ-TEST',$7,NOW())""",
+                    str(_uuid_mod.uuid4()), FIRM_ID, d(name), text, i, st, ref)
+            seeded += 1
+        for name, fname, case_name, juris, court, chunks in zlr:
+            await conn.execute("""
+                INSERT INTO zlr_entries (id, firm_id, filename, source, jurisdiction, case_name, court, chunk_count, uploaded_at)
+                VALUES ($1,$2,$3,'ZZ-TEST',$4,$5,$6,$7,NOW())""",
+                d(name), FIRM_ID, fname, juris, case_name, court, len(chunks))
+            for i, text in enumerate(chunks):
+                await conn.execute("""
+                    INSERT INTO chunks (id, firm_id, document_id, matter_id, chunk_source, text, chunk_index, page_number,
+                                        source_type, source_name, created_at)
+                    VALUES ($1,$2,$3,'zlr','zlr',$4,$5,1,'zlr','ZZ-TEST',NOW())""",
+                    str(_uuid_mod.uuid4()), FIRM_ID, d(name), text, i)
+            seeded += 1
+    return {"seeded": seeded, "ids": {x[0]: str(d(x[0])) for x in lu + zlr}}
+
+
+@app.get("/api/admin/temp-backfill-test-fixture-state")
+async def temp_backfill_test_fixture_state(request: Request):
+    require_admin_token(request)
+    d, lu, zlr = _temp_bf_fixture()
+    async with _db_pool.acquire() as conn:
+        lrows = await conn.fetch("SELECT id, filename, legal_source_type, authority_strength FROM legal_updates WHERE id = ANY($1::uuid[])", [d(x[0]) for x in lu])
+        zrows = await conn.fetch("SELECT id, filename, legal_source_type, authority_strength FROM zlr_entries WHERE id = ANY($1::uuid[])", [d(x[0]) for x in zlr])
+    names = {str(d(x[0])): x[0] for x in lu + zlr}
+    return {
+        "legal_updates": {names[str(r["id"])]: [r["legal_source_type"], r["authority_strength"]] for r in lrows},
+        "zlr_entries": {names[str(r["id"])]: [r["legal_source_type"], r["authority_strength"]] for r in zrows},
+    }
+
+
 @app.get("/api/admin/verify-chunk-hashes")
 async def admin_verify_chunk_hashes(request: Request, sample: int = 5):
     require_admin_token(request)
