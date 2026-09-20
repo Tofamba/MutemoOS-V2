@@ -31,6 +31,11 @@ FIRM_NAME = os.environ.get("MUTEMO_FIRM_NAME", "")
 
 AUTHORITY_FLOOR = 0.6
 
+# The only authority_strength values classification ever produces
+# (backend/legal_taxonomy.py's AuthorityStrength). Anything else -- NULL in
+# particular -- means "retrieved but unclassified", not "absent".
+CLASSIFIED_STRENGTHS = ("binding", "persuasive", "contextual")
+
 # legal_results source_types that count as background context, not legal authority.
 CONTEXT_SOURCE_TYPES = {"news", "press_statement", "zlhr"}
 
@@ -151,26 +156,54 @@ def compute_grounding(results: list, legal_results: list, zlr_results: list, has
     all_hits = results + legal_results + zlr_results
     authority_hits = [r for r in all_hits if r.get('authority_strength') in ('binding', 'persuasive')]
     context_hits = [r for r in all_hits if r.get('authority_strength') == 'contextual']
+    # Retrieved content whose authority classification is missing (NULL --
+    # e.g. a legacy row never backfilled, or a chunk whose parent row is
+    # gone) or otherwise not one of the three known values. Deliberately its
+    # own bucket, never folded into authority_hits/context_hits: this is a
+    # reporting-honesty distinction ("retrieved, but its legal weight is
+    # unknown"), not a reclassification -- an unclassified source is still
+    # never counted as authoritative, contextual, or sufficient.
+    n_unclassified = len([r for r in all_hits if r.get('authority_strength') not in CLASSIFIED_STRENGTHS])
 
     max_score = max([r.get('similarity', 0) for r in authority_hits]) if authority_hits else 0
     sources_sufficient = bool(authority_hits) and max_score >= AUTHORITY_FLOOR
 
-    if not authority_hits and not context_hits and not has_attached_doc:
+    # "Nothing retrieved" and "retrieved but unclassified" used to be one
+    # branch here, both reported as "no ... sources found".
+    if not authority_hits and not context_hits and n_unclassified:
+        state = "unclassified_only"
+        note = (
+            f"Sources retrieved ({n_unclassified}), but their authority classification is unavailable — "
+            "their legal weight is unverified. Verify each source's authority independently before relying on it."
+        )
+    elif not authority_hits and not context_hits and not has_attached_doc:
+        state = "no_sources"
         note = "No binding or contextual legal sources found. Reliance is on general principles only."
     elif not authority_hits:
+        # With an attached document, zero retrieved sources also lands here
+        # (its existing note is kept); the state still says what happened.
+        state = "contextual_only" if context_hits else "no_sources"
         note = f"No binding or persuasive authority found. Supported only by {len(context_hits)} contextual source(s) — verify independently before relying on this."
     elif not sources_sufficient:
+        state = "authority_below_threshold"
         note = f"Found {len(authority_hits)} authoritative source(s), but below the confidence threshold for binding reliance (best match {max_score:.0%})."
     else:
+        state = "grounded"
         note = f"✓ Grounded in {len(authority_hits)} authoritative source(s)."
         if context_hits:
             note += f" Supported by {len(context_hits)} contextual item(s)."
 
+    if n_unclassified and state != "unclassified_only":
+        note += f" {n_unclassified} further retrieved source(s) have no authority classification and are not counted above."
+
     return {
         "sources_sufficient": sources_sufficient,
+        "grounding_state": state,
         "grounding_note": note,
         "max_similarity_score": max_score,
-        "source_tier_breakdown": {"authority": len(authority_hits), "context": len(context_hits)},
+        "source_tier_breakdown": {
+            "authority": len(authority_hits), "context": len(context_hits), "unclassified": n_unclassified,
+        },
     }
 
 
@@ -375,14 +408,31 @@ def apply_confidence_safeguard(answer_text: str, grounding: dict) -> str:
         return answer_text
     result = answer_text
     snippet = answer_text[:500].lower()
+    # "unclassified_only": content WAS retrieved, its authority just isn't
+    # classified (grounding.compute_grounding). Neither "retrieval was thin"
+    # nor "relies on general principles" is true of that case -- a strong
+    # unclassified hit isn't thin retrieval -- so it gets accurate wording
+    # and no rephrasing suggestion. Every other insufficient-grounding case
+    # keeps the existing behaviour unchanged.
+    unclassified_only = grounding.get("grounding_state") == "unclassified_only"
     if any(term.lower() in snippet for term in BANNED_ASSERTIVE_TERMS):
-        warning = (
-            "**⚠ WARNING: ANALOGOUS ANALYSIS ONLY.** No binding Zimbabwean authority was "
-            "found above the confidence threshold. This response relies on general "
-            "principles and non-binding background context — verify all citations "
-            "independently."
-        )
+        if unclassified_only:
+            warning = (
+                "**⚠ WARNING: AUTHORITY UNVERIFIED.** Sources were retrieved for this "
+                "query, but their authority classification is unavailable, so their "
+                "legal weight is unknown — verify all citations and each source's "
+                "authority independently."
+            )
+        else:
+            warning = (
+                "**⚠ WARNING: ANALOGOUS ANALYSIS ONLY.** No binding Zimbabwean authority was "
+                "found above the confidence threshold. This response relies on general "
+                "principles and non-binding background context — verify all citations "
+                "independently."
+            )
         result = f"{warning}\n\n{result}"
+    if unclassified_only:
+        return result
     return f"{result}{REPHRASE_SUGGESTION}"
 
 

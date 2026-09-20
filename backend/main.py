@@ -32,6 +32,7 @@ import hmac
 from datetime import datetime, timedelta, date
 from enum import Enum
 from backend.grounding import compute_grounding, format_context, TEXTURE_RULES, apply_confidence_safeguard, display_label, FACT_EXTRACTION_RULES, LAWYER_JUDGMENT_RULES, STATUTORY_MECHANISM_PRECISION, IRAC_STRUCTURE_RULES, verify_citations, verify_inline_case_citations, enforce_confidence_consistency, run_legal_research_agent, scope_corpus_absence_claims
+from backend.text_normalize import repair_text_encoding
 from backend.client_migration import match_client_name
 from backend.numbering import (
     generate_initials, disambiguate_initials, next_sequence,
@@ -11554,6 +11555,10 @@ async def _process_legal_update_background(item_id: str, content: bytes, filenam
     source_type/source_name/reference, so format_context() can surface it
     directly in what the model reads without a join.
     """
+    # Same repair as upload_legal_update() -- this function is also called
+    # directly by other ingestion paths, so it guards its own input rather
+    # than trusting every caller to have normalised it.
+    validity_flag = repair_text_encoding(validity_flag)
     text = ""
     word_count = 0
     page_count = 1
@@ -11680,6 +11685,13 @@ async def upload_legal_update(
             scraped_at_ts = datetime.fromisoformat(scraped_at.replace("Z", "+00:00"))
         except ValueError:
             scraped_at_ts = None
+
+    # Ingestion boundary for the validity caveat's free text: repairs
+    # literal backslash-x-hex spellings of UTF-8 (backend/text_normalize.py)
+    # so a mangled em dash can never be stored -- a 2026-09-01 ingestion
+    # stored the literal characters \xe2\x80\x94 and they reached the model
+    # prompt that way.
+    validity_flag = repair_text_encoding(validity_flag)
 
     legal_source_type = classify_legal_update(source_type, reference)
     authority_strength = authority_strength_for(legal_source_type)
@@ -11821,7 +11833,7 @@ async def search_legal_updates(req: LegalUpdateSearchRequest, request: Request):
             # results directly (this endpoint never synthesizes an answer)
             # deserves the same disputed-validity caveat, not just someone
             # who happens to trigger AI synthesis on the same chunk.
-            "validity_flag": item.get("validity_flag"),
+            "validity_flag": repair_text_encoding(item.get("validity_flag")),
         })
     return {"answer": None, "results": results}
 
@@ -13111,6 +13123,7 @@ async def _run_plain_search_job(job_id: str, req: SearchRequest, user: dict):
                     "max_similarity_score": grounding["max_similarity_score"],
                     "sources_sufficient": grounding["sources_sufficient"],
                     "source_tier_breakdown": grounding["source_tier_breakdown"],
+                    "grounding_state": grounding.get("grounding_state"),
                     "research_agent_status": research_agent_status,
                     "research_agent_gaps": research_map.get("gaps", []) if research_map else [],
                     "qc_downgrades": qc_log,
@@ -14043,7 +14056,11 @@ def _semantic_search_legal(req, chunks: list) -> list:
                     "reference": chunk.get("reference"),
                     "legal_source_type": chunk.get("legal_source_type"),
                     "authority_strength": chunk.get("authority_strength"),
-                    "validity_flag": chunk.get("validity_flag"),
+                    # Read-side repair: chunks stored before the ingestion
+                    # boundary repair existed (e.g. the 2026-09-01 orphan
+                    # chunks holding a literal \xe2\x80\x94) still reach the
+                    # model with the intended text.
+                    "validity_flag": repair_text_encoding(chunk.get("validity_flag")),
                 })
                 if len(results) >= req.limit:
                     break

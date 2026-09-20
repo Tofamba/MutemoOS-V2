@@ -63,6 +63,10 @@ BACKGROUND_TYPES = {
 }
 
 
+# Exact string the frontend's CONFIDENCE_STYLE table keys on.
+CONFIDENCE_AUTHORITY_UNVERIFIED = "SOURCES RETRIEVED — AUTHORITY UNVERIFIED"
+
+
 def source_tier(source_type: LegalSourceType) -> str:
     if source_type in PRIMARY_TYPES:
         return "primary"
@@ -186,6 +190,27 @@ def _resolve_source_type(item: dict) -> LegalSourceType:
         return LegalSourceType.UNKNOWN
 
 
+def _is_unclassified(item: dict) -> bool:
+    """
+    True when the item carries NO usable classification at all (NULL/empty
+    legal_source_type, or a value that isn't a real LegalSourceType) -- as
+    opposed to a classifier's explicit "unknown" verdict, which is a real
+    (if uninformative) classification and stays in the background tier as
+    before. _resolve_source_type() folds both into UNKNOWN for scoring,
+    which is fine for ranking but loses the distinction confidence
+    reporting needs: "no relevant authority found" and "retrieved but
+    never classified" are different statements.
+    """
+    raw = item.get("legal_source_type")
+    if not raw:
+        return True
+    try:
+        LegalSourceType(raw)
+        return False
+    except ValueError:
+        return True
+
+
 def _item_text_blob(item: dict) -> str:
     parts = [
         item.get("filename") or "",
@@ -255,6 +280,7 @@ def compute_authority_score(item: dict, qu: dict) -> dict:
     return {
         "legal_source_type": source_type_enum.value,
         "tier": source_tier(source_type_enum),
+        "unclassified": _is_unclassified(item),
         "semantic_similarity": round(semantic_similarity, 3),
         # Named authority_score, not authority_weight, deliberately — ZLR
         # results already carry a pre-existing authority_weight STRING
@@ -338,6 +364,14 @@ def classify_confidence(scored_items: list) -> str:
         return "SECONDARY AUTHORITY FOUND"
     if tiers["commentary"] > 0:
         return "ONLY BACKGROUND MATERIAL FOUND"
+    # Retrieved content that carries no classification at all lands in the
+    # background tier (its type resolves to UNKNOWN), which used to fall
+    # straight through to "NO RELEVANT LEGAL AUTHORITY FOUND" -- claiming
+    # absence when the truth is "retrieved, authority unverified". Reported
+    # as what the system actually knows; it is still never promoted to a
+    # primary/secondary/commentary finding.
+    if any(item.get("unclassified") for item in scored_items):
+        return CONFIDENCE_AUTHORITY_UNVERIFIED
     return "NO RELEVANT LEGAL AUTHORITY FOUND"
 
 
@@ -406,6 +440,7 @@ def rerank(results: list, query: str) -> dict:
         "results": scored,
         "source_groups": groups,
         "confidence": classify_confidence(scored),
+        "unclassified_count": sum(1 for item in scored if item.get("unclassified")),
         "cross_references": suggest_cross_references(qu),
         "excluded_count": excluded,
     }
