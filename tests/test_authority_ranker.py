@@ -429,3 +429,75 @@ def test_after_authority_reranking_fixes_the_bug():
 def test_before_after_excluded_count_is_nonzero():
     outcome = rerank(FIXTURE_RESULTS, QUERY)
     assert outcome["excluded_count"] >= 2  # the letter and the firm precedent, at least
+
+
+# ── Unclassified sources (2026-09-20) ────────────────────────────────────────
+# Retrieved content with no authority classification at all (NULL
+# legal_source_type -- legacy rows never backfilled, or orphaned chunks whose
+# parent row is gone) lands in the background tier, which used to fall
+# straight through to "NO RELEVANT LEGAL AUTHORITY FOUND": a false absence
+# claim. Reporting fix only -- it is never promoted to a primary/secondary/
+# commentary finding.
+
+from backend.authority_ranker import CONFIDENCE_AUTHORITY_UNVERIFIED
+
+
+def test_confidence_reports_authority_unverified_when_only_unclassified_items_were_retrieved():
+    items = [{"tier": "background", "unclassified": True}]
+    assert classify_confidence(items) == CONFIDENCE_AUTHORITY_UNVERIFIED
+    assert CONFIDENCE_AUTHORITY_UNVERIFIED == "SOURCES RETRIEVED — AUTHORITY UNVERIFIED"
+
+
+def test_confidence_still_says_no_relevant_authority_for_classified_background_only():
+    """A source the classifier explicitly placed in the background tier is a
+    real classification -- unchanged behaviour, not the new state."""
+    items = [{"tier": "background", "unclassified": False}, {"tier": "background"}]
+    assert classify_confidence(items) == "NO RELEVANT LEGAL AUTHORITY FOUND"
+
+
+def test_unclassified_items_never_outrank_a_real_finding():
+    assert classify_confidence([{"tier": "primary"}, {"tier": "background", "unclassified": True}]) == "PRIMARY AUTHORITY FOUND"
+    assert classify_confidence([{"tier": "secondary"}, {"tier": "background", "unclassified": True}]) == "SECONDARY AUTHORITY FOUND"
+    assert classify_confidence([{"tier": "commentary"}, {"tier": "background", "unclassified": True}]) == "ONLY BACKGROUND MATERIAL FOUND"
+
+
+def test_compute_authority_score_flags_missing_classification_but_not_an_explicit_unknown():
+    qu = extract_query_understanding("tribunal of reeves")
+    assert compute_authority_score({"similarity": 0.9, "legal_source_type": None}, qu)["unclassified"] is True
+    assert compute_authority_score({"similarity": 0.9}, qu)["unclassified"] is True
+    assert compute_authority_score({"similarity": 0.9, "legal_source_type": ""}, qu)["unclassified"] is True
+    assert compute_authority_score({"similarity": 0.9, "legal_source_type": "not-a-type"}, qu)["unclassified"] is True
+    # The classifier's own "unknown" verdict is a real classification.
+    assert compute_authority_score({"similarity": 0.9, "legal_source_type": "unknown"}, qu)["unclassified"] is False
+    assert compute_authority_score({"similarity": 0.9, "legal_source_type": "statute"}, qu)["unclassified"] is False
+    # Tiering is unchanged: unclassified still resolves to the background tier.
+    assert compute_authority_score({"similarity": 0.9, "legal_source_type": None}, qu)["tier"] == "background"
+
+
+def _unclassified_hit(**kw):
+    d = {"text": "The Tribunal of Reeves shall consist of the Chief Reeve.", "similarity": 0.9,
+         "reference": "Amendment Act tribunal reeves", "legal_source_type": None, "chunk_id": "c1"}
+    d.update(kw)
+    return d
+
+
+def test_rerank_reports_unverified_confidence_and_the_unclassified_count():
+    outcome = rerank([_unclassified_hit()], "tribunal of reeves amendment")
+    assert outcome["results"], "the unclassified hit must survive the relevance filter for this to be meaningful"
+    assert outcome["confidence"] == CONFIDENCE_AUTHORITY_UNVERIFIED
+    assert outcome["unclassified_count"] == 1
+    assert outcome["results"][0]["unclassified"] is True
+
+
+def test_rerank_mixed_results_keep_the_real_confidence_and_count_the_unclassified():
+    classified = {"text": "Constitution of Zimbabwe tribunal of reeves", "similarity": 0.9, "legal_source_type": "constitution",
+                  "reference": "Constitution tribunal reeves", "chunk_id": "c2"}
+    outcome = rerank([classified, _unclassified_hit()], "tribunal of reeves amendment")
+    assert outcome["confidence"] == "PRIMARY AUTHORITY FOUND"
+    assert outcome["unclassified_count"] == 1
+
+
+def test_rerank_with_only_classified_results_has_zero_unclassified():
+    classified = {"text": "Constitution tribunal reeves", "similarity": 0.9, "legal_source_type": "constitution",
+                  "reference": "Constitution tribunal reeves", "chunk_id": "c2"}
+    assert rerank([classified], "tribunal of reeves")["unclassified_count"] == 0

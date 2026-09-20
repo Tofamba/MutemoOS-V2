@@ -6391,18 +6391,34 @@ function renderSearchResults(data, query) {
     'SECONDARY AUTHORITY FOUND':         { bg: '#e3f0fb', border: '#9cc3e6', color: '#205f8f', icon: '✓' },
     'ONLY BACKGROUND MATERIAL FOUND':    { bg: '#fff3d6', border: '#e8c050', color: '#5c4600', icon: '⚠️' },
     'NO RELEVANT LEGAL AUTHORITY FOUND': { bg: '#f6e3e0', border: '#e0a89e', color: '#a3312a', icon: '⚠️' },
+    // Content WAS retrieved, but none of it carries an authority
+    // classification (legacy rows never backfilled, or chunks whose parent
+    // row is gone). Neither "authority found" nor "nothing found" -- see
+    // backend/authority_ranker.py's CONFIDENCE_AUTHORITY_UNVERIFIED.
+    'SOURCES RETRIEVED — AUTHORITY UNVERIFIED': { bg: '#e8eefb', border: '#a9b9e0', color: '#2c3f7a', icon: 'ℹ️' },
   };
 
   if (data.answer) {
     let topWarning, bottomNote;
     if (ar) {
       const style = CONFIDENCE_STYLE[ar.confidence] || CONFIDENCE_STYLE['NO RELEVANT LEGAL AUTHORITY FOUND'];
+      // Unclassified items also sit in the ranker's 'background' group;
+      // show them as their own count rather than double-counting them.
+      const unclassifiedN = ar.unclassified_count || 0;
       const counts = ['primary', 'secondary', 'commentary', 'background']
-        .map(t => `${(ar.source_groups[t] || []).length} ${t}`)
+        .map(t => {
+          let n = (ar.source_groups[t] || []).length;
+          if (t === 'background') n = Math.max(0, n - unclassifiedN);
+          return `${n} ${t}`;
+        })
+        .concat(unclassifiedN ? [`${unclassifiedN} unclassified`] : [])
         .filter(c => !c.startsWith('0 '))
         .join(' · ');
+      const unverifiedNote = ar.confidence === 'SOURCES RETRIEVED — AUTHORITY UNVERIFIED'
+        ? `<br><span style="font-size:0.72rem">Their authority classification is unavailable, so their legal weight is unverified — verify each source's authority independently before relying on it.</span>`
+        : '';
       topWarning = `<div style="margin-bottom:0.6rem;padding:0.6rem 0.75rem;background:${style.bg};border:1px solid ${style.border};border-radius:4px;font-size:0.8rem;color:${style.color}">
-          ${style.icon} <strong>${escHtml(ar.confidence)}</strong>${counts ? `<br><span style="font-size:0.72rem">${escHtml(counts)}</span>` : ''}
+          ${style.icon} <strong>${escHtml(ar.confidence)}</strong>${counts ? `<br><span style="font-size:0.72rem">${escHtml(counts)}</span>` : ''}${unverifiedNote}
          </div>`;
       bottomNote = ar.excluded_count
         ? `<div style="margin-top:0.4rem;font-size:0.72rem;color:var(--ink3)">${ar.excluded_count} source(s) excluded as not relevant to this query (e.g. correspondence or unrelated-matter documents with no reference to it)</div>`
@@ -6410,8 +6426,9 @@ function renderSearchResults(data, query) {
     } else {
       const sufficient = data.sources_sufficient !== false;
       const totalFound = (data.source_tier_breakdown?.authority || 0) + (data.source_tier_breakdown?.context || 0);
+      const unclassifiedFound = data.source_tier_breakdown?.unclassified || 0;
       const warningHeadline = totalFound === 0
-        ? "NO FIRM PRECEDENTS OR LEGAL SOURCES FOUND"
+        ? (unclassifiedFound ? "SOURCES RETRIEVED — AUTHORITY UNVERIFIED" : "NO FIRM PRECEDENTS OR LEGAL SOURCES FOUND")
         : "SOURCES FOUND BELOW CONFIDENCE THRESHOLD";
       topWarning = !sufficient
         ? `<div style="margin-bottom:0.6rem;padding:0.6rem 0.75rem;background:#fff3d6;border:1px solid #e8c050;border-radius:4px;font-size:0.8rem;color:#5c4600">
@@ -6454,7 +6471,7 @@ function renderSearchResults(data, query) {
   }
 
   function scoreBadgeHtml(topScore, ranking) {
-    const tierLabel = ranking ? `<div style="font-size:0.6rem;color:var(--ink3);text-transform:uppercase;letter-spacing:0.4px;margin-top:2px">${escHtml(ranking.tier)}</div>` : '';
+    const tierLabel = ranking ? `<div style="font-size:0.6rem;color:var(--ink3);text-transform:uppercase;letter-spacing:0.4px;margin-top:2px">${escHtml(ranking.unclassified ? 'unclassified' : ranking.tier)}</div>` : '';
     return `<div style="text-align:right"><span class="sr-score">${Math.round(topScore*100)}% match</span>${tierLabel}</div>`;
   }
 
@@ -6579,19 +6596,24 @@ function renderSearchResults(data, query) {
     const rankingByChunkId = {};
     ar.results.forEach(r => { rankingByChunkId[r.chunk_id] = r; });
 
+    // Unclassified items land in the ranker's 'background' group; present
+    // them as their own section so "Background" only ever means sources
+    // that were actually classified as background material.
+    const backgroundGroup = ar.source_groups.background || [];
     const sections = [
-      { key: 'primary', title: 'Primary Sources' },
-      { key: 'secondary', title: 'Secondary Sources' },
-      { key: 'commentary', title: 'Commentary' },
-      { key: 'background', title: 'Background' },
+      { title: 'Primary Sources', items: ar.source_groups.primary || [] },
+      { title: 'Secondary Sources', items: ar.source_groups.secondary || [] },
+      { title: 'Commentary', items: ar.source_groups.commentary || [] },
+      { title: 'Background', items: backgroundGroup.filter(r => !r.unclassified) },
+      { title: 'Unclassified — authority unverified', items: backgroundGroup.filter(r => r.unclassified) },
     ];
-    const nonEmpty = sections.filter(s => (ar.source_groups[s.key] || []).length > 0);
+    const nonEmpty = sections.filter(s => s.items.length > 0);
 
     if (nonEmpty.length === 0) {
       html += `<p style="font-size:0.8rem;color:var(--ink3);margin-bottom:0.75rem">No sources scored above the relevance threshold for "${escHtml(query)}".</p>`;
     } else {
       nonEmpty.forEach(s => {
-        const items = ar.source_groups[s.key];
+        const items = s.items;
         const excerptCount = items.length;
         html += `<div style="margin:1rem 0 0.5rem;font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--ink3)">
           ${s.title} <span style="font-weight:400">(${excerptCount} excerpt${excerptCount!==1?'s':''})</span>
