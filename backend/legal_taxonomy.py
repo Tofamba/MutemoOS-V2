@@ -6,7 +6,10 @@ Deterministic, not AI-driven — classification runs cheaply at ingest time
 a document's legal type and authority don't change between searches.
 """
 
+import re
+from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 
 class LegalSourceType(str, Enum):
@@ -111,7 +114,44 @@ def classify_firm_document(document_type) -> LegalSourceType:
 # legal_updates.source_type values, as written by upload_legal_update()
 # (main.py) — "legislation" | "news" | "press_statement" | "guidance" |
 # "zlhr" | others.
-def classify_legal_update(source_type, reference=None) -> LegalSourceType:
+# Zimbabwe neutral citations ("2025 ZWSC 17", "2026 ZWHHC 127", ...) name the
+# court far more reliably than a court field parsed out of an uploaded
+# docx/pdf: a production audit (2026-09-20) found the parsed court wrong on
+# 9 of the 24 uploaded judgments that carry a neutral citation in the
+# filename (e.g. a 2025 ZWSC judgment whose court field read "Labour Court"),
+# while the ZLR headnote series' court field agreed with its judgment-number
+# prefix (HH-/HB-/CC-) on all 316 rows checked. So the citation wins when
+# present.
+_NEUTRAL_CITATION = re.compile(r"\bZW(CC|SC|HHC|HC|BHC|MDHC|MTHC|MHC|MVHC|MSHC|LC)\b", re.IGNORECASE)
+_NEUTRAL_CITATION_COURTS = {
+    "cc": LegalSourceType.CONSTITUTIONAL_COURT,
+    "sc": LegalSourceType.SUPREME_COURT,
+    "lc": LegalSourceType.LABOUR_COURT,
+    "hhc": LegalSourceType.HIGH_COURT, "hc": LegalSourceType.HIGH_COURT, "bhc": LegalSourceType.HIGH_COURT,
+    "mdhc": LegalSourceType.HIGH_COURT, "mthc": LegalSourceType.HIGH_COURT, "mhc": LegalSourceType.HIGH_COURT,
+    "mvhc": LegalSourceType.HIGH_COURT, "mshc": LegalSourceType.HIGH_COURT,
+}
+
+
+def court_from_neutral_citation(*texts) -> Optional[LegalSourceType]:
+    """The court a neutral citation token (e.g. ZWSC) in any of `texts`
+    names, or None if none of them carries one."""
+    for text in texts:
+        match = _NEUTRAL_CITATION.search(text or "")
+        if match:
+            return _NEUTRAL_CITATION_COURTS[match.group(1).lower()]
+    return None
+
+
+def classify_legal_update(source_type, reference=None, filename=None) -> LegalSourceType:
+    # Ingestion path: the document's text isn't available yet, so this can
+    # only use metadata. Deliberately has NO "statutory_instrument" branch:
+    # without seeing content it would make every future scraper bot-block
+    # stub typed that way "binding" (all 53 statutory_instrument rows in
+    # production are ZimLII "security service / malicious bots" stub pages).
+    # Real SIs are classified by the content-aware backfill path below.
+    if source_type == "case_law":
+        return court_from_neutral_citation(filename, reference) or LegalSourceType.UNKNOWN
     if source_type == "legislation":
         ref = (reference or "").lower()
         if "bill" in ref:
@@ -152,9 +192,129 @@ _ZLR_COURT_PATTERNS = [
 ]
 
 
-def classify_zlr_entry(court) -> LegalSourceType:
+def classify_zlr_entry(court, filename=None, case_name=None) -> LegalSourceType:
+    # A neutral citation in the filename/case name outranks the parsed court
+    # field (see court_from_neutral_citation()).
+    from_citation = court_from_neutral_citation(filename, case_name)
+    if from_citation:
+        return from_citation
     court_lower = (court or "").lower()
     for pattern, source_type in _ZLR_COURT_PATTERNS:
         if pattern in court_lower:
             return source_type
     return LegalSourceType.HIGH_COURT  # ZLR's reported series defaults to High Court
+
+
+# ── Content-aware backfill classification ────────────────────────────────────
+# Used ONLY by POST /api/admin/backfill-legal-taxonomy (dry-run by default).
+# Unlike the ingestion functions above, these see what is actually stored, so
+# they can refuse to lend authority to rows that contain no law. A "hold"
+# decision leaves the row's classification NULL -- the honest "authority
+# unverified" state -- rather than guessing.
+
+@dataclass(frozen=True)
+class BackfillDecision:
+    action: str  # "classify" | "hold"
+    legal_source_type: Optional[LegalSourceType]
+    authority_strength: Optional[AuthorityStrength]
+    reason: str
+
+
+def _hold(reason: str) -> BackfillDecision:
+    return BackfillDecision("hold", None, None, reason)
+
+
+def _classify(source_type: LegalSourceType, reason: str, strength: Optional[AuthorityStrength] = None) -> BackfillDecision:
+    return BackfillDecision("classify", source_type, strength or authority_strength_for(source_type), reason)
+
+
+# Scraper captures of a bot-protection / error page instead of the document
+# (ZimLII "This website uses a security service to protect against malicious
+# bots", "Not found (Error 404)", Cloudflare challenge pages).
+_STUB_PAGE = re.compile(
+    r"security service|malicious bots|not found \(error 404\)|just a moment|checking your browser|"
+    r"access denied|403 forbidden", re.IGNORECASE)
+
+# Below this much stored text a non-news row is a header/index card (e.g. the
+# ~1,000-character "URL: ... TITLE: ..." Act stubs), not the document itself.
+MIN_SUBSTANTIVE_CHARS = 2000
+
+# Reviewed, explicit per-row overrides (filename -> type), approved 2026-09-20.
+MANUAL_LEGAL_UPDATE_OVERRIDES = {
+    # A Zimbabwe Electronic Law Journal commentary uploaded as "legislation";
+    # confirmed from its first chunk. Not law.
+    "Amendments to the Zimbabwean Labour Act Chapter 2801.docx": LegalSourceType.ACADEMIC,
+}
+
+_FOREIGN_COURT_MARKERS = (
+    "south africa", "england", "botswana", "zambia", "malawi", "namibia", "kenya",
+    "tanzania", "privy council", "house of lords", "united kingdom",
+)
+
+
+def _explicit_court(court) -> Optional[object]:
+    """A court named in the court field: a LegalSourceType, the string
+    "foreign" for a non-Zimbabwean court, or None. Unlike
+    classify_zlr_entry() there is NO silent High Court default."""
+    court_lower = (court or "").lower()
+    if any(marker in court_lower for marker in _FOREIGN_COURT_MARKERS):
+        return "foreign"
+    for pattern, source_type in _ZLR_COURT_PATTERNS:
+        if pattern in court_lower:
+            return source_type
+    return None
+
+
+def classify_legal_update_for_backfill(*, source_type, filename, reference, court, validity_flag,
+                                       chunk_count, total_chars, head_text) -> BackfillDecision:
+    # 1. Nothing to classify: no chunks, a scraper block page, or a header-only stub.
+    if not chunk_count:
+        return _hold("no chunks (ghost row)")
+    if head_text and _STUB_PAGE.search(head_text):
+        return _hold("scraper stub: bot-protection/404 page, not the document")
+    if source_type != "news" and (total_chars or 0) < MIN_SUBSTANTIVE_CHARS:
+        return _hold(f"header-only/thin stub (<{MIN_SUBSTANTIVE_CHARS} chars of text)")
+
+    # 2. What kind of thing is it?
+    if filename in MANUAL_LEGAL_UPDATE_OVERRIDES:
+        legal_type = MANUAL_LEGAL_UPDATE_OVERRIDES[filename]
+        reason = "reviewed manual override (not legislation)"
+    else:
+        cited_court = court_from_neutral_citation(filename, reference)
+        if cited_court:
+            legal_type, reason = cited_court, "court named by the neutral citation in the filename"
+        elif source_type == "case_law":
+            explicit = _explicit_court(court)
+            if isinstance(explicit, LegalSourceType):
+                legal_type, reason = explicit, "court named in the court field"
+            elif explicit == "foreign":
+                legal_type, reason = LegalSourceType.UNKNOWN, "foreign court: no taxonomy type, kept contextual"
+            else:
+                legal_type, reason = LegalSourceType.UNKNOWN, "no Zimbabwean court evidence, kept contextual"
+        elif source_type == "statutory_instrument":
+            legal_type, reason = LegalSourceType.STATUTORY_INSTRUMENT, "statutory instrument with real content"
+        else:
+            legal_type = classify_legal_update(source_type, reference)
+            reason = f"source_type '{source_type}'"
+
+    # 3. A validity-disputed source can never be binding/persuasive, exactly as
+    # at ingestion (upload_legal_update()).
+    if validity_flag:
+        return _classify(legal_type, reason + "; validity_flag set, forced contextual", AuthorityStrength.CONTEXTUAL)
+    return _classify(legal_type, reason)
+
+
+def classify_zlr_entry_for_backfill(*, court, filename, case_name, jurisdiction, chunk_count) -> BackfillDecision:
+    if jurisdiction is not None and jurisdiction != "Zimbabwe":
+        return _hold(f"non-Zimbabwean jurisdiction ('{jurisdiction}'): no taxonomy type")
+    if not chunk_count:
+        return _hold("no chunks (ghost row)")
+    cited_court = court_from_neutral_citation(filename, case_name)
+    if cited_court:
+        return _classify(cited_court, "court named by the neutral citation (outranks the court field)")
+    explicit = _explicit_court(court)
+    if isinstance(explicit, LegalSourceType):
+        return _classify(explicit, "court named in the court field")
+    if explicit == "foreign":
+        return _hold("foreign court in the court field: no taxonomy type")
+    return _hold("blank court and no neutral citation: refusing to default to High Court")
