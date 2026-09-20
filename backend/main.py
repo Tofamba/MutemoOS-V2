@@ -44,7 +44,7 @@ from backend.matter_health import compute_matter_health
 from backend.conveyancing import CONVEYANCING_MILESTONES
 from backend.matter_stages import resolve_stage_sequence, stage_storage_field
 from backend.deadline_engine import try_compute_deadline
-from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for, AuthorityStrength
+from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for, AuthorityStrength, classify_legal_update_for_backfill, classify_zlr_entry_for_backfill
 from backend.authority_ranker import rerank
 from backend.docx_export import paragraphs_from_plain_text, paragraphs_from_html, build_docx_bytes
 
@@ -1571,7 +1571,7 @@ except Exception as e:
 
 # ── AlertEngine health metrics ─────────────────────────────────────────────────
 import time as _time
-from collections import deque
+from collections import deque, Counter
 
 _request_latencies: deque = deque(maxlen=200)
 _request_errors: deque = deque(maxlen=200)
@@ -5249,62 +5249,143 @@ async def reclassify_zlr(request: Request):
     return {"reclassified": updated, "total": len(rows)}
 
 @app.post("/api/admin/backfill-legal-taxonomy")
-async def backfill_legal_taxonomy(request: Request):
+async def backfill_legal_taxonomy(request: Request, dry_run: bool = True,
+                                  expected_legal_updates: Optional[int] = None,
+                                  expected_zlr_entries: Optional[int] = None):
     """
-    One-time backfill of legal_source_type/authority_strength for rows
-    that predate this classification (backend/legal_taxonomy.py) — pure,
-    deterministic, no AI call, safe to re-run any time (idempotent: only
-    rows still missing legal_source_type are touched).
+    Backfill of legal_source_type/authority_strength for the shared legal
+    corpus rows (legal_updates, zlr_entries) that predate classification.
+    Deterministic, no AI call.
+
+    DRY-RUN BY DEFAULT: with dry_run=true (the default) nothing is written;
+    the response lists every NULL row with the decision that would be
+    applied ("classify" with its type/strength, or "hold" with the reason),
+    plus per-table counts. Applying (dry_run=false) additionally requires
+    expected_legal_updates and expected_zlr_entries to equal the current
+    classify counts -- so what gets written is exactly the set that was
+    reviewed in the dry run, not whatever the data has become since.
+
+    Decisions come from the content-aware functions in
+    backend/legal_taxonomy.py (classify_*_for_backfill), which HOLD rows
+    that contain no law (ghost rows, scraper bot-block pages, header-only
+    stubs) and rows with no court evidence instead of guessing. Held rows
+    stay NULL -- the honest "authority unverified" state.
+
+    Only rows still missing legal_source_type are ever touched (idempotent),
+    and the UPDATE itself re-checks that. The firm `documents` table is
+    deliberately excluded: this backfill is for the shared corpus only.
     """
     require_admin_token(request)
-    counts = {"documents": 0, "legal_updates": 0, "zlr_entries": 0}
 
     async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, document_type FROM documents WHERE firm_id=$1 AND legal_source_type IS NULL",
-            FIRM_ID
-        )
-    for row in rows:
-        source_type = classify_firm_document(row["document_type"])
-        strength = authority_strength_for(source_type)
-        async with _db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE documents SET legal_source_type=$1, authority_strength=$2 WHERE id=$3",
-                source_type.value, strength.value, row["id"]
-            )
-        counts["documents"] += 1
+        lu_rows = await conn.fetch("""
+            SELECT lu.id, lu.filename, lu.source_type, lu.reference, lu.court, lu.validity_flag,
+                   COUNT(c.id) AS chunk_count,
+                   COALESCE(SUM(LENGTH(c.text)), 0) AS total_chars,
+                   (ARRAY_AGG(LEFT(c.text, 400) ORDER BY c.chunk_index))[1] AS head_text
+            FROM legal_updates lu
+            LEFT JOIN chunks c ON c.document_id = lu.id AND c.chunk_source = 'legal'
+            WHERE lu.firm_id=$1 AND lu.legal_source_type IS NULL
+            GROUP BY lu.id
+            ORDER BY lu.filename, lu.id
+        """, FIRM_ID)
+        zlr_rows = await conn.fetch("""
+            SELECT z.id, z.filename, z.case_name, z.court, z.jurisdiction, z.judgment_number,
+                   COUNT(c.id) AS chunk_count
+            FROM zlr_entries z
+            LEFT JOIN chunks c ON c.document_id = z.id AND c.chunk_source = 'zlr'
+            WHERE z.firm_id=$1 AND z.legal_source_type IS NULL
+            GROUP BY z.id
+            ORDER BY z.case_name, z.id
+        """, FIRM_ID)
 
+    lu_plan = [
+        (r, classify_legal_update_for_backfill(
+            source_type=r["source_type"], filename=r["filename"], reference=r["reference"], court=r["court"],
+            validity_flag=r["validity_flag"], chunk_count=r["chunk_count"], total_chars=r["total_chars"],
+            head_text=r["head_text"]))
+        for r in lu_rows
+    ]
+    zlr_plan = [
+        (r, classify_zlr_entry_for_backfill(
+            court=r["court"], filename=r["filename"], case_name=r["case_name"],
+            jurisdiction=r["jurisdiction"], chunk_count=r["chunk_count"]))
+        for r in zlr_rows
+    ]
+
+    def _summarise(plan):
+        classified = [d for _, d in plan if d.action == "classify"]
+        held = [d for _, d in plan if d.action == "hold"]
+        return {
+            "null_rows": len(plan), "classify": len(classified), "hold": len(held),
+            "classify_by_type": dict(Counter(f"{d.legal_source_type.value}/{d.authority_strength.value}" for d in classified)),
+            "hold_by_reason": dict(Counter(d.reason for d in held)),
+        }
+
+    def _row_out(row, decision, label_key):
+        return {
+            "id": str(row["id"]), label_key: row[label_key], "action": decision.action,
+            "legal_source_type": decision.legal_source_type.value if decision.legal_source_type else None,
+            "authority_strength": decision.authority_strength.value if decision.authority_strength else None,
+            "reason": decision.reason,
+        }
+
+    summary = {"legal_updates": _summarise(lu_plan), "zlr_entries": _summarise(zlr_plan)}
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "summary": summary,
+            "expected_counts_to_apply": {
+                "expected_legal_updates": summary["legal_updates"]["classify"],
+                "expected_zlr_entries": summary["zlr_entries"]["classify"],
+            },
+            "legal_updates": [
+                {**_row_out(r, d, "filename"), "source_type": r["source_type"], "court": r["court"],
+                 "chunks": r["chunk_count"], "chars": r["total_chars"]}
+                for r, d in lu_plan
+            ],
+            "zlr_entries": [
+                {**_row_out(r, d, "case_name"), "filename": r["filename"], "court": r["court"],
+                 "judgment_number": r["judgment_number"]}
+                for r, d in zlr_plan
+            ],
+        }
+
+    if expected_legal_updates is None or expected_zlr_entries is None:
+        raise HTTPException(
+            status_code=400,
+            detail="dry_run=false requires expected_legal_updates and expected_zlr_entries "
+                   "(the classify counts from the reviewed dry run).")
+    if (expected_legal_updates != summary["legal_updates"]["classify"]
+            or expected_zlr_entries != summary["zlr_entries"]["classify"]):
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "The rows that would be classified changed since the reviewed dry run -- "
+                             "nothing was written. Re-run the dry run and review it again.",
+                    "current_counts": {"legal_updates": summary["legal_updates"]["classify"],
+                                       "zlr_entries": summary["zlr_entries"]["classify"]}})
+
+    applied = {"legal_updates": 0, "zlr_entries": 0}
     async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, source_type, reference FROM legal_updates WHERE firm_id=$1 AND legal_source_type IS NULL",
-            FIRM_ID
-        )
-    for row in rows:
-        source_type = classify_legal_update(row["source_type"], row["reference"])
-        strength = authority_strength_for(source_type)
-        async with _db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE legal_updates SET legal_source_type=$1, authority_strength=$2 WHERE id=$3",
-                source_type.value, strength.value, row["id"]
-            )
-        counts["legal_updates"] += 1
-
-    async with _db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, court FROM zlr_entries WHERE firm_id=$1 AND legal_source_type IS NULL",
-            FIRM_ID
-        )
-    for row in rows:
-        source_type = classify_zlr_entry(row["court"])
-        strength = authority_strength_for(source_type)
-        async with _db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE zlr_entries SET legal_source_type=$1, authority_strength=$2 WHERE id=$3",
-                source_type.value, strength.value, row["id"]
-            )
-        counts["zlr_entries"] += 1
-
-    return {"backfilled": counts}
+        async with conn.transaction():
+            for row, d in lu_plan:
+                if d.action != "classify":
+                    continue
+                status = await conn.execute(
+                    "UPDATE legal_updates SET legal_source_type=$1, authority_strength=$2 "
+                    "WHERE id=$3 AND firm_id=$4 AND legal_source_type IS NULL",
+                    d.legal_source_type.value, d.authority_strength.value, row["id"], FIRM_ID)
+                applied["legal_updates"] += 1 if status.endswith(" 1") else 0
+            for row, d in zlr_plan:
+                if d.action != "classify":
+                    continue
+                status = await conn.execute(
+                    "UPDATE zlr_entries SET legal_source_type=$1, authority_strength=$2 "
+                    "WHERE id=$3 AND firm_id=$4 AND legal_source_type IS NULL",
+                    d.legal_source_type.value, d.authority_strength.value, row["id"], FIRM_ID)
+                applied["zlr_entries"] += 1 if status.endswith(" 1") else 0
+    return {"dry_run": False, "applied": applied, "summary": summary}
 
 # TEMPORARY — one-time production backfill for the content_hash reconciliation
 # fix. Runs scripts/backfill_chunk_content_hash.py's real build_plan()/
@@ -11693,7 +11774,7 @@ async def upload_legal_update(
     # prompt that way.
     validity_flag = repair_text_encoding(validity_flag)
 
-    legal_source_type = classify_legal_update(source_type, reference)
+    legal_source_type = classify_legal_update(source_type, reference, filename)
     authority_strength = authority_strength_for(legal_source_type)
     if validity_flag:
         # A source whose own enactment/validity is disputed can never be
@@ -12483,7 +12564,7 @@ async def _process_zlr_background(item_id: str, content: bytes, filename: str, e
     authority_weight = get_authority_weight(source)
     subject_chains_json = json.dumps(parsed.get("subject_chains", []))
 
-    legal_source_type = classify_zlr_entry(parsed.get("court"))
+    legal_source_type = classify_zlr_entry(parsed.get("court"), filename, parsed.get("case_name"))
     authority_strength = authority_strength_for(legal_source_type)
 
     enriched_text = f"""CASE: {parsed.get('case_name') or ''}
