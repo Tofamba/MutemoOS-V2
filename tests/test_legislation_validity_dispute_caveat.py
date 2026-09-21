@@ -332,3 +332,86 @@ def test_upload_legal_update_leaves_authority_strength_alone_when_unflagged(monk
     ))
 
     assert pool.conn.inserted_legal_updates[0]["authority_strength"] == "binding"
+
+
+# ── neutral label for a not-yet-in-force caveat (2026-09-21) ───────────────
+# "VALIDITY DISPUTED" is reserved for a genuine dispute about the enactment.
+# The Persons with Disabilities Act 3 of 2025 (enacted, not commenced) must
+# not read to the model as a disputed enactment.
+
+import pytest
+
+from backend.grounding import validity_flag_label
+
+PWD_FLAG = "Not yet in force — Act 3 of 2025 had not commenced as at 6 February 2026"
+DISPUTE_FLAG = "Enactment challenged — no referendum held per s.328"
+
+
+@pytest.mark.parametrize("flag", [
+    PWD_FLAG,
+    "Act not yet commenced",
+    "Has not yet come into force pending a commencement notice",
+    "Yet to come into operation",
+    "This Act has not commenced",
+    "Awaiting commencement",
+])
+def test_not_in_force_flags_get_the_neutral_caveat_label(flag):
+    assert validity_flag_label(flag) == "VALIDITY CAVEAT"
+
+
+@pytest.mark.parametrize("flag", [
+    DISPUTE_FLAG,
+    "Disputed",
+    "Enactment disputed and not yet in force",          # dispute language wins over commencement
+    "Challenged in the Constitutional Court; not commenced",
+    "Purportedly enacted; invalid for want of a referendum",
+    "Some unrecognised free-text reason",               # unknown wording keeps the conservative label
+    "",
+])
+def test_genuine_disputes_and_unknown_wording_keep_the_disputed_label(flag):
+    assert validity_flag_label(flag) == "VALIDITY DISPUTED"
+
+
+def test_format_context_uses_the_caveat_label_for_not_yet_in_force():
+    context = format_context([], [{"reference": "Persons with Disabilities Act 3 of 2025", "text": "Section 1...",
+                                    "validity_flag": PWD_FLAG}], [])
+    assert ("[LEGISLATION — Persons with Disabilities Act 3 of 2025 — "
+            "⚠ VALIDITY CAVEAT: " + PWD_FLAG + "]") in context
+    assert "DISPUTED" not in context
+
+
+def test_format_context_still_uses_disputed_for_the_constitution_amendment_case():
+    context = format_context([], [{"reference": "Constitution of Zimbabwe Amendment Act No. 6 of 2026", "text": "x",
+                                    "validity_flag": DISPUTE_FLAG}], [])
+    assert "⚠ VALIDITY DISPUTED: " + DISPUTE_FLAG in context
+    assert "VALIDITY CAVEAT" not in context
+
+
+def test_mixed_sources_are_labelled_independently():
+    context = format_context([], [
+        {"reference": "PWD Act", "text": "a", "validity_flag": PWD_FLAG},
+        {"reference": "Amendment Act 6", "text": "b", "validity_flag": DISPUTE_FLAG},
+    ], [])
+    assert "PWD Act — ⚠ VALIDITY CAVEAT:" in context
+    assert "Amendment Act 6 — ⚠ VALIDITY DISPUTED:" in context
+
+
+@pytest.mark.parametrize("attached", [False, True])
+def test_both_prompt_branches_carry_the_caveat_instruction_and_the_flagged_label(monkeypatch, attached):
+    import backend.main as m
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return _fake_message()
+
+    monkeypatch.setattr(m.client.messages, "create", fake_create)
+    extra = dict(attached_doc_text="CONTRACT text", attached_doc_name="c.pdf") if attached else {}
+    synthesise_answer_sync("employment quotas for persons with disabilities", [],
+                           [{"reference": "PWD Act", "text": "quota...", "validity_flag": PWD_FLAG}], [], **extra)
+    prompt = captured["prompt"]
+    assert "VALIDITY CAVEAT: " + PWD_FLAG in prompt
+    assert "VALIDITY DISPUTED: " not in prompt                       # the PWD source is not called disputed
+    assert "If a legislation source below is labeled VALIDITY CAVEAT" in prompt
+    assert "If a legislation source below is labeled VALIDITY DISPUTED" in prompt   # dispute instruction untouched
+    assert "explicitly state that its enactment is disputed" in prompt
