@@ -305,6 +305,42 @@ def group_results_by_document(all_results: list) -> list:
     return sorted(final_docs, key=lambda x: x["max_similarity"], reverse=True)
 
 
+VALIDITY_LABEL_DISPUTED = "VALIDITY DISPUTED"
+VALIDITY_LABEL_CAVEAT = "VALIDITY CAVEAT"
+
+# validity_flag is free text, so which label it earns is decided from the
+# wording. The default is DISPUTED (the stronger, conservative reading); the
+# neutral CAVEAT label is used only when the flag is clearly about
+# commencement AND contains no dispute language at all.
+_DISPUTE_MARKERS = re.compile(
+    r"disput|challeng|contest|invalid|unconstitutional|\bvoid\b|ultra vires|never (?:validly )?enacted",
+    re.IGNORECASE,
+)
+_NOT_IN_FORCE = re.compile(
+    r"not\s+(?:yet\s+)?(?:in\s+force|commenced|come\s+into\s+(?:force|operation|effect))"
+    r"|yet\s+to\s+(?:come\s+into\s+(?:force|operation|effect)|commence)"
+    r"|has\s+not\s+(?:yet\s+)?commenced|awaiting\s+commencement",
+    re.IGNORECASE,
+)
+
+
+def validity_flag_label(validity_flag: str) -> str:
+    """Label for a legislation source's validity_flag in the model's context.
+
+    "VALIDITY DISPUTED" is reserved for a genuine dispute about whether the
+    enactment is valid (e.g. Constitution Amendment Act No. 6 of 2026, no
+    s.328 referendum). A not-yet-in-force caveat -- an enacted Act that has
+    simply not commenced -- gets the neutral "VALIDITY CAVEAT" so the model
+    is never prompted to describe its enactment as disputed.
+    """
+    text = validity_flag or ""
+    if _DISPUTE_MARKERS.search(text):
+        return VALIDITY_LABEL_DISPUTED
+    if _NOT_IN_FORCE.search(text):
+        return VALIDITY_LABEL_CAVEAT
+    return VALIDITY_LABEL_DISPUTED
+
+
 def format_context(results: list, legal_results: list, zlr_results: list) -> str:
     """Build the source context block injected into the synthesis prompt."""
     context_parts = []
@@ -336,7 +372,7 @@ def format_context(results: list, legal_results: list, zlr_results: list) -> str
         # mechanism -- confirmed it wasn't before adding this.
         validity_flag = r.get("validity_flag")
         if validity_flag:
-            context_parts.append(f"[LEGISLATION — {ref} — ⚠ VALIDITY DISPUTED: {validity_flag}]\n{r['text']}")
+            context_parts.append(f"[LEGISLATION — {ref} — ⚠ {validity_flag_label(validity_flag)}: {validity_flag}]\n{r['text']}")
         elif r.get("source_type") in CONTEXT_SOURCE_TYPES:
             context_parts.append(f"[BACKGROUND CONTEXT — {ref} ({r.get('source_type')})]\n{r['text']}")
         else:

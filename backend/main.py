@@ -14374,7 +14374,8 @@ NEVER state or imply that something "is absent from," "does not exist in," or "i
 - If the document appears to have a legal defect, gap, or unusual provision, flag it clearly
 - If firm precedents or legislation/case law don't materially bear on this question, say so briefly rather than forcing a connection
 - If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent
-- If a legislation source below is labeled VALIDITY DISPUTED, explicitly state that its enactment is disputed and why (using the reason given in the label) — never present it as settled, binding law, and never silently treat it as amending or superseding another source""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
+- If a legislation source below is labeled VALIDITY DISPUTED, explicitly state that its enactment is disputed and why (using the reason given in the label) — never present it as settled, binding law, and never silently treat it as amending or superseding another source
+- If a legislation source below is labeled VALIDITY CAVEAT, explicitly state the caveat given in the label (for example that the Act has not yet come into force) — do not present its provisions as currently operative law, but do not describe its enactment as disputed unless the label itself says so""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
     else:
         instructions = """Answer directly and practically:
 - If firm precedents are present, identify patterns and note them by document ID
@@ -14382,7 +14383,8 @@ NEVER state or imply that something "is absent from," "does not exist in," or "i
 - Flag variations over time
 - For drafting queries, suggest specific language from the firm precedents
 - If a firm precedent source below is labeled DRAFT, REVIEW, or SUPERSEDED, explicitly caveat any reliance on it (e.g. "based on a draft document, not yet finalized") — never present it as settled firm precedent
-- If a legislation source below is labeled VALIDITY DISPUTED, explicitly state that its enactment is disputed and why (using the reason given in the label) — never present it as settled, binding law, and never silently treat it as amending or superseding another source""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
+- If a legislation source below is labeled VALIDITY DISPUTED, explicitly state that its enactment is disputed and why (using the reason given in the label) — never present it as settled, binding law, and never silently treat it as amending or superseding another source
+- If a legislation source below is labeled VALIDITY CAVEAT, explicitly state the caveat given in the label (for example that the Act has not yet come into force) — do not present its provisions as currently operative law, but do not describe its enactment as disputed unless the label itself says so""" + TEXTURE_RULES + FACT_EXTRACTION_RULES + LAWYER_JUDGMENT_RULES + STATUTORY_MECHANISM_PRECISION + IRAC_STRUCTURE_RULES
 
     try:
         msg = client.messages.create(
