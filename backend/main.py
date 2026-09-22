@@ -5671,8 +5671,17 @@ async def list_clients(request: Request):
     user = await get_current_user(request)
     _check_permission(user, "client:read")
     async with _db_pool.acquire() as conn:
+        # Most-recently-active first, same ordering shape as list_matters()'s
+        # "ORDER BY last_activity DESC NULLS LAST, created_at DESC" — clients
+        # has no last_activity column, but update_client() stamps updated_at
+        # on every PATCH, making it the direct equivalent (updated_at is
+        # NOT NULL here, so NULLS LAST never actually triggers; kept for the
+        # same defensive shape as matters' clause). The frontend still fetches
+        # every client in one call and does its own top-10-then-search
+        # capping client-side (renderClientsList()) — this only changes what
+        # order they arrive in, not how many.
         rows = await conn.fetch(
-            "SELECT * FROM clients WHERE firm_id=$1 ORDER BY full_name ASC", FIRM_ID
+            "SELECT * FROM clients WHERE firm_id=$1 ORDER BY updated_at DESC NULLS LAST, created_at DESC", FIRM_ID
         )
     return [_row_to_client(r) for r in rows]
 
