@@ -3324,14 +3324,32 @@ function renderClientsList(filtered = null) {
   if (allCountEl) allCountEl.textContent = `(${allCount})`;
 
   const scoped = scopedClientsList();
+
+  // Sort by last activity descending (most recent first), then show only
+  // the top 10 unless searching — same comparator and "top 10, search for
+  // the rest" behavior as renderMattersList(), layered on top of the
+  // existing mine/all scope above (unchanged). Clients has no
+  // last_activity column (only matters do); updated_at is stamped on
+  // every PATCH /api/clients/{id} (see update_client()), so it's the
+  // direct equivalent here, with the same created_at fallback for a
+  // client that's never been edited since creation.
+  const sorted = [...scoped].sort((a, b) => {
+    const aDate = a.updated_at || a.created_at || '';
+    const bDate = b.updated_at || b.created_at || '';
+    return bDate.localeCompare(aDate);
+  });
+
   const isSearching = filtered !== null;
-  const displayList = isSearching ? filtered : scoped;
+  const displayList = isSearching ? filtered : sorted.slice(0, 10);
   const total = scoped.length;
+  const showing = displayList.length;
 
   if (countEl) {
-    countEl.textContent = isSearching
-      ? `${displayList.length} of ${total} client${total !== 1 ? 's' : ''}`
-      : `${total} client${total !== 1 ? 's' : ''}`;
+    if (isSearching) {
+      countEl.textContent = `${showing} of ${total} client${total !== 1 ? 's' : ''}`;
+    } else {
+      countEl.textContent = total > 10 ? `Showing 10 of ${total} — search to find others` : `${total} client${total !== 1 ? 's' : ''}`;
+    }
   }
 
   if (!displayList.length) {

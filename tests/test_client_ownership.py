@@ -62,9 +62,9 @@ class FakeConnection:
     async def fetch(self, query, *args):
         q = " ".join(query.split())
 
-        if q.startswith("SELECT * FROM clients WHERE firm_id=$1 ORDER BY full_name"):
+        if q.startswith("SELECT * FROM clients WHERE firm_id=$1 ORDER BY updated_at"):
             rows = [c for c in self.clients if c["firm_id"] == args[0]]
-            rows.sort(key=lambda c: (c["full_name"] or "").lower())
+            rows.sort(key=lambda c: (c.get("updated_at") is None, c.get("updated_at"), c.get("created_at")), reverse=True)
             return [dict(r) for r in rows]
 
         if q.startswith("SELECT initials FROM users WHERE firm_id=$1 AND initials IS NOT NULL"):

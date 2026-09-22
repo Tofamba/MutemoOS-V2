@@ -115,9 +115,11 @@ class FakeConnection:
     async def fetch(self, query, *args):
         q = " ".join(query.split())
 
-        if q.startswith("SELECT * FROM clients WHERE firm_id=$1 ORDER BY full_name"):
+        if q.startswith("SELECT * FROM clients WHERE firm_id=$1 ORDER BY updated_at"):
             rows = [c for c in self.clients if c["firm_id"] == args[0]]
-            rows.sort(key=lambda c: (c["full_name"] or "").lower())
+            # Same reverse-tuple-key idiom as the matters fake just below —
+            # most-recently-active first, created_at as the tiebreak/fallback.
+            rows.sort(key=lambda c: (c.get("updated_at") is None, c.get("updated_at"), c.get("created_at")), reverse=True)
             return [dict(r) for r in rows]
 
         if q.startswith("SELECT * FROM matters WHERE client_id=$1 AND firm_id=$2"):
@@ -301,19 +303,28 @@ def test_create_client_number_prefix_ignores_other_firms_numbers(monkeypatch):
 
 # ── list_clients ─────────────────────────────────────────────────────────
 
-def test_list_clients_is_firm_scoped_and_alphabetical(monkeypatch):
+def test_list_clients_is_firm_scoped_and_ordered_by_recency(monkeypatch):
+    """Most-recently-*updated* first (not alphabetical, not creation order) —
+    same ordering shape as list_matters()'s last_activity DESC, so the
+    frontend's top-10-then-search default (renderClientsList()) shows the
+    clients someone actually touched recently, not just whoever's early in
+    the alphabet."""
     import backend.main as m
     other_firm = uuid.uuid4()
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
     existing = [
-        {"id": uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Zulu Trading", "email": None, "phone": None,
-         "physical_address": None, "id_or_registration_number": None, "notes": None,
-         "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)},
+        # Alphabetically first, but edited longest ago -- must sort LAST.
         {"id": uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Alice Huang", "email": None, "phone": None,
          "physical_address": None, "id_or_registration_number": None, "notes": None,
-         "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)},
+         "created_at": t0, "updated_at": t0},
+        # Created before Alice, but edited most recently -- must sort FIRST,
+        # proving this is a real edit-recency sort, not just created_at.
+        {"id": uuid.uuid4(), "firm_id": FIRM_ID, "full_name": "Zulu Trading", "email": None, "phone": None,
+         "physical_address": None, "id_or_registration_number": None, "notes": None,
+         "created_at": t0.replace(year=2025), "updated_at": t0.replace(month=6)},
         {"id": uuid.uuid4(), "firm_id": other_firm, "full_name": "Other Firm Client", "email": None, "phone": None,
          "physical_address": None, "id_or_registration_number": None, "notes": None,
-         "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)},
+         "created_at": t0, "updated_at": t0.replace(month=12)},
     ]
     pool = FakePool(clients=existing)
     monkeypatch.setattr(m, "_db_pool", pool)
@@ -321,7 +332,7 @@ def test_list_clients_is_firm_scoped_and_alphabetical(monkeypatch):
     result = asyncio.run(list_clients(None))
 
     names = [c["full_name"] for c in result]
-    assert names == ["Alice Huang", "Zulu Trading"]  # alphabetical, other firm excluded
+    assert names == ["Zulu Trading", "Alice Huang"]  # most-recently-updated first, other firm excluded
 
 
 # ── get_client (detail, incl. linked matters) ───────────────────────────────
