@@ -5132,6 +5132,146 @@ async function toggleMatter(id) {
   // If closing, do nothing — don't re-render
 }
 
+// ── Matter Activity feed (UX audit fix #2) ──────────────────────────────────
+// Merges progress notes + documents into one chronological feed, most
+// recent first — same merge/sort pattern as Client Detail's own
+// _clientRecentActivityHtml(), but keeping each item's full existing
+// markup/actions from the matter panel (note delete, document view/
+// download/extract-dates/delete) rather than swapping in Client Detail's
+// simplified read-only cards, which have none of those actions.
+function _matterActivityHtml(id, notes, docs) {
+  const items = [];
+  (notes || []).forEach(n => items.push({ type: 'note', ts: n.created_at, data: n }));
+  (docs || []).forEach(d => items.push({ type: 'document', ts: d.uploaded_at, data: d }));
+  if (!items.length) return '<p style="color:var(--ink3);font-size:0.78rem;padding:0.25rem 0">No notes or documents yet.</p>';
+  items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  return items.map(it => it.type === 'note' ? _matterNoteItemHtml(id, it.data) : _matterDocItemHtml(id, it.data)).join('');
+}
+
+function _matterNoteItemHtml(id, n) {
+  return `
+    <div class="note-item">
+      <div class="note-text">${escHtml(n.text)}</div>
+      <div class="note-footer">
+        <span>🖊 ${n.author} · ${n.created_at?.slice(0,10)}</span>
+        ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}" class="note-delete note-delete-btn">✕ Remove</button>` : ''}
+      </div>
+    </div>`;
+}
+
+function _matterDocItemHtml(id, d) {
+  return `
+    <div class="doc-item">
+      <div class="doc-icon">${d.document_type?.includes('judgment') || d.document_type?.includes('court') ? '⚖' : '📄'}</div>
+      <div style="flex:1;min-width:0">
+        <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
+        <div class="doc-meta" style="margin-top:2px">
+          ${documentStatusChipHtml(d.document_status)}
+          ${d.provenance_document_type ? `<span class="chip chip-blue">${escHtml(d.provenance_document_type)}</span>` : ''}
+          ${d.document_type ? `<span class="chip chip-gray">${d.document_type.replace(/_/g,' ')}</span>` : ''}
+          ${d.doc_date ? `<span class="chip chip-blue">${d.doc_date}</span>` : ''}
+          ${d.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
+          ${d.needs_review ? `<span class="chip chip-red" title="OCR confidence ${d.ocr_confidence}% — verify against the original document">⚠ Low OCR confidence</span>` : ''}
+          <span class="chip ${d.status==='complete'?'chip-green':d.status==='error'?'chip-red':'chip-gold'}">${d.status}</span>
+        </div>
+      </div>
+      ${d.status === 'complete' ? `
+      <div style="display:flex;gap:4px;flex-shrink:0">
+        ${d.r2_key ? `
+        <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}','${escHtml(d.filename)}')"
+                title="View document">👁 View</button>
+        <button class="btn btn-sm btn-outline" onclick="downloadDocument('${d.id}','${escHtml(d.filename)}')"
+                title="Download document">⬇</button>
+        ` : ''}
+        <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
+                title="Extract court dates and deadlines">📅</button>
+        <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
+                title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
+      </div>` : `
+      <div style="display:flex;gap:4px;flex-shrink:0">
+        <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
+                title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
+      </div>`}
+    </div>`;
+}
+
+// ── Matter Overview (UX audit fix #2) ───────────────────────────────────────
+// "At a glance" facts a lawyer shouldn't have to expand any sub-section to
+// see: status, stage, due date, last activity, responsible lawyer, next
+// action, and — previously a dead end — a working link to the linked
+// client's own record. Additive: the existing "Matter Details" section
+// below still owns the raw editable ref/status/health/client-picker
+// fields and their onchange wiring, untouched.
+//
+// availableUsers backs the Responsible Lawyer dropdown, same GET /api/users
+// + silent-degrade-to-[] pattern as the Compliance modal's own Responsible
+// Person selector (admin/partner only — an associate/secretary opening
+// this sees the current name but an empty reassignment dropdown, same
+// existing limitation as that modal, not a new one introduced here).
+function _matterOverviewHtml(matter, id, linkedClient, availableUsers) {
+  const status = matter.status || 'Active';
+  const statusColor = STATUS_COLORS[status] || 'chip-gray';
+  const stage = matter.stage_info?.current_stage;
+  const lastActivity = matter.last_activity ? matter.last_activity.slice(0, 10) : null;
+  const userOptions = (availableUsers || []).map(u =>
+    `<option value="${u.id}">${escHtml(u.display_name || u.phone || 'Unnamed user')}</option>`).join('');
+
+  const clientLineHtml = linkedClient ? `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border)">
+      <span style="font-size:0.72rem;color:var(--ink3);font-weight:600">CLIENT</span>
+      <span style="font-size:0.85rem">${escHtml(linkedClient.full_name)}</span>
+      ${complianceStatusChipHtml(linkedClient.compliance_status)}
+      <a href="#" onclick="event.preventDefault();goToClientFromMatter('${linkedClient.id}')" style="font-size:0.78rem;color:var(--blue);text-decoration:none">View Client →</a>
+    </div>` : (matter.client_name ? `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border)">
+      <span style="font-size:0.72rem;color:var(--ink3);font-weight:600">CLIENT</span>
+      <span style="font-size:0.85rem">${escHtml(matter.client_name)}</span>
+      <span style="font-size:0.72rem;color:var(--ink3)">(not linked to a client record — see CLIENT field below)</span>
+    </div>` : '');
+
+  return `
+    <div class="matter-section" style="background:var(--white)">
+      <div class="matter-section-title">🎯 Overview</div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;margin-bottom:10px">
+        <div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">STATUS</label>
+          <span class="chip ${statusColor}">${escHtml(status)}</span></div>
+        ${stage ? `<div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">STAGE</label>
+          <span class="chip chip-blue">${escHtml(stage)}</span></div>` : ''}
+        <div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">DUE DATE</label>
+          ${matter.next_deadline ? deadlineChipHtml(matter) : '<span style="font-size:0.78rem;color:var(--ink3)">—</span>'}</div>
+        <div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">LAST ACTIVITY</label>
+          <span style="font-size:0.78rem;color:var(--ink2)">${lastActivity || '—'}</span></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap">
+        <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:120px">RESPONSIBLE LAWYER</label>
+        ${matter.responsible_lawyer_name ? `<span class="chip chip-gray">${escHtml(matter.responsible_lawyer_name)}</span>` : '<span style="font-size:0.78rem;color:var(--ink3)">Not assigned</span>'}
+        <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+                onchange="if(this.value) updateMatterField('${id}','responsible_lawyer_id',this.value)">
+          <option value="">${availableUsers && availableUsers.length ? '— Reassign —' : '— (none available) —'}</option>
+          ${userOptions}
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+        <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:120px">NEXT ACTION</label>
+        <input type="text" value="${escHtml(matter.next_action || '')}"
+          style="flex:1;min-width:220px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+          onchange="updateMatterField('${id}','next_action',this.value)"
+          placeholder="e.g. File Heads of Argument by Friday"/>
+      </div>
+      ${clientLineHtml}
+    </div>`;
+}
+
+// Jumps from a matter's Overview to that linked client's own detail view —
+// the reverse direction of goToMatter() (client -> matter). Needs a real
+// fetch (openClientDetail), not just a tab switch, since the Clients tab's
+// detail view isn't populated until explicitly opened.
+function goToClientFromMatter(clientId) {
+  if (!clientId) return;
+  showTab('clients');
+  openClientDetail(clientId);
+}
+
 async function renderMatterPanel(id) {
   const matter = matters.find(m => m.id === id);
   if (!matter) return;
@@ -5139,11 +5279,26 @@ async function renderMatterPanel(id) {
   content.innerHTML = '<div style="padding:0.5rem 0;color:var(--ink3)">Loading…</div>';
 
   try {
-    const res = await fetch(`${API}/api/matters/${id}/documents`);
-    const docs = await res.json();
+    // Fetched together: documents (as before), the linked client's own
+    // record (for the Overview's client summary/compliance chip/View
+    // Client link — list_clients()/the cached `clients` array never carry
+    // compliance_status, only get_client() computes it), and the firm's
+    // users (for the Responsible Lawyer reassignment dropdown). The
+    // latter two degrade to null/[] rather than failing the whole panel —
+    // no linked client, or a 403 on /api/users for a non-admin role, are
+    // both normal, expected states, not errors.
+    const [docsRes, clientRes, usersRes] = await Promise.all([
+      fetch(`${API}/api/matters/${id}/documents`),
+      matter.client_id ? fetch(`${API}/api/clients/${matter.client_id}`) : Promise.resolve(null),
+      fetch(`${API}/api/users`),
+    ]);
+    const docs = await docsRes.json();
+    const linkedClient = (clientRes && clientRes.ok) ? await clientRes.json() : null;
+    const availableUsers = usersRes.ok ? await usersRes.json() : [];
     const status = matter.status || 'Active';
     const notes = matter.progress_notes || [];
     const html = `
+      ${_matterOverviewHtml(matter, id, linkedClient, availableUsers)}
       ${matterStageTrackerHtml(matter)}
 
       <!-- Matter metadata controls -->
@@ -5356,63 +5511,22 @@ async function renderMatterPanel(id) {
       </div>
       ` : ''}
 
-      <!-- Progress Notes -->
+      <!-- Activity — merged notes + documents, most recent first (UX audit
+           fix #2: same merge/sort pattern as Client Detail's own
+           _clientRecentActivityHtml(), reusing the matter panel's OWN
+           richer per-item markup below, not Client Detail's simplified
+           read-only cards -- that version has no document actions
+           (view/download/extract dates/delete), which would be a real
+           regression here, not just a style difference. -->
       <div class="matter-section">
-        <div class="matter-section-title">📝 Progress Notes
-          <button class="btn btn-primary btn-sm" onclick="openNoteModal('${id}')" style="margin-left:auto;font-size:0.7rem;padding:3px 10px">+ Add Note</button>
+        <div class="matter-section-title">🕐 Activity
+          <span style="margin-left:auto;display:flex;gap:6px">
+            <button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')" style="font-size:0.7rem;padding:3px 10px">⬆ Upload</button>
+            <button class="btn btn-primary btn-sm" onclick="openNoteModal('${id}')" style="font-size:0.7rem;padding:3px 10px">+ Add Note</button>
+          </span>
         </div>
         <div id="note-date-prompt-${id}" style="display:none"></div>
-        <div id="notes-list-${id}">
-          ${notes.length ? notes.map(n => `
-            <div class="note-item">
-              <div class="note-text">${escHtml(n.text)}</div>
-              <div class="note-footer">
-                <span>🖊 ${n.author} · ${n.created_at?.slice(0,10)}</span>
-                ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}" class="note-delete note-delete-btn">✕ Remove</button>` : ''}
-              </div>
-            </div>`).join('') : '<p style="color:var(--ink3);font-size:0.78rem;padding:0.25rem 0">No notes yet.</p>'}
-        </div>
-      </div>
-
-      <!-- Documents -->
-      <div class="matter-section">
-        <div class="matter-section-title">📄 Documents
-          <button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')" style="margin-left:auto;font-size:0.7rem;padding:3px 10px">⬆ Upload</button>
-        </div>
-        ${!docs.length ? '<p style="color:var(--ink3);font-size:0.78rem">No documents uploaded yet.</p>' :
-          docs.map(d => `
-          <div class="doc-item">
-            <div class="doc-icon">${d.document_type?.includes('judgment') || d.document_type?.includes('court') ? '⚖' : '📄'}</div>
-            <div style="flex:1;min-width:0">
-              <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
-              <div class="doc-meta" style="margin-top:2px">
-                ${documentStatusChipHtml(d.document_status)}
-                ${d.provenance_document_type ? `<span class="chip chip-blue">${escHtml(d.provenance_document_type)}</span>` : ''}
-                ${d.document_type ? `<span class="chip chip-gray">${d.document_type.replace(/_/g,' ')}</span>` : ''}
-                ${d.doc_date ? `<span class="chip chip-blue">${d.doc_date}</span>` : ''}
-                ${d.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
-                ${d.needs_review ? `<span class="chip chip-red" title="OCR confidence ${d.ocr_confidence}% — verify against the original document">⚠ Low OCR confidence</span>` : ''}
-                <span class="chip ${d.status==='complete'?'chip-green':d.status==='error'?'chip-red':'chip-gold'}">${d.status}</span>
-              </div>
-            </div>
-            ${d.status === 'complete' ? `
-            <div style="display:flex;gap:4px;flex-shrink:0">
-              ${d.r2_key ? `
-              <button class="btn btn-sm btn-outline" onclick="viewDocument('${d.id}','${escHtml(d.filename)}')"
-                      title="View document">👁 View</button>
-              <button class="btn btn-sm btn-outline" onclick="downloadDocument('${d.id}','${escHtml(d.filename)}')"
-                      title="Download document">⬇</button>
-              ` : ''}
-              <button class="btn btn-sm btn-outline" onclick="extractDates('${d.id}','${escHtml(d.filename)}')"
-                      title="Extract court dates and deadlines">📅</button>
-              <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
-                      title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
-            </div>` : `
-            <div style="display:flex;gap:4px;flex-shrink:0">
-              <button class="btn btn-sm" onclick="deleteDocument('${d.id}','${escHtml(d.filename)}','${id}')"
-                      title="Delete document" style="background:none;border:1px solid var(--border);color:var(--ink3);border-radius:4px;padding:2px 6px;cursor:pointer;font-size:0.75rem">🗑</button>
-            </div>`}
-          </div>`).join('')}
+        <div id="notes-list-${id}">${_matterActivityHtml(id, notes, docs)}</div>
       </div>
 
       <!-- Rules of Court Calculator -->

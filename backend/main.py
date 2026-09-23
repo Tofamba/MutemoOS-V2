@@ -246,6 +246,31 @@ async def run_migrations():
         -- enum, aml_scope_reason pattern. Required going forward only.
         ALTER TABLE matters ADD COLUMN IF NOT EXISTS matter_risk_reason TEXT;
 
+        -- Matter overview "at a glance" fields (2026-09-23, UX audit fix #2).
+        -- responsible_lawyer_id is deliberately a NEW column, not a reuse of
+        -- the existing assigned_lawyer_id -- that one belongs to a separate
+        -- Legal Corner panel-lawyer referral/SLA workflow (coverage_tier,
+        -- sla_deadline, its own matter_reassignments audit trail), not a
+        -- general "who's responsible for this matter" concept applicable to
+        -- every ordinary matter. Nullable + no default at the column level;
+        -- create_matter() defaults it to the creating lawyer, and existing
+        -- rows are backfilled the same way just below, so "who's
+        -- responsible" is never blank for a matter that already has an
+        -- owner, without conflating the two concepts.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS responsible_lawyer_id UUID REFERENCES users(id);
+        UPDATE matters SET responsible_lawyer_id = created_by
+            WHERE responsible_lawyer_id IS NULL AND created_by IS NOT NULL;
+        -- Free text, no enum -- same convention as aml_scope_reason/
+        -- matter_risk_reason above. Distinct from next_deadline (a hard
+        -- court/filing date) and next_review_date (a soft internal nudge):
+        -- this is what to actually DO next, e.g. "File Heads of Argument by
+        -- Friday" -- previously this only ever existed transiently inside
+        -- Bulk Import's parsed "next action" column, folded into a plain
+        -- progress note and indistinguishable from any other note
+        -- thereafter (see build_matter_dict() further down). Now a real,
+        -- persistent, editable field surfaced on the matter overview.
+        ALTER TABLE matters ADD COLUMN IF NOT EXISTS next_action TEXT;
+
         -- Matter review safety net (2026-08-30): every matter gets a soft
         -- "please look at this" nudge date, distinct from next_deadline
         -- above (a hard court/filing deadline). Modeled on a real prior
@@ -3275,6 +3300,12 @@ async def auto_create_matter(req: AutoCreateMatterRequest, request: Request):
             assigned_lawyer_id=lawyer_uuid, coverage_tier=req.coverage_tier,
             service_type=req.service_type, sla_deadline=sla_deadline,
             created_at=created_at,
+            # No created_by on this server-to-server path (see comment
+            # above) -- _create_matter_row()'s default of
+            # responsible_lawyer_id=created_by would leave this blank on a
+            # matter that's actively being worked, so pass the panel
+            # lawyer actually doing the work explicitly instead.
+            responsible_lawyer_id=lawyer_uuid,
         )
 
     return {**_row_to_doc(row), "created": True}
@@ -3796,6 +3827,11 @@ class MatterUpdate(BaseModel):
     aml_scope_reason: Optional[str] = None
     matter_risk: Optional[str] = None
     matter_risk_reason: Optional[str] = None
+    # Matter overview "at a glance" fields (2026-09-23, UX audit fix #2) —
+    # see the schema comment in run_migrations() for why responsible_lawyer_id
+    # is a separate column from the unrelated Legal Corner assigned_lawyer_id.
+    responsible_lawyer_id: Optional[str] = None
+    next_action: Optional[str] = None
 
 class ClientCreate(BaseModel):
     full_name: str
@@ -4276,6 +4312,7 @@ async def _create_matter_row(
     last_activity: Optional[datetime] = None,
     next_review_date: Optional[date] = None,
     last_reviewed_date: Optional[date] = None,
+    responsible_lawyer_id: Optional[_uuid_mod.UUID] = None,
 ) -> "asyncpg.Record":
     """
     Shared INSERT for a new matters row. Atomically allocates
@@ -4302,6 +4339,14 @@ async def _create_matter_row(
     ever passes one explicitly -- none currently do, since MatterCreate
     has no such field) rather than at each of the 5 call sites, so every
     matter-creation path gets the review safety net uniformly for free.
+
+    `responsible_lawyer_id` defaults to `created_by` on the same
+    unconditional-unless-passed basis, for the same reason: whoever
+    creates a matter is its responsible lawyer until reassigned, and no
+    caller currently has any other opinion on this (MatterCreate has no
+    such field either) -- see the "at a glance" overview fields comment
+    in run_migrations() for why this is a separate column from the
+    Legal Corner workflow's assigned_lawyer_id above, not a reuse of it.
     """
     mid = _uuid_mod.uuid4()
     matter_number = (
@@ -4312,6 +4357,8 @@ async def _create_matter_row(
         next_review_date = date.today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
     if last_reviewed_date is None:
         last_reviewed_date = date.today()
+    if responsible_lawyer_id is None:
+        responsible_lawyer_id = created_by
     return await conn.fetchrow("""
         INSERT INTO matters (
             id, firm_id, name, number, internal_ref, external_ref,
@@ -4319,9 +4366,9 @@ async def _create_matter_row(
             status, custom_status, next_deadline, next_deadline_note,
             assigned_lawyer_id, coverage_tier, service_type, sla_deadline,
             matter_number, created_by, created_at, last_activity,
-            next_review_date, last_reviewed_date
+            next_review_date, last_reviewed_date, responsible_lawyer_id
         )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
         RETURNING *
     """,
     mid, firm_id, name, number, internal_ref, external_ref,
@@ -4329,7 +4376,7 @@ async def _create_matter_row(
     status, custom_status, next_deadline, next_deadline_note,
     assigned_lawyer_id, coverage_tier, service_type, sla_deadline,
     matter_number, created_by, created_at, last_activity,
-    next_review_date, last_reviewed_date,
+    next_review_date, last_reviewed_date, responsible_lawyer_id,
     )
 
 
@@ -4426,7 +4473,7 @@ async def _sync_client_relationship_ended(conn, client_id) -> None:
 
 def _row_to_matter(row) -> dict:
     d = dict(row)
-    for k in ("id", "firm_id", "created_by", "client_id"):
+    for k in ("id", "firm_id", "created_by", "client_id", "responsible_lawyer_id"):
         if d.get(k):
             d[k] = str(d[k])
     for k in ("created_at", "last_activity"):
@@ -5647,6 +5694,15 @@ async def list_matters(request: Request):
                 "ORDER BY last_activity DESC NULLS LAST, created_at DESC",
                 FIRM_ID
             )
+    # Resolved once per call, not per row -- same names_by_user_id pattern
+    # used for compliance exceptions' responsible_person_name. Feeds the
+    # matter overview's Responsible Lawyer display (2026-09-23, UX audit
+    # fix #2); responsible_lawyer_id itself is already on each row from
+    # SELECT * above via _row_to_matter().
+    async with _db_pool.acquire() as conn:
+        user_rows = await conn.fetch("SELECT id, display_name FROM users WHERE firm_id=$1", FIRM_ID)
+    names_by_user_id = {str(u["id"]): u["display_name"] for u in user_rows}
+
     matters = []
     for row in rows:
         m = _row_to_matter(row)
@@ -5657,6 +5713,7 @@ async def list_matters(request: Request):
                 row["id"]
             )
         m["progress_notes"] = [_row_to_note(n) for n in note_rows]
+        m["responsible_lawyer_name"] = names_by_user_id.get(m.get("responsible_lawyer_id"))
         # Computed status badge (never manually set) -- feeds the matter
         # panel's health badge directly, since this is the same `matters`
         # array the panel reads a given matter from.
@@ -7795,6 +7852,20 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             if "client_name" not in fields:
                 fields["client_name"] = client_row["full_name"]
 
+        if "responsible_lawyer_id" in fields:
+            # Same UUID-typing + firm-ownership check as client_id above --
+            # a matter can't be handed to another firm's user record.
+            try:
+                lawyer_uuid = _uuid_mod.UUID(fields["responsible_lawyer_id"])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="responsible_lawyer_id must be a valid UUID")
+            lawyer_row = await conn.fetchrow(
+                "SELECT id FROM users WHERE id=$1 AND firm_id=$2", lawyer_uuid, FIRM_ID
+            )
+            if not lawyer_row:
+                raise HTTPException(status_code=404, detail="User not found")
+            fields["responsible_lawyer_id"] = lawyer_uuid
+
         # Fetched before the UPDATE, only when relevant, so Part C
         # compliance history logs the real old->new transition -- not
         # fetched on every matter PATCH (this endpoint is touched far
@@ -7864,6 +7935,16 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             "SELECT * FROM progress_notes WHERE matter_id=$1 ORDER BY created_at ASC",
             _uuid_mod.UUID(matter_id)
         )
+        # Same "resolve the display name server-side so the frontend can
+        # merge the full response in without a second fetch" convention as
+        # client_name above -- only queried when actually set, matching
+        # list_matters()'s names_by_user_id lookup for the same field.
+        m["responsible_lawyer_name"] = None
+        if m.get("responsible_lawyer_id"):
+            lawyer_row = await conn.fetchrow(
+                "SELECT display_name FROM users WHERE id=$1", _uuid_mod.UUID(m["responsible_lawyer_id"])
+            )
+            m["responsible_lawyer_name"] = lawyer_row["display_name"] if lawyer_row else None
     m["progress_notes"] = [_row_to_note(n) for n in note_rows]
     return m
 
