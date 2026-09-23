@@ -1011,217 +1011,236 @@ select{cursor:pointer}
 </div>
 
 <!-- ═══════════════ CALENDAR TAB ═══════════════ -->
+<!-- UX audit fix #3 (2026-09-23): the three form cards (Add Event, Email
+     Reminders, Daily Vault Digest) used to render permanently open in a
+     left column, ahead of Upcoming Events, with five buttons visible at
+     once -- the worst "one primary action" violation of the eight audited
+     screens. Same modal-behind-a-compact-button pattern already used for
+     Bulk Import Matters (see bulk-import-modal below): the two forms move
+     into on-demand modals, Upcoming Events moves to the top, and only one
+     primary action ("+ Add Event") is visible by default. No new nav
+     destination is created for the settings modal -- that's nav
+     consolidation, still separately held. -->
 <div id="tab-calendar" style="display:none">
-  <div class="grid-2">
+  <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
     <div>
-      <div class="section-head">
-        <h2>📅 Calendar</h2>
-        <p>Track hearings, deadlines, and filings. Never miss a court date.</p>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div class="card-icon">➕</div>
-          <div><div class="card-title">Add Event</div></div>
-        </div>
-        <div class="card-body">
-          <div id="cal-status" class="status"></div>
-          <div class="form-group">
-            <label>Event Title *</label>
-            <input type="text" id="cal-title" placeholder="e.g. Moyo v Dube — Hearing on Rule Nisi"/>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Type</label>
-              <select id="cal-type" onchange="toggleCustomEventType(this)">
-                <optgroup label="Court">
-                  <option value="hearing">Court Hearing</option>
-                  <option value="deadline">Deadline / Dies</option>
-                  <option value="filing">Filing Date</option>
-                  <option value="round_table">Round Table Conference</option>
-                  <option value="ptc">Pre-Trial Conference</option>
-                  <option value="mediation">Mediation / Arbitration</option>
-                </optgroup>
-                <optgroup label="Client & Office">
-                  <option value="meeting">Client Meeting</option>
-                  <option value="consultation">Consultation</option>
-                  <option value="signing">Document Signing</option>
-                  <option value="call">Phone / Video Call</option>
-                </optgroup>
-                <optgroup label="Professional">
-                  <option value="speaking">Speaking Engagement</option>
-                  <option value="radio_tv">Radio / TV Programme</option>
-                  <option value="cpd">CPD / Training</option>
-                  <option value="lsz">Law Society Event</option>
-                  <option value="board">Board Meeting</option>
-                </optgroup>
-                <optgroup label="Practice & Internal">
-                  <option value="staff_meeting">Staff / Admin Meeting</option>
-                  <option value="leave">Leave / Absence</option>
-                  <option value="billing_review">Billing / Finance Review</option>
-                  <option value="pro_bono">Pro Bono</option>
-                  <option value="networking">Networking / Business Development</option>
-                  <option value="file_review">File review</option>
-                </optgroup>
-                <optgroup label="Court & Litigation">
-                  <option value="chamber_application">Chamber Application</option>
-                  <option value="judgment_awaiting">Judgment / Order Awaiting</option>
-                </optgroup>
-                <optgroup label="Personal">
-                  <option value="social">Social Event</option>
-                  <option value="church">Church / Ministry</option>
-                  <option value="personal">Personal</option>
-                </optgroup>
-                <option value="other">Other (specify below)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Matter</label>
-              <input type="text" id="cal-matter-search" placeholder="🔍 Type to filter matters…"
-                     oninput="filterMatterOptions('cal-matter', this.value)"
-                     style="margin-bottom:0.35rem"/>
-              <select id="cal-matter">
-                <option value="">— None —</option>
-              </select>
-            </div>
-          </div>
-          <div class="form-group" id="cal-custom-type-group" style="display:none">
-            <label>Specify event type</label>
-            <input type="text" id="cal-custom-type" placeholder="e.g. Consultation, Taxation of Bill, Pre-trial conference…"/>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Date *</label>
-              <input type="date" id="cal-date"/>
-            </div>
-            <div class="form-group">
-              <label>Time (HH:MM)</label>
-              <input type="text" id="cal-time" placeholder="e.g. 09:00 or 14:30" maxlength="5"
-                     oninput="this.value=this.value.replace(/[^0-9:]/g,'')"/>
-            </div>
-          </div>
-          <div class="form-group">
-            <label>Court / Location</label>
-            <input type="text" id="cal-court" placeholder="e.g. High Court Harare, Courtroom 3"/>
-          </div>
-          <div class="form-group">
-            <label>Notes</label>
-            <textarea id="cal-notes" rows="2" placeholder="Any additional notes…"></textarea>
-          </div>
-          <div class="form-group">
-            <label>Invite attendees (optional)</label>
-            <div id="cal-attendee-rows"></div>
-            <button type="button" class="btn btn-sm btn-outline" style="margin-top:4px" onclick="addAttendeeRow()">+ Add attendee</button>
-          </div>
-          <div class="form-group" id="cal-invite-message-group" style="display:none">
-            <label>Message to attendees (optional)</label>
-            <textarea id="cal-invite-message" rows="2" placeholder="e.g. Please bring the signed lease agreement…"></textarea>
-            <div id="cal-invite-message-hint" style="font-size:0.7rem;color:var(--ink3);margin-top:4px"></div>
-          </div>
-          <button class="btn btn-primary" onclick="addCalendarEvent()">📅 Add to Calendar</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div class="card-icon">✉</div>
-          <div><div class="card-title">Email Reminders</div><div class="card-desc">Daily summary of upcoming hearings &amp; deadlines</div></div>
-        </div>
-        <div class="card-body">
-          <div id="reminder-status" class="status"></div>
-          <div id="reminder-smtp-warning" style="display:none;margin-bottom:0.75rem" class="status show error">
-            Email sending is not configured on the server. Ask your administrator to set SMTP_HOST, SMTP_USER, SMTP_PASSWORD, and SMTP_FROM.
-          </div>
-          <div class="form-group">
-            <label>Recipient Email</label>
-            <input type="email" id="reminder-email" placeholder="e.g. name@yourfirm.co.zw"/>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Send Time</label>
-              <select id="reminder-hour">
-                <option value="3">5:00 AM (CAT)</option>
-                <option value="4">6:00 AM (CAT)</option>
-                <option value="5" selected>7:00 AM (CAT)</option>
-                <option value="6">8:00 AM (CAT)</option>
-                <option value="7">9:00 AM (CAT)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Enabled</label>
-              <select id="reminder-enabled">
-                <option value="false">Off</option>
-                <option value="true">On — daily reminder</option>
-              </select>
-            </div>
-          </div>
-          <div class="actions-row" style="margin-top:0.25rem">
-            <button class="btn btn-primary" onclick="saveReminderSettings()" style="margin-top:0">💾 Save Settings</button>
-            <button class="btn btn-outline" onclick="sendTestReminder()">✉ Send Test Email</button>
-          </div>
-          <div class="tip">Reminders cover events in the next 7 days, with anything today or tomorrow highlighted first. An .ics calendar file is attached so you can add events to your phone with one tap.</div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div class="card-icon">📰</div>
-          <div><div class="card-title">Daily Vault Digest</div><div class="card-desc">Summary of new news, legislation &amp; judgments added each day</div></div>
-        </div>
-        <div class="card-body">
-          <div id="digest-status" class="status"></div>
-          <div class="form-group">
-            <label>Recipient Email</label>
-            <input type="email" id="digest-email" placeholder="e.g. a separate inbox for legal updates"/>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Send Time</label>
-              <select id="digest-hour">
-                <option value="5">7:00 AM (CAT)</option>
-                <option value="6" selected>8:00 AM (CAT)</option>
-                <option value="7">9:00 AM (CAT)</option>
-                <option value="8">10:00 AM (CAT)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>Enabled</label>
-              <select id="digest-enabled">
-                <option value="false">Off</option>
-                <option value="true">On — daily digest</option>
-              </select>
-            </div>
-          </div>
-          <div class="actions-row" style="margin-top:0.25rem">
-            <button class="btn btn-primary" onclick="saveDigestSettings()" style="margin-top:0">💾 Save Settings</button>
-            <button class="btn btn-outline" onclick="sendTestDigest()">✉ Send Test Email</button>
-          </div>
-          <div class="tip">Covers news, new legislation, and new judgments added since the last digest. The default send time (8:00 AM CAT) is set to run after that morning's scraping is done, so it's a complete same-day summary. Sent Mon–Fri only.</div>
-        </div>
-      </div>
+      <h2>📅 Calendar</h2>
+      <p>Track hearings, deadlines, and filings. Never miss a court date.</p>
     </div>
-
-    <div>
-      <div id="cal-pending-invites-section" style="display:none">
-        <div class="section-head">
-          <h2>Invites Awaiting Your Response</h2>
-          <p>Not on your calendar until you accept.</p>
-        </div>
-        <div id="cal-pending-invites"></div>
-        <hr class="divider"/>
-      </div>
-
-      <div class="section-head">
-        <h2>Upcoming Events</h2>
-        <p>Sorted by date. Court hearings are highlighted.</p>
-      </div>
-      <div id="cal-upcoming"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:0.25rem">
+      <button class="btn btn-outline btn-compact" onclick="openCalendarSettingsModal()">⚙ Notification Settings</button>
+      <button class="btn btn-primary btn-compact" onclick="openAddEventModal()">+ Add Event</button>
     </div>
   </div>
+
+  <div id="cal-pending-invites-section" style="display:none">
+    <div class="section-head">
+      <h2>Invites Awaiting Your Response</h2>
+      <p>Not on your calendar until you accept.</p>
+    </div>
+    <div id="cal-pending-invites"></div>
+    <hr class="divider"/>
+  </div>
+
+  <div class="section-head">
+    <h2>Upcoming Events</h2>
+    <p>Sorted by date, including each open matter's own due date. Court hearings are highlighted.</p>
+  </div>
+  <div id="cal-upcoming"></div>
 
   <hr class="divider"/>
   <h3 style="font-size:0.95rem;color:var(--ink2);margin-bottom:0.75rem">All Events</h3>
   <div id="cal-all"></div>
+</div>
+
+<!-- Add Event modal -- same form/field ids as before, just moved from a
+     permanently-open card into an on-demand modal. -->
+<div id="add-event-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(560px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+      <div style="font-weight:700;font-size:1rem">➕ Add Event</div>
+      <button onclick="closeAddEventModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+    <div id="cal-status" class="status"></div>
+    <div class="form-group">
+      <label>Event Title *</label>
+      <input type="text" id="cal-title" placeholder="e.g. Moyo v Dube — Hearing on Rule Nisi"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Type</label>
+        <select id="cal-type" onchange="toggleCustomEventType(this)">
+          <optgroup label="Court">
+            <option value="hearing">Court Hearing</option>
+            <option value="deadline">Deadline / Dies</option>
+            <option value="filing">Filing Date</option>
+            <option value="round_table">Round Table Conference</option>
+            <option value="ptc">Pre-Trial Conference</option>
+            <option value="mediation">Mediation / Arbitration</option>
+          </optgroup>
+          <optgroup label="Client & Office">
+            <option value="meeting">Client Meeting</option>
+            <option value="consultation">Consultation</option>
+            <option value="signing">Document Signing</option>
+            <option value="call">Phone / Video Call</option>
+          </optgroup>
+          <optgroup label="Professional">
+            <option value="speaking">Speaking Engagement</option>
+            <option value="radio_tv">Radio / TV Programme</option>
+            <option value="cpd">CPD / Training</option>
+            <option value="lsz">Law Society Event</option>
+            <option value="board">Board Meeting</option>
+          </optgroup>
+          <optgroup label="Practice & Internal">
+            <option value="staff_meeting">Staff / Admin Meeting</option>
+            <option value="leave">Leave / Absence</option>
+            <option value="billing_review">Billing / Finance Review</option>
+            <option value="pro_bono">Pro Bono</option>
+            <option value="networking">Networking / Business Development</option>
+            <option value="file_review">File review</option>
+          </optgroup>
+          <optgroup label="Court & Litigation">
+            <option value="chamber_application">Chamber Application</option>
+            <option value="judgment_awaiting">Judgment / Order Awaiting</option>
+          </optgroup>
+          <optgroup label="Personal">
+            <option value="social">Social Event</option>
+            <option value="church">Church / Ministry</option>
+            <option value="personal">Personal</option>
+          </optgroup>
+          <option value="other">Other (specify below)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Matter</label>
+        <input type="text" id="cal-matter-search" placeholder="🔍 Type to filter matters…"
+               oninput="filterMatterOptions('cal-matter', this.value)"
+               style="margin-bottom:0.35rem"/>
+        <select id="cal-matter">
+          <option value="">— None —</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group" id="cal-custom-type-group" style="display:none">
+      <label>Specify event type</label>
+      <input type="text" id="cal-custom-type" placeholder="e.g. Consultation, Taxation of Bill, Pre-trial conference…"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Date *</label>
+        <input type="date" id="cal-date"/>
+      </div>
+      <div class="form-group">
+        <label>Time (HH:MM)</label>
+        <input type="text" id="cal-time" placeholder="e.g. 09:00 or 14:30" maxlength="5"
+               oninput="this.value=this.value.replace(/[^0-9:]/g,'')"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Court / Location</label>
+      <input type="text" id="cal-court" placeholder="e.g. High Court Harare, Courtroom 3"/>
+    </div>
+    <div class="form-group">
+      <label>Notes</label>
+      <textarea id="cal-notes" rows="2" placeholder="Any additional notes…"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Invite attendees (optional)</label>
+      <div id="cal-attendee-rows"></div>
+      <button type="button" class="btn btn-sm btn-outline" style="margin-top:4px" onclick="addAttendeeRow()">+ Add attendee</button>
+    </div>
+    <div class="form-group" id="cal-invite-message-group" style="display:none">
+      <label>Message to attendees (optional)</label>
+      <textarea id="cal-invite-message" rows="2" placeholder="e.g. Please bring the signed lease agreement…"></textarea>
+      <div id="cal-invite-message-hint" style="font-size:0.7rem;color:var(--ink3);margin-top:4px"></div>
+    </div>
+    <button class="btn btn-primary" style="width:100%" onclick="addCalendarEvent()">📅 Add to Calendar</button>
+  </div>
+</div>
+
+<!-- Notification Settings modal -- Email Reminders + Daily Vault Digest,
+     unchanged fields/ids, just moved off the default Calendar view. Both
+     are one-time setup, not something worth two permanently-open cards
+     ahead of the events someone actually opens this tab to see. -->
+<div id="calendar-settings-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(480px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem">
+      <div style="font-weight:700;font-size:1rem">⚙ Notification Settings</div>
+      <button onclick="closeCalendarSettingsModal()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+
+    <div class="card-header" style="padding:0;margin-bottom:0.5rem">
+      <div class="card-icon">✉</div>
+      <div><div class="card-title">Email Reminders</div><div class="card-desc">Daily summary of upcoming hearings &amp; deadlines</div></div>
+    </div>
+    <div id="reminder-status" class="status"></div>
+    <div id="reminder-smtp-warning" style="display:none;margin-bottom:0.75rem" class="status show error">
+      Email sending is not configured on the server. Ask your administrator to set SMTP_HOST, SMTP_USER, SMTP_PASSWORD, and SMTP_FROM.
+    </div>
+    <div class="form-group">
+      <label>Recipient Email</label>
+      <input type="email" id="reminder-email" placeholder="e.g. name@yourfirm.co.zw"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Send Time</label>
+        <select id="reminder-hour">
+          <option value="3">5:00 AM (CAT)</option>
+          <option value="4">6:00 AM (CAT)</option>
+          <option value="5" selected>7:00 AM (CAT)</option>
+          <option value="6">8:00 AM (CAT)</option>
+          <option value="7">9:00 AM (CAT)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Enabled</label>
+        <select id="reminder-enabled">
+          <option value="false">Off</option>
+          <option value="true">On — daily reminder</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions-row" style="margin-top:0.25rem">
+      <button class="btn btn-primary" onclick="saveReminderSettings()" style="margin-top:0">💾 Save Settings</button>
+      <button class="btn btn-outline" onclick="sendTestReminder()">✉ Send Test Email</button>
+    </div>
+    <div class="tip">Reminders cover events in the next 7 days, with anything today or tomorrow highlighted first. An .ics calendar file is attached so you can add events to your phone with one tap.</div>
+
+    <hr class="divider" style="margin:1rem 0"/>
+
+    <div class="card-header" style="padding:0;margin-bottom:0.5rem">
+      <div class="card-icon">📰</div>
+      <div><div class="card-title">Daily Vault Digest</div><div class="card-desc">Summary of new news, legislation &amp; judgments added each day</div></div>
+    </div>
+    <div id="digest-status" class="status"></div>
+    <div class="form-group">
+      <label>Recipient Email</label>
+      <input type="email" id="digest-email" placeholder="e.g. a separate inbox for legal updates"/>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Send Time</label>
+        <select id="digest-hour">
+          <option value="5">7:00 AM (CAT)</option>
+          <option value="6" selected>8:00 AM (CAT)</option>
+          <option value="7">9:00 AM (CAT)</option>
+          <option value="8">10:00 AM (CAT)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Enabled</label>
+        <select id="digest-enabled">
+          <option value="false">Off</option>
+          <option value="true">On — daily digest</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions-row" style="margin-top:0.25rem">
+      <button class="btn btn-primary" onclick="saveDigestSettings()" style="margin-top:0">💾 Save Settings</button>
+      <button class="btn btn-outline" onclick="sendTestDigest()">✉ Send Test Email</button>
+    </div>
+    <div class="tip">Covers news, new legislation, and new judgments added since the last digest. The default send time (8:00 AM CAT) is set to run after that morning's scraping is done, so it's a complete same-day summary. Sent Mon–Fri only.</div>
+  </div>
 </div>
 
 <!-- ═══════════════ LEGAL UPDATES TAB ═══════════════ -->
@@ -5924,6 +5943,26 @@ function closeBulkImportModal() {
   document.getElementById('bulk-import-modal').style.display = 'none';
 }
 
+// UX audit fix #3 -- same open/close-a-fixed-overlay convention as the
+// Bulk Import modal above. Nothing inside these modals changes: same
+// field ids, same onclick handlers (addCalendarEvent(), saveReminderSettings(),
+// etc.), just no longer permanently rendered on the default Calendar view.
+function openAddEventModal() {
+  document.getElementById('add-event-modal').style.display = 'flex';
+}
+
+function closeAddEventModal() {
+  document.getElementById('add-event-modal').style.display = 'none';
+}
+
+function openCalendarSettingsModal() {
+  document.getElementById('calendar-settings-modal').style.display = 'flex';
+}
+
+function closeCalendarSettingsModal() {
+  document.getElementById('calendar-settings-modal').style.display = 'none';
+}
+
 async function bulkImportMatters(input) {
   const file = input.files[0];
   if (!file) return;
@@ -6879,15 +6918,47 @@ async function downloadDraftAffidavitDocx() {
 // ── Calendar ──────────────────────────────────────────────────────────────────
 let calEvents = [];
 
+// UX audit fix #3 -- the Calendar tab's own event list only ever read
+// calendar_events, never matters.next_deadline: two separate tables that
+// don't sync in either direction (confirmed by reading update_matter()/
+// the calendar endpoints directly -- nothing writes one into the other).
+// The daily reminder email already solves exactly this by merging both
+// into one list before rendering (_maybe_send_reminder() in
+// backend/main.py); this mirrors that same merge client-side, since
+// `matters` is already loaded globally before Calendar ever renders (see
+// init()) and doing it here needs no backend change. Deliberately NOT
+// written into calendar_events -- that would create two writable copies
+// of the same fact. `id` is left unset (not null -- see renderEventList's
+// isSynthetic check) so these can never be mistaken for a deletable/
+// inviteable/rescheduleable real row.
+function _matterDeadlineSyntheticEvents() {
+  return matters
+    .filter(m => m.next_deadline && (m.status || 'Active') !== 'Closed' && !m.is_sentinel)
+    .map(m => ({
+      _matterId: m.id,
+      event_type: 'deadline',
+      title: m.next_deadline_note || `Matter deadline: ${m.name}`,
+      date: m.next_deadline,
+      time: null,
+      court: null,
+      matter_name: m.name,
+      notes: null,
+      attendees: [],
+    }));
+}
+
 async function renderCalendar() {
   try {
     const res = await fetch(`${API}/api/calendar`);
     calEvents = await res.json();
   } catch(e) { calEvents = []; }
 
+  const merged = [...calEvents, ..._matterDeadlineSyntheticEvents()]
+    .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+
   const today = new Date().toISOString().slice(0,10);
-  const upcoming = calEvents.filter(e => e.date >= today).slice(0,10);
-  const all = calEvents;
+  const upcoming = merged.filter(e => e.date >= today).slice(0,10);
+  const all = merged;
 
   // Badge
   const badge = document.getElementById('cal-badge');
@@ -6996,11 +7067,15 @@ function renderEventList(elId, events, showEmpty) {
         ${e.notes ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:3px">${escHtml(e.notes)}</div>` : ''}
         ${(e.attendees && e.attendees.length) ? `<div style="font-size:0.7rem;color:var(--ink3);margin-top:4px">👥 ${e.attendees.map(a => escHtml(a.name || a.email)).join(', ')}</div>` : ''}
       </div>
+      ${e._matterId ? `
+      <div style="display:flex;align-items:center;flex-shrink:0">
+        <button class="btn btn-sm btn-outline" title="This is the matter's own due date, not a calendar event — go to the matter to change it" onclick="goToMatter('${e._matterId}')">View Matter →</button>
+      </div>` : `
       <div style="display:flex;flex-direction:column;gap:2px;flex-shrink:0">
         <button class="btn btn-sm" style="background:none;color:var(--ink3)" title="Invite someone to this event" onclick="promptInviteToEvent('${e.id}')">✉</button>
         <button class="btn btn-sm" style="background:none;color:var(--ink3)" title="Postpone / reschedule" onclick="promptRescheduleEvent('${e.id}')">📅↻</button>
         <button class="btn btn-sm" style="background:none;color:var(--ink3)" onclick="deleteEvent('${e.id}')">✕</button>
-      </div>
+      </div>`}
     </div>`;
   }).join('');
 }
