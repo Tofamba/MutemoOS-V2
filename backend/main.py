@@ -2886,18 +2886,17 @@ async def export_legal_corpus(request: Request, source: str = "legal", limit: in
 # kind -- runs scripts/corpus_snapshot.py publish --dry-run as a subprocess
 # against THIS deployment's own DATABASE_URL/CHROMA_DATA_DIR only (both
 # read server-side from this process's own environment, never from the
-# request). Uploads nothing to R2 either way. Gated by a one-off
-# TEMP_AUDIT_TOKEN (NOT MUTEMO_ADMIN_TOKEN), so this never touches or
-# depends on the real admin credential. Runs as a subprocess rather than
-# calling do_publish() in-process because that function calls
-# sys.exit(1) when the gate refuses, which would kill the whole live app
-# process if called in-process.
-_TEMP_AUDIT_TOKEN = os.environ.get("TEMP_AUDIT_TOKEN")
+# request). Uploads nothing to R2 either way. Gated by require_admin_token()
+# -- the same, already-live check and middleware exemption every other
+# /api/admin/* endpoint in this file uses -- rather than a separate token,
+# which would have needed its own new middleware bypass. Runs as a
+# subprocess rather than calling do_publish() in-process because that
+# function calls sys.exit(1) when the gate refuses, which would kill the
+# whole live app process if called in-process.
 
 @app.post("/api/admin/temp-corpus-snapshot-check")
 async def _temp_corpus_snapshot_check(request: Request):
-    if not _TEMP_AUDIT_TOKEN or request.headers.get("X-Temp-Audit-Token") != _TEMP_AUDIT_TOKEN:
-        raise HTTPException(status_code=403, detail="Temp audit access required")
+    require_admin_token(request)
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     proc = await asyncio.create_subprocess_exec(
         "python3", "scripts/corpus_snapshot.py", "publish",
