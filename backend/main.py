@@ -117,9 +117,19 @@ async def init_db():
     await run_migrations()
     print("[db] PostgreSQL connection pool ready")
 
-async def run_migrations():
-    """Idempotent schema creation — safe to run on every startup."""
-    async with _db_pool.acquire() as conn:
+async def run_migrations(pool: asyncpg.Pool = None):
+    """Idempotent schema creation — safe to run on every startup.
+
+    Accepts an optional explicit pool (2026-09-23, corpus-snapshot restore
+    test) so a throwaway/target database can be migrated without touching
+    or swapping out this process's own global `_db_pool` -- swapping a
+    module global on a live multi-tenant app would risk routing a
+    concurrent real request to the wrong database. Defaults to the global
+    pool, so every existing call site (just init_db(), see above) is
+    unaffected.
+    """
+    pool = pool or _db_pool
+    async with pool.acquire() as conn:
         await conn.execute("""
         CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -2902,6 +2912,102 @@ async def _temp_corpus_snapshot_check(request: Request):
     return {"returncode": proc.returncode, "stdout": stdout.decode(errors="replace"),
             "stderr": stderr.decode(errors="replace")}
 # ── END TEMPORARY corpus-snapshot gate check ─────────────────────────────────
+
+
+# ── TEMPORARY corpus-snapshot real publish + restore test (2026-09-23) ──────
+# Step 3 of the corpus-snapshot proving task: (1) real publish (no
+# --dry-run) once the gate above is confirmed clean, uploading to R2 under
+# CORPUS_SNAPSHOT_BUCKET; (2) restore that snapshot into a throwaway
+# Postgres and run real vector searches against it. No caller-supplied
+# input anywhere -- the throwaway database's connection string is read
+# from THROWAWAY_RESTORE_DATABASE_URL, a server-side-only env var this
+# session sets directly (never a request body/param), same design
+# confirmed with the user before implementing. Gated by
+# require_admin_token(). To be REMOVED, along with
+# THROWAWAY_RESTORE_DATABASE_URL, once this proving run is complete and
+# the throwaway Postgres is torn down.
+
+@app.post("/api/admin/temp-corpus-snapshot-publish")
+async def _temp_corpus_snapshot_publish(request: Request):
+    require_admin_token(request)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "scripts/corpus_snapshot.py", "publish",
+        "--database-url", os.environ["DATABASE_URL"],
+        "--chroma-path", os.environ["CHROMA_DATA_DIR"],
+        "--firm-id", str(FIRM_ID),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=repo_root,
+    )
+    stdout, stderr = await proc.communicate()
+    return {"returncode": proc.returncode, "stdout": stdout.decode(errors="replace"),
+            "stderr": stderr.decode(errors="replace")}
+
+@app.post("/api/admin/temp-corpus-restore-test")
+async def _temp_corpus_restore_test(request: Request):
+    require_admin_token(request)
+    target_db_url = os.environ.get("THROWAWAY_RESTORE_DATABASE_URL")
+    if not target_db_url:
+        raise HTTPException(status_code=500, detail="THROWAWAY_RESTORE_DATABASE_URL not set")
+    if target_db_url == os.environ.get("DATABASE_URL"):
+        raise HTTPException(status_code=400, detail="refusing to restore into this deployment's own database")
+
+    # Migrate the throwaway DB's schema with its OWN pool, never the global
+    # _db_pool -- see run_migrations()'s own docstring for why swapping the
+    # global would be unsafe on a live multi-tenant app.
+    target_pool = await asyncpg.create_pool(target_db_url, min_size=1, max_size=2)
+    try:
+        await run_migrations(pool=target_pool)
+    finally:
+        await target_pool.close()
+
+    chroma_scratch = tempfile.mkdtemp(prefix="corpus-restore-test-")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "scripts/corpus_snapshot.py", "restore",
+        "--database-url", target_db_url, "--chroma-path", chroma_scratch,
+        "--firm-id", str(FIRM_ID), "--snapshot", "latest", "--apply",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=repo_root,
+    )
+    stdout, stderr = await proc.communicate()
+    restore_result = {"returncode": proc.returncode, "stdout": stdout.decode(errors="replace"),
+                       "stderr": stderr.decode(errors="replace")}
+
+    search_results = []
+    if proc.returncode == 0:
+        import chromadb as _chromadb
+        client = _chromadb.PersistentClient(path=chroma_scratch)
+        target_conn = await asyncpg.connect(target_db_url)
+        try:
+            for q in ["politically exposed person", "notice of eviction", "arbitration agreement"]:
+                q_vec = (await asyncio.to_thread(embed_texts, [q]))[0]
+                hits = []
+                for coll_name in ("legal_updates", "zlr_index"):
+                    try:
+                        coll = client.get_collection(coll_name)
+                    except Exception:
+                        continue
+                    res = coll.query(query_embeddings=[q_vec], n_results=3)
+                    ids = (res.get("ids") or [[]])[0]
+                    dists = (res.get("distances") or [[]])[0]
+                    for chunk_id, dist in zip(ids, dists):
+                        row = await target_conn.fetchrow(
+                            "SELECT text, source_name, reference, case_name, citation FROM chunks WHERE id=$1",
+                            uuid.UUID(chunk_id),
+                        )
+                        hits.append({
+                            "collection": coll_name, "chunk_id": chunk_id, "distance": dist,
+                            "found_in_target_postgres": bool(row),
+                            "label": (row["reference"] or row["case_name"] or row["source_name"]) if row else None,
+                            "text_snippet": (row["text"][:280] if row and row["text"] else None),
+                        })
+                search_results.append({"query": q, "hits": hits})
+        finally:
+            await target_conn.close()
+
+    return {"restore": restore_result, "chroma_scratch_dir": chroma_scratch, "search_results": search_results}
+# ── END TEMPORARY corpus-snapshot real publish + restore test ───────────────
 
 
 
