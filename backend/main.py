@@ -2875,86 +2875,33 @@ async def export_legal_corpus(request: Request, source: str = "legal", limit: in
         return {"source": "zlr", "total": total, "limit": limit, "offset": offset, "items": items}
 
 
-# ── TEMPORARY corpus-snapshot triage check (2026-09-23) ──────────────────────
-# Read-only diagnostic for the 11 known-broken legal_updates rows currently
-# blocking the corpus-snapshot gate (see the corpus-snapshot-tooling project
-# memory): for each, search both legal_updates and zlr_entries for any
-# other row that might be a "healthy twin" -- same document/case, but with
-# real backing chunks/vectors -- which would make the broken row a safe
-# delete rather than something needing re-ingestion. Hardcoded search terms
-# below, no request input of any kind. Purely read-only: counts real
-# chunks/Chroma vectors, writes nothing. To be REMOVED after this triage.
-_TRIAGE_SEARCH_TERMS = [
-    "Exchange Control (General) (Amendment) Order 2026",
-    "Statute Law Compilation and Revision",
-    "Environmental Management (Prohibition of Lead in Paint",
-    "Collective Bargaining Agreement Agricultural Industry Tea and Coffee",
-    "Income Tax (Fiscalised Recording of Fuel Transactions)",
-    "Defence (Cantonment)",
-    "Treger Plastics",
-    "Kwangwari",
-    "INTRODUCTION Arbitration is a form of",
-    "Domestic Violence Act",
-]
+# ── TEMPORARY corpus-snapshot gate check (2026-09-23, re-added post-triage) ──
+# Same as the earlier temporary gate-check endpoint (added, used, and
+# removed once already this session) -- re-added to re-verify the gate
+# after deleting the 11 known-broken rows found by the triage check above.
+# No request body, no caller-supplied input of any kind -- runs
+# scripts/corpus_snapshot.py publish --dry-run as a subprocess against
+# THIS deployment's own DATABASE_URL/CHROMA_DATA_DIR only. Uploads nothing
+# to R2. Gated by require_admin_token(), the same already-live check every
+# other /api/admin/* endpoint uses. To be REMOVED once the gate is
+# confirmed clean and the real publish has run.
 
-@app.get("/api/admin/temp-corpus-triage-check")
-async def _temp_corpus_triage_check(request: Request):
+@app.post("/api/admin/temp-corpus-snapshot-check")
+async def _temp_corpus_snapshot_check(request: Request):
     require_admin_token(request)
-    _, legal_collection, zlr_collection = get_chroma_collections()
-
-    def _vector_count(doc_id: str) -> int:
-        try:
-            got = legal_collection.get(where={"document_id": doc_id})
-            n = len(got.get("ids") or [])
-            if n:
-                return n
-        except Exception:
-            pass
-        try:
-            got = zlr_collection.get(where={"document_id": doc_id})
-            return len(got.get("ids") or [])
-        except Exception:
-            return 0
-
-    async with _db_pool.acquire() as conn:
-        results = {}
-        for term in _TRIAGE_SEARCH_TERMS:
-            like = f"%{term}%"
-            legal_rows = await conn.fetch(
-                "SELECT id, filename, reference, source_type, source_name, status, "
-                "chunk_count, uploaded_at, source_url FROM legal_updates "
-                "WHERE firm_id=$1 AND (filename ILIKE $2 OR reference ILIKE $2) "
-                "ORDER BY uploaded_at ASC", FIRM_ID, like,
-            )
-            zlr_rows = await conn.fetch(
-                "SELECT id, filename, case_name, citation, chunk_count, uploaded_at, "
-                "zimlii_url FROM zlr_entries "
-                "WHERE firm_id=$1 AND (filename ILIKE $2 OR case_name ILIKE $2 OR citation ILIKE $2) "
-                "ORDER BY uploaded_at ASC", FIRM_ID, like,
-            )
-            term_result = {"legal_updates": [], "zlr_entries": []}
-            for r in legal_rows:
-                actual_chunks = await conn.fetchval("SELECT COUNT(*) FROM chunks WHERE document_id=$1", r["id"])
-                term_result["legal_updates"].append({
-                    "id": str(r["id"]), "filename": r["filename"], "reference": r["reference"],
-                    "source_type": r["source_type"], "source_name": r["source_name"],
-                    "status": r["status"], "claimed_chunk_count": r["chunk_count"],
-                    "actual_chunks_rows": actual_chunks, "actual_chroma_vectors": _vector_count(str(r["id"])),
-                    "uploaded_at": r["uploaded_at"].isoformat() if r["uploaded_at"] else None,
-                    "source_url": r["source_url"],
-                })
-            for r in zlr_rows:
-                actual_chunks = await conn.fetchval("SELECT COUNT(*) FROM chunks WHERE document_id=$1", r["id"])
-                term_result["zlr_entries"].append({
-                    "id": str(r["id"]), "filename": r["filename"], "case_name": r["case_name"],
-                    "citation": r["citation"], "claimed_chunk_count": r["chunk_count"],
-                    "actual_chunks_rows": actual_chunks, "actual_chroma_vectors": _vector_count(str(r["id"])),
-                    "uploaded_at": r["uploaded_at"].isoformat() if r["uploaded_at"] else None,
-                    "zimlii_url": r["zimlii_url"],
-                })
-            results[term] = term_result
-    return results
-# ── END TEMPORARY corpus-snapshot triage check ───────────────────────────────
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = await asyncio.create_subprocess_exec(
+        "python3", "scripts/corpus_snapshot.py", "publish",
+        "--database-url", os.environ["DATABASE_URL"],
+        "--chroma-path", os.environ["CHROMA_DATA_DIR"],
+        "--firm-id", str(FIRM_ID), "--dry-run",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        cwd=repo_root,
+    )
+    stdout, stderr = await proc.communicate()
+    return {"returncode": proc.returncode, "stdout": stdout.decode(errors="replace"),
+            "stderr": stderr.decode(errors="replace")}
+# ── END TEMPORARY corpus-snapshot gate check ─────────────────────────────────
 
 
 
