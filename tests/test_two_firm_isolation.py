@@ -79,6 +79,8 @@ class TwoFirmFakeConnection:
         if "FROM documents d" in q and "JOIN matters m" in q:
             firm_id = str(args[0])
             return [d for d in DOCUMENTS if d["firm_id"] == firm_id]
+        if q.startswith("SELECT id, display_name FROM users WHERE firm_id=$1"):
+            return []  # no users seeded — irrelevant to firm scoping, same as progress_notes above
         raise NotImplementedError(f"TwoFirmFakeConnection.fetch: unhandled query: {q}")
 
     async def fetchrow(self, query, *args):
