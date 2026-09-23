@@ -19,7 +19,7 @@ _as_current_user this file's shape mirrors).
 
 import asyncio
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -28,7 +28,8 @@ from backend.main import FIRM_ID, my_portfolio, my_portfolio_export, my_portfoli
 
 
 class FakeConnection:
-    def __init__(self, clients=None, matters=None, compliance=None, owners=None, fee_matters=None):
+    def __init__(self, clients=None, matters=None, compliance=None, owners=None, fee_matters=None,
+                 compliance_action_rows=None):
         self.clients = clients if clients is not None else []
         self.matters = matters if matters is not None else []
         self.compliance = compliance if compliance is not None else []
@@ -37,6 +38,13 @@ class FakeConnection:
         # avoids needing every status/practice-area matter fixture to also
         # carry amount_billed/amount_received.
         self.fee_matters = fee_matters if fee_matters is not None else []
+        # ai_action_queue rows already joined+shaped exactly as the real
+        # query returns them (id, client_id, action_type, escalation_level,
+        # created_at, client_name, issue_label) -- pre-filtered to this
+        # lawyer by the caller, same convention as fee_matters above
+        # (the fake doesn't re-implement the WHERE, it just returns what
+        # a test seeds for that lawyer).
+        self.compliance_action_rows = compliance_action_rows if compliance_action_rows is not None else []
 
     async def fetchval(self, query, *args):
         q = " ".join(query.split())
@@ -86,6 +94,9 @@ class FakeConnection:
                 if m["firm_id"] == firm_id and m.get("created_by") == created_by
                 and (m.get("amount_billed") is not None or m.get("amount_received") is not None)
             ]
+
+        if q.startswith("SELECT aq.id, aq.client_id, aq.action_type, aq.escalation_level"):
+            return list(self.compliance_action_rows)
 
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
@@ -367,6 +378,68 @@ def test_review_status_tallies_overdue_due_soon_never_reviewed(monkeypatch):
     assert result["review_status"]["due_soon_count"] == 1
     assert result["review_status"]["never_reviewed_count"] == 1
     assert result["review_status"]["matters"] == rows
+
+
+# ── section 4b: compliance actions assigned to you ──────────────────────────
+# 2026-09-23, Home/UX audit fix #4 -- exposes ai_action_queue rows whose
+# compliance_exceptions.responsible_user_id is the calling lawyer, same
+# table/status filter the firm-wide admin-only queue already uses. The
+# fake's fetch() returns compliance_action_rows verbatim (see its own
+# comment) -- these tests verify the wiring/shape, not a WHERE clause.
+
+def _ca_row(client_name="Test Client", issue_label="Client type not recorded",
+            action_type="draft", escalation_level=2):
+    return {
+        "id": uuid.uuid4(), "client_id": uuid.uuid4(), "action_type": action_type,
+        "escalation_level": escalation_level, "created_at": datetime.now(timezone.utc),
+        "client_name": client_name, "issue_label": issue_label,
+    }
+
+
+def test_compliance_actions_pending_count_and_items(monkeypatch):
+    import backend.main as m
+    me = uuid.uuid4()
+    rows = [_ca_row("Alice Huang"), _ca_row("Bongani Ncube", escalation_level=1, action_type="flag")]
+    monkeypatch.setattr(m, "_db_pool", FakePool(compliance_action_rows=rows))
+    _as_current_user(monkeypatch, m, {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Me"})
+    monkeypatch.setattr(m, "_fetch_matter_review_status_rows", _fake_empty_review)
+
+    result = asyncio.run(my_portfolio(_fake_request()))
+
+    assert result["compliance_actions"]["pending_count"] == 2
+    names = {i["client_name"] for i in result["compliance_actions"]["items"]}
+    assert names == {"Alice Huang", "Bongani Ncube"}
+    assert all(i["id"] and i["client_id"] for i in result["compliance_actions"]["items"])
+
+
+def test_compliance_actions_items_capped_at_five_but_count_is_not(monkeypatch):
+    import backend.main as m
+    me = uuid.uuid4()
+    rows = [_ca_row(f"Client {i}") for i in range(8)]
+    monkeypatch.setattr(m, "_db_pool", FakePool(compliance_action_rows=rows))
+    _as_current_user(monkeypatch, m, {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Me"})
+    monkeypatch.setattr(m, "_fetch_matter_review_status_rows", _fake_empty_review)
+
+    result = asyncio.run(my_portfolio(_fake_request()))
+
+    assert result["compliance_actions"]["pending_count"] == 8
+    assert len(result["compliance_actions"]["items"]) == 5
+
+
+def test_compliance_actions_empty_when_none_assigned(monkeypatch):
+    import backend.main as m
+    me = uuid.uuid4()
+    monkeypatch.setattr(m, "_db_pool", FakePool())
+    _as_current_user(monkeypatch, m, {"id": me, "firm_id": FIRM_ID, "role": "associate", "display_name": "Me"})
+    monkeypatch.setattr(m, "_fetch_matter_review_status_rows", _fake_empty_review)
+
+    result = asyncio.run(my_portfolio(_fake_request()))
+
+    assert result["compliance_actions"] == {"pending_count": 0, "items": []}
+
+
+async def _fake_empty_review(conn, *, lawyer_id, client_id, status):
+    return []
 
 
 # ── section 5: billing snapshot ───────────────────────────────────────────────
