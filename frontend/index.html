@@ -227,12 +227,22 @@ a{color:var(--green);text-decoration:none}
    1440px -- no amount of shrinking closes that while keeping text
    legible, so wrapping is the actual fix; the trim just reduces how
    much needs to wrap in the common case). */
-.nav{background:var(--green2);display:flex;flex-wrap:wrap;gap:2px 0;border-bottom:2px solid var(--gold)}
+.nav{background:var(--green2);display:flex;flex-wrap:wrap;align-items:flex-start;gap:2px 0;border-bottom:2px solid var(--gold)}
 .nav-btn{background:none;border:none;color:rgba(255,255,255,0.7);padding:0.6rem 0.9rem;cursor:pointer;font-size:0.79rem;font-family:var(--font-sans);letter-spacing:0.3px;transition:all 0.15s;display:flex;align-items:center;gap:6px;position:relative;white-space:nowrap}
 .nav-btn:hover{color:white;background:rgba(255,255,255,0.07)}
 .nav-btn.active{color:white;background:rgba(255,255,255,0.12)}
 .nav-btn.active::after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;background:var(--gold3)}
 .nav-badge{background:var(--red);color:white;font-size:0.6rem;padding:1px 5px;border-radius:10px;font-style:normal;min-width:16px;text-align:center}
+
+/* Nav consolidation (2026-09-23, UX audit fix #4/#5) -- Research/More
+   submenus, matching .nav-btn's own look exactly (no separate dropdown
+   skin invented). Menu is absolutely positioned so it overlays content
+   instead of pushing the nav bar's own row height around. */
+.nav-dropdown{position:relative}
+.nav-dropdown-menu{display:none;flex-direction:column;position:absolute;top:100%;left:0;min-width:210px;background:var(--green2);border:1px solid rgba(255,255,255,0.15);border-top:2px solid var(--gold3);box-shadow:0 10px 24px rgba(0,0,0,0.35);z-index:60}
+.nav-dropdown.open .nav-dropdown-menu{display:flex}
+.nav-dropdown-menu .nav-btn{width:100%;justify-content:flex-start}
+.nav-dropdown-menu .nav-btn.active::after{bottom:0;top:0;left:0;right:auto;width:3px;height:auto;background:var(--gold3)}
 
 /* ── Main ── */
 .main{flex:1;max-width:1080px;margin:0 auto;width:100%;padding:1.5rem}
@@ -523,80 +533,186 @@ select{cursor:pointer}
 </header>
 
 <!-- Nav -->
+<!-- Consolidated 2026-09-23 (UX audit fix #4/#5): 15 top-level buttons cut
+     to 6 destinations (Home/Matters/Clients/Calendar/Research/Reports)
+     plus Add Precedent (kept standalone -- a quick-add action, not a
+     navigation destination, same prominent gold styling as before) and a
+     More menu for admin/infrequent items. Nothing removed: every id below
+     still exists exactly as before (nav-vault, nav-search, etc.) so
+     showTab()'s per-tab active-highlighting and role-hiding
+     (applyRoleUI's querySelectorAll('[data-role-hide]')) keep working
+     unchanged -- only the parent grouping is new. My Portfolio's own nav
+     entry is gone because its content moved into Home (see tab-dashboard). -->
 <nav class="nav">
-  <button class="nav-btn" id="nav-dashboard" onclick="showTab('dashboard')">🏛 Dashboard</button>
-  <button class="nav-btn" id="nav-capture" onclick="showTab('capture')" style="background:var(--gold2);color:var(--green);font-weight:700">📸 + Add Precedent</button>
-  <button class="nav-btn" id="nav-vault" onclick="showTab('vault')">📁 Vault</button>
-  <button class="nav-btn" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
+  <button class="nav-btn" id="nav-dashboard" onclick="showTab('dashboard')">🏠 Home</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
   <button class="nav-btn active" id="nav-clients" onclick="showTab('clients')">👤 Clients</button>
-  <button class="nav-btn" id="nav-my-portfolio" onclick="showTab('my-portfolio')">📁 My Portfolio</button>
-  <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft Document</button>
-  <button class="nav-btn" id="nav-contract-review" onclick="showTab('contract-review')" data-role-hide="secretary">📋 Contract Review</button>
   <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge" id="cal-badge" style="display:none">0</span></button>
-  <button class="nav-btn" id="nav-legalupdates" onclick="showTab('legalupdates')">⚖ Legal Updates</button>
-  <button class="nav-btn" id="nav-zlr" onclick="showTab('zlr')">📚 Case Law Index</button>
-  <button class="nav-btn" id="nav-users" onclick="showTab('users')" data-role-hide="secretary,associate">👥 Users</button>
+
+  <div class="nav-dropdown" id="nav-dropdown-research">
+    <button class="nav-btn" id="nav-research" onclick="toggleNavDropdown('research')">🔎 Research ▾</button>
+    <div class="nav-dropdown-menu">
+      <button class="nav-btn" id="nav-search" onclick="showTab('search')">🔍 Search Vault</button>
+      <button class="nav-btn" id="nav-vault" onclick="showTab('vault')">📁 Firm Vault</button>
+      <button class="nav-btn" id="nav-legalupdates" onclick="showTab('legalupdates')">⚖ Legal Updates</button>
+      <button class="nav-btn" id="nav-zlr" onclick="showTab('zlr')">📚 Case Law Index</button>
+    </div>
+  </div>
+
   <button class="nav-btn" id="nav-reports" onclick="showTab('reports')" data-role-hide="secretary,associate">📊 Reports</button>
-  <button class="nav-btn" id="nav-compliance-actions" onclick="showTab('compliance-actions')" data-role-hide="secretary,associate">🚨 Compliance Actions <span class="nav-badge" id="caq-badge" style="display:none">0</span></button>
+
+  <div class="nav-dropdown" id="nav-dropdown-more">
+    <button class="nav-btn" id="nav-more" onclick="toggleNavDropdown('more')">⋯ More ▾</button>
+    <div class="nav-dropdown-menu">
+      <button class="nav-btn" id="nav-draft" onclick="showTab('draft')" data-role-hide="secretary">✍ Draft Document</button>
+      <button class="nav-btn" id="nav-contract-review" onclick="showTab('contract-review')" data-role-hide="secretary">📋 Contract Review</button>
+      <button class="nav-btn" id="nav-users" onclick="showTab('users')" data-role-hide="secretary,associate">👥 Users</button>
+      <button class="nav-btn" id="nav-compliance-actions" onclick="showTab('compliance-actions')" data-role-hide="secretary,associate">🚨 Compliance Actions <span class="nav-badge" id="caq-badge" style="display:none">0</span></button>
+    </div>
+  </div>
+
+  <button class="nav-btn" id="nav-capture" onclick="showTab('capture')" style="background:var(--gold2);color:var(--green);font-weight:700;margin-left:auto">📸 + Add Precedent</button>
 </nav>
 
 <main class="main">
 
-<!-- ═══════════════ DASHBOARD TAB ═══════════════ -->
+<!-- ═══════════════ HOME TAB (dashboard) ═══════════════ -->
+<!-- UX audit fix #4/#5 (2026-09-23): Dashboard replaced by an
+     attention-first Home screen. Three new personal, self-scoped sections
+     (Needs Attention / My Next Matters / Your Recent Activity -- same
+     created_by ownership convention as My Clients/My Portfolio, not
+     firm-wide) come first. The old firm-wide Dashboard content and the
+     whole My Portfolio tab are demoted into two collapsed <details>
+     sections below, per instruction to absorb My Portfolio into Home now
+     rather than defer it -- nothing removed, just no longer the first
+     thing a lawyer sees. Every count/activity item below comes from real,
+     already-computed data (GET /api/my-portfolio's review_status/
+     compliance_actions, GET /api/calendar, _matterDeadlineSyntheticEvents(),
+     the in-memory matters/progress_notes arrays, GET /api/documents/recent)
+     -- no new aggregation invented, same integrity rule as the Matter
+     Detail restructure. -->
 <div id="tab-dashboard" class="dashboard-scope" style="display:none">
   <div class="dash-hero" style="display:flex;align-items:center;gap:1rem">
     <img src="/icons/logo-source.png" alt="MutemoOS" style="width:56px;height:56px;object-fit:contain;flex-shrink:0"/>
     <div>
-      <h2 id="dash-greeting">Firm Overview</h2>
-      <p id="dash-greeting-sub">A snapshot of everything moving across the firm.</p>
+      <h2 id="dash-greeting">Home</h2>
+      <p id="dash-greeting-sub">What needs your attention.</p>
     </div>
-  </div>
-
-  <div class="dash-grid" id="dash-stats">
-    <div class="dash-empty">Loading…</div>
   </div>
 
   <div class="dash-section">
     <div class="dash-section-header">
-      <div class="dash-section-title">⏰ Upcoming Deadlines</div>
-      <span class="dash-section-link" onclick="showTab('matters')">View all matters →</span>
+      <div class="dash-section-title">🚩 Needs Attention</div>
     </div>
-    <div class="dash-section-body" id="dash-deadlines"><div class="dash-empty">Loading…</div></div>
+    <div class="dash-section-body" id="home-needs-attention"><div class="dash-empty">Loading…</div></div>
   </div>
 
   <div class="dash-section">
     <div class="dash-section-header">
-      <div class="dash-section-title">🕐 Recent Activity</div>
+      <div class="dash-section-title">📅 My Next Matters</div>
+      <span class="dash-section-link" onclick="showTab('calendar')">Full calendar →</span>
+    </div>
+    <div class="dash-section-body" id="home-upcoming"><div class="dash-empty">Loading…</div></div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-header">
+      <div class="dash-section-title">🕐 Your Recent Activity</div>
     </div>
     <div class="dash-section-body" id="dash-activity"><div class="dash-empty">Loading…</div></div>
   </div>
 
-  <div class="dash-section">
-    <div class="dash-section-header">
-      <div class="dash-section-title">📊 Practice Area Breakdown</div>
-      <span class="dash-section-link" onclick="showTab('reports')">Full reports →</span>
-    </div>
-    <div class="dash-section-body" id="dash-practice-areas"><div class="dash-empty">Loading…</div></div>
-  </div>
+  <!-- Absorbed from the old standalone My Portfolio tab (2026-09-23) --
+       same ids, same _mpRender*/loadMyPortfolio()/export functions,
+       unchanged; only the container moved. -->
+  <details class="card" style="margin-top:1.25rem">
+    <summary style="cursor:pointer;font-weight:700;color:var(--ink2)">📁 My Portfolio Details</summary>
+    <div style="margin-top:1rem">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:0.75rem">
+        <button class="btn btn-primary" onclick="downloadMyPortfolioExport('csv')">⬇ Download CSV</button>
+        <button class="btn btn-outline" onclick="downloadMyPortfolioExport('pdf')">⬇ Download PDF</button>
+        <span id="mp-export-status" style="font-size:0.85rem"></span>
+      </div>
 
-  <div class="dash-section">
-    <div class="dash-section-header">
-      <div class="dash-section-title">💰 Fee Overview</div>
-    </div>
-    <div class="dash-section-body">
-      <p style="font-size:0.72rem;color:var(--ink3);margin-bottom:0.85rem">The firm's own professional fees — not client funds held in trust.</p>
-      <div id="dash-fees"><div class="dash-empty">Loading…</div></div>
-    </div>
-  </div>
+      <div id="mp-empty-notice"></div>
 
-  <div class="dash-section">
-    <div class="dash-section-header">
-      <div class="dash-section-title">🛡 RBZ Compliance Status</div>
-      <span class="dash-section-link" onclick="showTab('reports')">Go to Reports →</span>
+      <div class="dash-grid" id="mp-volume-stats"></div>
+
+      <div class="card" style="margin-top:1rem">
+        <div class="card-title">📂 Matters by Status</div>
+        <div id="mp-status-breakdown" style="margin-top:0.75rem;display:flex;flex-wrap:wrap;gap:8px"></div>
+      </div>
+
+      <div class="card" style="margin-top:1rem">
+        <div class="card-title">⚖ Practice Area Split</div>
+        <div id="mp-practice-areas" style="margin-top:0.75rem;display:flex;flex-wrap:wrap;gap:8px"></div>
+      </div>
+
+      <div class="card" style="margin-top:1rem">
+        <div class="card-title">🛡 Compliance &amp; Risk Snapshot</div>
+        <div id="mp-compliance" style="margin-top:0.75rem"></div>
+      </div>
+
+      <div class="card" style="margin-top:1rem">
+        <div class="card-title">🗂 Review Status</div>
+        <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Your own matters needing a review — same logic as the firm-wide Matter Review Status report, scoped to you.</p>
+        <div id="mp-review-summary" style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:8px"></div>
+        <div id="mp-review-table" style="margin-top:0.75rem"></div>
+      </div>
+
+      <div class="card" style="margin-top:1rem">
+        <div class="card-title">💰 Billing Snapshot</div>
+        <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Fees billed / received (the firm's own professional fees — not client funds held in trust), across your own matters.</p>
+        <div class="dash-grid" id="mp-billing-stats" style="margin-top:0.5rem"></div>
+        <div id="mp-billing-table" style="margin-top:0.75rem"></div>
+      </div>
     </div>
-    <div class="dash-section-body" id="dash-compliance"><div class="dash-empty">Loading…</div></div>
-  </div>
+  </details>
+
+  <!-- Old firm-wide Dashboard content, demoted (not deleted) below the
+       new personal sections. -->
+  <details class="card" style="margin-top:1rem">
+    <summary style="cursor:pointer;font-weight:700;color:var(--ink2)">🏛 Firm Overview</summary>
+    <div style="margin-top:1rem">
+      <div class="dash-grid" id="dash-stats">
+        <div class="dash-empty">Loading…</div>
+      </div>
+
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <div class="dash-section-title">⏰ Upcoming Deadlines (firm-wide)</div>
+          <span class="dash-section-link" onclick="showTab('matters')">View all matters →</span>
+        </div>
+        <div class="dash-section-body" id="dash-deadlines"><div class="dash-empty">Loading…</div></div>
+      </div>
+
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <div class="dash-section-title">📊 Practice Area Breakdown</div>
+          <span class="dash-section-link" onclick="showTab('reports')">Full reports →</span>
+        </div>
+        <div class="dash-section-body" id="dash-practice-areas"><div class="dash-empty">Loading…</div></div>
+      </div>
+
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <div class="dash-section-title">💰 Fee Overview (firm-wide)</div>
+        </div>
+        <div class="dash-section-body">
+          <p style="font-size:0.72rem;color:var(--ink3);margin-bottom:0.85rem">The firm's own professional fees — not client funds held in trust.</p>
+          <div id="dash-fees"><div class="dash-empty">Loading…</div></div>
+        </div>
+      </div>
+
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <div class="dash-section-title">🛡 RBZ Compliance Status</div>
+          <span class="dash-section-link" onclick="showTab('reports')">Go to Reports →</span>
+        </div>
+        <div class="dash-section-body" id="dash-compliance"><div class="dash-empty">Loading…</div></div>
+      </div>
+    </div>
+  </details>
 </div>
 
 <!-- ═══════════════ VAULT TAB ═══════════════ -->
@@ -957,57 +1073,6 @@ select{cursor:pointer}
     <div id="client-detail-content"></div>
   </div>
 
-</div>
-
-<!-- ═══════════════ MY PORTFOLIO TAB ═══════════════ -->
-<!-- Self-scoped, every role — not gated behind admin/partner the way Reports
-     is. Placed next to Clients (its own nav entry, per the "My Clients" →
-     "My Portfolio" naming/adjacency) since it's substantial enough (5
-     sections) to deserve a real destination, not a filter toggle. -->
-<div id="tab-my-portfolio" style="display:none">
-  <div class="section-head">
-    <h2>📁 My Portfolio</h2>
-    <p>Your own caseload — clients and matters you created, at a glance.</p>
-  </div>
-
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:0.75rem">
-    <button class="btn btn-primary" onclick="downloadMyPortfolioExport('csv')">⬇ Download CSV</button>
-    <button class="btn btn-outline" onclick="downloadMyPortfolioExport('pdf')">⬇ Download PDF</button>
-    <span id="mp-export-status" style="font-size:0.85rem"></span>
-  </div>
-
-  <div id="mp-empty-notice"></div>
-
-  <div class="dash-grid" id="mp-volume-stats"></div>
-
-  <div class="card" style="margin-top:1rem">
-    <div class="card-title">📂 Matters by Status</div>
-    <div id="mp-status-breakdown" style="margin-top:0.75rem;display:flex;flex-wrap:wrap;gap:8px"></div>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
-    <div class="card-title">⚖ Practice Area Split</div>
-    <div id="mp-practice-areas" style="margin-top:0.75rem;display:flex;flex-wrap:wrap;gap:8px"></div>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
-    <div class="card-title">🛡 Compliance &amp; Risk Snapshot</div>
-    <div id="mp-compliance" style="margin-top:0.75rem"></div>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
-    <div class="card-title">🗂 Review Status</div>
-    <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Your own matters needing a review — same logic as the firm-wide Matter Review Status report, scoped to you.</p>
-    <div id="mp-review-summary" style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:8px"></div>
-    <div id="mp-review-table" style="margin-top:0.75rem"></div>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
-    <div class="card-title">💰 Billing Snapshot</div>
-    <p style="font-size:0.85rem;color:var(--ink3);margin-top:0.25rem">Fees billed / received (the firm's own professional fees — not client funds held in trust), across your own matters.</p>
-    <div class="dash-grid" id="mp-billing-stats" style="margin-top:0.5rem"></div>
-    <div id="mp-billing-table" style="margin-top:0.75rem"></div>
-  </div>
 </div>
 
 <!-- ═══════════════ CALENDAR TAB ═══════════════ -->
@@ -2891,6 +2956,13 @@ function applyRoleUI(role) {
     const hiddenFor = el.getAttribute('data-role-hide').split(',').map(r => r.trim());
     if (hiddenFor.includes(role)) el.style.display = 'none';
   });
+  // If every item inside a nav dropdown (Research/More) got hidden above,
+  // hide the parent dropdown button too rather than leaving an empty menu.
+  document.querySelectorAll('.nav-dropdown').forEach(dd => {
+    const items = dd.querySelectorAll('.nav-dropdown-menu .nav-btn');
+    const anyVisible = Array.from(items).some(b => b.style.display !== 'none');
+    dd.style.display = anyVisible ? '' : 'none';
+  });
 }
 
 async function requestLoginOtp() {
@@ -4620,16 +4692,41 @@ async function submitComplianceForm() {
 }
 
 // ── Tab Navigation ────────────────────────────────────────────────────────────
+// Nav consolidation (2026-09-23): which dropdown a child tab lives under,
+// so its parent button (Research▾/More▾) can show the active state even
+// while the menu itself is closed. My Portfolio has no entry here -- it's
+// no longer a tab, its content lives inside tab-dashboard now.
+const NAV_DROPDOWN_PARENT = {
+  search: 'research', vault: 'research', legalupdates: 'research', zlr: 'research',
+  draft: 'more', 'contract-review': 'more', users: 'more', 'compliance-actions': 'more',
+};
+
+function toggleNavDropdown(name) {
+  const dd = document.getElementById(`nav-dropdown-${name}`);
+  const wasOpen = dd.classList.contains('open');
+  document.querySelectorAll('.nav-dropdown').forEach(d => d.classList.remove('open'));
+  if (!wasOpen) dd.classList.add('open');
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.nav-dropdown')) {
+    document.querySelectorAll('.nav-dropdown').forEach(d => d.classList.remove('open'));
+  }
+});
+
 function showTab(tab) {
-  ['dashboard','capture','vault','search','matters','clients','my-portfolio','calendar','legalupdates','draft','contract-review','zlr','users','reports','compliance-actions'].forEach(t => {
+  document.querySelectorAll('.nav-dropdown').forEach(d => d.classList.remove('open'));
+  ['dashboard','capture','vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports','compliance-actions'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
     document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
   });
+  document.querySelectorAll('.nav > .nav-dropdown > .nav-btn').forEach(b => b.classList.remove('active'));
+  const parent = NAV_DROPDOWN_PARENT[tab];
+  if (parent) document.getElementById(`nav-${parent}`).classList.add('active');
   if (tab === 'dashboard') renderDashboard();
   if (tab === 'capture') renderCaptureTab();
   if (tab === 'matters') renderMattersList();
   if (tab === 'clients') renderClientsList();
-  if (tab === 'my-portfolio') loadMyPortfolio();
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
   if (tab === 'users') { loadUsers(); loadInvites(); }
   if (tab === 'legalupdates') renderLegalUpdates();
@@ -4679,27 +4776,132 @@ function _mrsFilterChanged() {
   if (_mrsHasGenerated) loadMatterReviewStatus();
 }
 
-// ── Dashboard ─────────────────────────────────────────────────────────────────
-// Firm-wide landing view. Every section aggregates data already loaded for
-// other tabs (the global `matters`/`clients` arrays) or reuses existing
-// endpoints (practice-area-breakdown, report history) — the only new
-// endpoint is GET /api/documents/recent, added specifically to back the
-// activity feed's document half.
+// ── Home (dashboard) ─────────────────────────────────────────────────────────
+// UX audit fix #4/#5 (2026-09-23): was a firm-wide landing view, now
+// attention-first and personal by default. Needs Attention/My Next
+// Matters/Your Recent Activity load first; the old firm-wide sections and
+// the absorbed My Portfolio content (both still full functions below,
+// unchanged) load into their collapsed <details> at the same time so the
+// data is already there the moment either is opened. GET /api/my-portfolio
+// is fetched once here and handed to both _homeNeedsAttention() and
+// loadMyPortfolio() rather than each fetching it separately.
 async function renderDashboard() {
   _dashGreeting();
+  const portfolioData = await _fetchMyPortfolioData();
+  await Promise.all([
+    _homeNeedsAttention(portfolioData),
+    _homeUpcoming(),
+    _dashActivity(),
+  ]);
+  loadMyPortfolio(portfolioData);
   _dashStats();
   _dashDeadlines();
   _dashFees();
-  await Promise.all([_dashActivity(), _dashPracticeAreas(), _dashCompliance()]);
+  _dashPracticeAreas();
+  _dashCompliance();
 }
 
 function _dashGreeting() {
   const hour = new Date().getHours();
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   const name = window._userDisplayName || '';
-  document.getElementById('dash-greeting').textContent = name ? `${greeting}, ${name}` : 'Firm Overview';
-  document.getElementById('dash-greeting-sub').textContent =
-    `${matters.length} matter${matters.length !== 1 ? 's' : ''} · ${clients.length} client${clients.length !== 1 ? 's' : ''} across the firm.`;
+  document.getElementById('dash-greeting').textContent = name ? `${greeting}, ${name}` : 'Home';
+  document.getElementById('dash-greeting-sub').textContent = 'What needs your attention.';
+}
+
+// "Needs Attention" (UX audit fix #4/#5) -- every number here is a real,
+// already-computed value: review_status and compliance_actions both come
+// straight from GET /api/my-portfolio (the same self-scoped aggregation
+// rendered in full in the My Portfolio Details section below), and
+// "deadlines due soon" applies the same created_by ownership filter My
+// Clients/My Portfolio already use to the in-memory `matters` array's own
+// next_deadline field (identical overdue/due-soon thresholds to
+// _dashStats' firm-wide split below, just scoped to this lawyer). Nothing
+// here is a new aggregation -- see the integrity rule this fix was built
+// under.
+async function _homeNeedsAttention(portfolioData) {
+  const el = document.getElementById('home-needs-attention');
+  if (!window._userId) {
+    el.innerHTML = '<div class="dash-empty">No real login session to scope this to yet — sign in with a real account to see your own attention items.</div>';
+    return;
+  }
+  if (!portfolioData) { el.innerHTML = '<div class="dash-empty">Could not load your attention items.</div>'; return; }
+
+  const rs = portfolioData.review_status;
+  const ca = portfolioData.compliance_actions;
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  const myDeadlines = matters
+    .filter(m => m.created_by === window._userId && m.next_deadline && (m.status || 'Active') !== 'Closed' && !m.is_sentinel)
+    .map(m => ({ m, days: Math.round((new Date(m.next_deadline + 'T00:00:00') - today) / 86400000) }))
+    .filter(({ days }) => days <= 7)
+    .sort((a, b) => a.days - b.days);
+  const overdueDeadlines = myDeadlines.filter(d => d.days < 0).length;
+  const dueSoonDeadlines = myDeadlines.length - overdueDeadlines;
+
+  const totalAttention = rs.overdue_count + rs.due_soon_count + ca.pending_count + myDeadlines.length;
+  if (!totalAttention) {
+    el.innerHTML = '<div class="dash-empty">✓ Nothing needs your attention right now.</div>';
+    return;
+  }
+
+  const badges = `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:0.85rem">
+      ${rs.overdue_count ? `<span class="dash-badge dash-badge-red">⚠ ${rs.overdue_count} matter review${rs.overdue_count !== 1 ? 's' : ''} overdue</span>` : ''}
+      ${rs.due_soon_count ? `<span class="dash-badge dash-badge-blue">⏰ ${rs.due_soon_count} review${rs.due_soon_count !== 1 ? 's' : ''} due soon</span>` : ''}
+      ${ca.pending_count ? `<span class="dash-badge dash-badge-red">🚨 ${ca.pending_count} compliance action${ca.pending_count !== 1 ? 's' : ''} pending</span>` : ''}
+      ${overdueDeadlines ? `<span class="dash-badge dash-badge-red">⚠ ${overdueDeadlines} deadline${overdueDeadlines !== 1 ? 's' : ''} overdue</span>` : ''}
+      ${dueSoonDeadlines ? `<span class="dash-badge dash-badge-blue">⏰ ${dueSoonDeadlines} deadline${dueSoonDeadlines !== 1 ? 's' : ''} due within 7 days</span>` : ''}
+    </div>`;
+
+  const deadlineRows = myDeadlines.slice(0, 5).map(({ m }) => `
+    <div class="dash-row" style="cursor:pointer" onclick="goToMatter('${m.id}')">
+      <div class="dash-row-main">
+        <div class="dash-row-title">${escHtml(m.name)}</div>
+        <div class="dash-row-meta">${escHtml(m.client_name || '—')}</div>
+      </div>
+      ${deadlineChipHtml(m)}
+    </div>`).join('');
+
+  const complianceRows = ca.items.slice(0, 5).map(item => `
+    <div class="dash-row" style="cursor:pointer" onclick="goToClientFromMatter('${item.client_id}')">
+      <div class="dash-row-main">
+        <div class="dash-row-title">${escHtml(item.client_name)}</div>
+        <div class="dash-row-meta">${escHtml(item.issue_label)} · ${escHtml(item.action_type)}</div>
+      </div>
+    </div>`).join('');
+
+  const seeMoreLink = (rs.overdue_count || rs.due_soon_count)
+    ? `<p style="font-size:0.78rem;margin-top:0.75rem"><a href="#" onclick="event.preventDefault();const d=document.querySelector('#tab-dashboard details');d.open=true;d.scrollIntoView({behavior:'smooth'});" style="color:var(--blue);text-decoration:none">See full review list in My Portfolio Details ↓</a></p>`
+    : '';
+
+  el.innerHTML = badges
+    + (deadlineRows ? `<div style="font-size:0.78rem;color:var(--ink3);margin:0.5rem 0 0.25rem">Deadlines</div>${deadlineRows}` : '')
+    + (complianceRows ? `<div style="font-size:0.78rem;color:var(--ink3);margin:0.75rem 0 0.25rem">Compliance actions</div>${complianceRows}` : '')
+    + seeMoreLink;
+}
+
+// "My Next Matters" (UX audit fix #4/#5) -- same merge renderCalendar()
+// does (real calendar_events + this lawyer's own matter deadlines via
+// _matterDeadlineSyntheticEvents), owner-scoped and capped to a short
+// preview, rendered with Calendar's own renderEventList() so there's no
+// second copy of that markup. GET /api/calendar is already per-user-scoped
+// server-side (_calendar_visibility_clause: created_by=you OR accepted
+// attendee), so only the synthetic half needs the owner filter.
+async function _homeUpcoming() {
+  let events = [];
+  try {
+    const res = await fetch(`${API}/api/calendar`);
+    events = await res.json();
+  } catch(e) { events = []; }
+
+  const myDeadlineEvents = window._userId ? _matterDeadlineSyntheticEvents(window._userId) : [];
+  const merged = [...events, ...myDeadlineEvents]
+    .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
+
+  const today = new Date().toISOString().slice(0,10);
+  const upcoming = merged.filter(e => e.date >= today).slice(0, 6);
+  renderEventList('home-upcoming', upcoming, true);
 }
 
 function _dashStats() {
@@ -4748,26 +4950,34 @@ function _dashDeadlines() {
     </div>`).join('');
 }
 
-// Merges progress notes (already attached per-matter on the in-memory
-// `matters` array) with recently uploaded documents (the one new endpoint)
-// into a single firm-wide feed — same merge/sort shape as
-// _clientRecentActivityHtml, just scoped to the whole firm instead of one
-// client's matters.
+// "Your Recent Activity" (UX audit fix #4/#5) -- same merge/sort shape as
+// before (progress notes already attached per-matter on the in-memory
+// `matters` array, merged with GET /api/documents/recent), now filtered to
+// this lawyer's own matters (created_by, same ownership convention as My
+// Clients/My Portfolio) instead of the whole firm's. The document-recent
+// limit is raised from 8 to 20 since it's now filtered client-side down to
+// one lawyer's own matters -- the firm-wide top 8 could otherwise miss
+// this lawyer's own activity entirely.
 async function _dashActivity() {
   const el = document.getElementById('dash-activity');
+  if (!window._userId) { el.innerHTML = '<div class="dash-empty">No real login session to scope this to yet.</div>'; return; }
+
+  const myMatterIds = new Set(matters.filter(m => m.created_by === window._userId).map(m => m.id));
+
   let docs = [];
   try {
-    const res = await fetch(`${API}/api/documents/recent?limit=8`);
+    const res = await fetch(`${API}/api/documents/recent?limit=20`);
     if (res.ok) docs = await res.json();
   } catch(e) { /* fall through with notes only */ }
 
   const items = [];
   matters.forEach(m => {
+    if (!myMatterIds.has(m.id)) return;
     (m.progress_notes || []).forEach(n => items.push({ type: 'note', matterId: m.id, matterName: m.name, data: n, ts: n.created_at }));
   });
-  docs.forEach(d => items.push({ type: 'document', matterId: d.matter_id, matterName: d.matter_name || d.matter_client_name || '', data: d, ts: d.uploaded_at }));
+  docs.filter(d => myMatterIds.has(d.matter_id)).forEach(d => items.push({ type: 'document', matterId: d.matter_id, matterName: d.matter_name || d.matter_client_name || '', data: d, ts: d.uploaded_at }));
 
-  if (!items.length) { el.innerHTML = '<div class="dash-empty">No recent activity across the firm.</div>'; return; }
+  if (!items.length) { el.innerHTML = '<div class="dash-empty">No recent activity on your own matters.</div>'; return; }
   items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
   el.innerHTML = items.slice(0, 8).map(it => {
     if (it.type === 'note') {
@@ -6931,9 +7141,14 @@ let calEvents = [];
 // of the same fact. `id` is left unset (not null -- see renderEventList's
 // isSynthetic check) so these can never be mistaken for a deletable/
 // inviteable/rescheduleable real row.
-function _matterDeadlineSyntheticEvents() {
+// ownerId (optional, UX audit fix #4/#5 -- Home's "My Next Matters") scopes
+// this to one lawyer's own matters via the same created_by convention as
+// the My Clients toggle/My Portfolio; Calendar's own call above passes no
+// argument and stays firm-wide, unchanged.
+function _matterDeadlineSyntheticEvents(ownerId) {
   return matters
     .filter(m => m.next_deadline && (m.status || 'Active') !== 'Closed' && !m.is_sentinel)
+    .filter(m => !ownerId || m.created_by === ownerId)
     .map(m => ({
       _matterId: m.id,
       event_type: 'deadline',
@@ -10877,16 +11092,26 @@ async function downloadMyPortfolioExport(format) {
   }
 }
 
-async function loadMyPortfolio() {
+// Extracted (2026-09-23, UX audit fix #4/#5) so Home can fetch this once
+// and hand it to both _homeNeedsAttention() and loadMyPortfolio() instead
+// of two separate requests for the same data on every Home load.
+async function _fetchMyPortfolioData() {
+  try {
+    const res = await fetch(`${API}/api/my-portfolio`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch(e) { return null; }
+}
+
+async function loadMyPortfolio(data) {
   const emptyNoticeEl = document.getElementById('mp-empty-notice');
   emptyNoticeEl.innerHTML = '';
   try {
-    const res = await fetch(`${API}/api/my-portfolio`);
-    if (!res.ok) {
+    if (data === undefined) data = await _fetchMyPortfolioData();
+    if (!data) {
       emptyNoticeEl.innerHTML = '<div class="dash-empty">Could not load your portfolio.</div>';
       return;
     }
-    const data = await res.json();
 
     if (!data.has_real_identity) {
       emptyNoticeEl.innerHTML = '<div class="dash-empty">No real login session to scope this to yet — sign in with a real account to see your own portfolio.</div>';

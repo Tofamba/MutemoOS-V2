@@ -10007,6 +10007,7 @@ def _empty_my_portfolio(user: dict) -> dict:
         "compliance": {"cleared_count": 0, "action_required_count": 0, "pep_count": 0,
                         "risk_ratings": {r: 0 for r in RISK_RATINGS}},
         "review_status": {"overdue_count": 0, "due_soon_count": 0, "never_reviewed_count": 0, "matters": []},
+        "compliance_actions": {"pending_count": 0, "items": []},
         "billing": {"total_billed": 0.0, "total_received": 0.0, "total_outstanding": 0.0, "by_client": []},
     }
 
@@ -10087,6 +10088,40 @@ async def _compute_my_portfolio(conn, user_id: "_uuid_mod.UUID", lawyer_name: Op
         conn, lawyer_id=user_id, client_id=None, status=None
     )
 
+    # 4b. Compliance actions assigned to you (2026-09-23, Home/UX audit
+    # fix #4) -- same ai_action_queue table and same status='pending_review'
+    # filter the firm-wide, admin/partner-only queue (GET /api/ai-action-queue)
+    # already uses, just scoped by compliance_exceptions.responsible_user_id
+    # instead of returning the whole firm's backlog. Exposes an existing
+    # column to its own owner for the first time; not a new computation --
+    # see the real-data investigation this session that found no role
+    # below admin/partner had any way to see which items were theirs.
+    # A lawyer who can't reach the (admin-gated) Compliance Actions tab
+    # can still act on any of these via that client's own Compliance modal
+    # (client:read/client:edit -- open to every role), which is why each
+    # item carries client_id: Home links straight to the client record,
+    # not to a page this lawyer might not be able to open.
+    ca_rows = await conn.fetch("""
+        SELECT aq.id, aq.client_id, aq.action_type, aq.escalation_level, aq.created_at,
+               c.full_name AS client_name, ce.issue_label
+        FROM ai_action_queue aq
+        JOIN compliance_exceptions ce ON ce.id = aq.compliance_exception_id
+        JOIN clients c ON c.id = aq.client_id
+        WHERE aq.firm_id=$1 AND aq.status='pending_review' AND ce.responsible_user_id=$2
+        ORDER BY aq.escalation_level DESC, aq.created_at ASC
+    """, FIRM_ID, user_id)
+    compliance_actions = {
+        "pending_count": len(ca_rows),
+        "items": [
+            {
+                "id": str(r["id"]), "client_id": str(r["client_id"]), "client_name": r["client_name"],
+                "issue_label": r["issue_label"], "action_type": r["action_type"],
+                "escalation_level": r["escalation_level"], "created_at": r["created_at"].isoformat(),
+            }
+            for r in ca_rows[:5]
+        ],
+    }
+
     # 5. Billing snapshot -- see the section header comment above for
     # what's realistically tracked (point-in-time totals only).
     fee_rows = await conn.fetch(
@@ -10137,6 +10172,7 @@ async def _compute_my_portfolio(conn, user_id: "_uuid_mod.UUID", lawyer_name: Op
                         "pep_count": pep_count, "risk_ratings": risk_ratings},
         "review_status": {"overdue_count": overdue_count, "due_soon_count": due_soon_count,
                            "never_reviewed_count": never_reviewed_count, "matters": review_rows},
+        "compliance_actions": compliance_actions,
         "billing": {"total_billed": round(total_billed, 2), "total_received": round(total_received, 2),
                     "total_outstanding": round(total_billed - total_received, 2), "by_client": billing_by_client},
     }

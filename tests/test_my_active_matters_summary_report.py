@@ -81,6 +81,9 @@ class FakeConnection:
             client_ids, firm_id = args
             return [o for o in self.owners if o["client_id"] in client_ids and o["firm_id"] == firm_id]
 
+        if q.startswith("SELECT aq.id, aq.client_id, aq.action_type, aq.escalation_level"):
+            return []
+
         if q.startswith("SELECT client_id, client_name, amount_billed, amount_received FROM matters"):
             firm_id, created_by = args
             return [
