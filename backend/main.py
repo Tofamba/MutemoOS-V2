@@ -2993,8 +2993,10 @@ async def _temp_corpus_restore_test(request: Request):
                     dists = (res.get("distances") or [[]])[0]
                     for chunk_id, dist in zip(ids, dists):
                         row = await target_conn.fetchrow(
+                            # chunks.id is TEXT, not UUID (unlike legal_updates.id/
+                            # zlr_entries.id) -- pass the Chroma id straight through.
                             "SELECT text, source_name, reference, case_name, citation FROM chunks WHERE id=$1",
-                            uuid.UUID(chunk_id),
+                            chunk_id,
                         )
                         hits.append({
                             "collection": coll_name, "chunk_id": chunk_id, "distance": dist,
