@@ -1,9 +1,16 @@
 """
-Unit tests for _send_otp_code's channel fallback chain in backend/main.py:
-WhatsApp -> Africa's Talking SMS -> Twilio SMS -> email -> None.
-Africa's Talking is the PRIMARY SMS channel (2026-08-30) -- Twilio has
-never actually been configured for this firm, so it's checked second,
-purely as a zero-cost legacy fallback, not a real second working provider.
+Unit tests for _send_otp_code's delivery logic in backend/main.py.
+
+WhatsApp stays an exclusive first preference (tried alone, dormant in
+practice since it isn't actually configured for this firm today). Below
+that, SMS (Africa's Talking as the PRIMARY channel -- 2026-08-30 -- then
+Twilio as a zero-cost legacy fallback if Africa's Talking is unconfigured
+or fails) and email are BOTH attempted on every request whenever both are
+available (2026-09-24 reliability fix) -- not a waterfall where email only
+fires if SMS failed. Most of the SMS-priority tests below deliberately
+configure email=False so they stay focused on proving the SMS-provider
+order alone; the dual-send behavior itself has its own dedicated tests
+further down.
 
 Mocks the channel-send functions and the module-level config flags
 directly rather than setting real env vars (those are read once at import
@@ -47,9 +54,11 @@ def test_whatsapp_configured_is_preferred_over_sms_and_email(monkeypatch):
 
 def test_africastalking_preferred_over_twilio_when_whatsapp_not_configured(monkeypatch):
     """The actual point of tonight's change: Africa's Talking is checked
-    before Twilio, not the other way round."""
+    before Twilio, not the other way round. email=False here so this stays
+    focused on SMS-provider order -- see the dual-send tests further down
+    for email being attempted alongside a successful SMS send."""
     import backend.main as m
-    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=True, email=True)
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=True, email=False)
 
     calls = []
     monkeypatch.setattr(m, "_send_whatsapp_otp", lambda phone, code: (calls.append("whatsapp"), True)[1])
@@ -65,9 +74,10 @@ def test_africastalking_preferred_over_twilio_when_whatsapp_not_configured(monke
 
 def test_falls_through_to_twilio_when_africastalking_configured_but_send_fails(monkeypatch):
     """Africa's Talking down/misconfigured doesn't strand the firm on SMS —
-    the (unconfigured-today, but harmless) Twilio path is still there."""
+    the (unconfigured-today, but harmless) Twilio path is still there.
+    email=False to stay focused on the SMS-provider fallback itself."""
     import backend.main as m
-    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=True, email=True)
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=True, email=False)
 
     calls = []
     monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: (calls.append("africastalking"), False)[1])
@@ -81,8 +91,9 @@ def test_falls_through_to_twilio_when_africastalking_configured_but_send_fails(m
 
 
 def test_sms_used_when_whatsapp_not_configured(monkeypatch):
+    """email=False to isolate this from the dual-send behavior tested below."""
     import backend.main as m
-    _configure(monkeypatch, whatsapp=False, africastalking=False, twilio=True, email=True)
+    _configure(monkeypatch, whatsapp=False, africastalking=False, twilio=True, email=False)
 
     calls = []
     monkeypatch.setattr(m, "_send_whatsapp_otp", lambda phone, code: (calls.append("whatsapp"), True)[1])
@@ -96,9 +107,10 @@ def test_sms_used_when_whatsapp_not_configured(monkeypatch):
 
 
 def test_sms_used_when_whatsapp_configured_but_send_fails(monkeypatch):
-    """Falls through mid-chain on a send failure, not just missing config."""
+    """Falls through mid-chain on a send failure, not just missing config.
+    email=False to isolate this from the dual-send behavior tested below."""
     import backend.main as m
-    _configure(monkeypatch, whatsapp=True, africastalking=False, twilio=True, email=True)
+    _configure(monkeypatch, whatsapp=True, africastalking=False, twilio=True, email=False)
 
     calls = []
     monkeypatch.setattr(m, "_send_whatsapp_otp", lambda phone, code: (calls.append("whatsapp"), False)[1])
@@ -148,6 +160,100 @@ def test_returns_none_when_email_configured_but_no_email_on_file(monkeypatch):
     monkeypatch.setattr(m, "_send_email_otp", lambda email, code: True)
 
     channel = _send_otp_code("+263771234567", None, "123456")
+
+    assert channel is None
+
+
+# ── SMS + email dual-send (2026-09-24 reliability fix) ──────────────────────
+# The actual point of this round of changes: SMS and email are both
+# attempted on every request when both are available -- not a waterfall
+# where email only fires because SMS failed. "Accepted" by Africa's
+# Talking is not the same guarantee as "delivered"; a lawyer stuck on a
+# slow SMS network should have a working email already on the way, not
+# have to wait and hope, then manually request a fallback.
+
+def test_sms_and_email_both_sent_when_both_configured_and_succeed(monkeypatch):
+    import backend.main as m
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=False, email=True)
+
+    calls = []
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: (calls.append("sms"), True)[1])
+    monkeypatch.setattr(m, "_send_email_otp", lambda email, code: (calls.append("email"), True)[1])
+
+    channel = _send_otp_code("+263771234567", "user@example.com", "123456")
+
+    assert channel == "sms+email"
+    assert calls == ["sms", "email"]  # both attempted, not a waterfall
+
+
+def test_email_still_attempted_when_sms_succeeds_not_just_on_sms_failure(monkeypatch):
+    """The actual regression this fixes: previously a SUCCESSFUL SMS send
+    short-circuited before email was ever attempted."""
+    import backend.main as m
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=False, email=True)
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: True)
+
+    email_calls = []
+    monkeypatch.setattr(m, "_send_email_otp", lambda email, code: (email_calls.append(1), True)[1])
+
+    _send_otp_code("+263771234567", "user@example.com", "123456")
+
+    assert email_calls == [1]  # email fired despite SMS already having succeeded
+
+
+def test_email_still_sent_when_sms_fails_but_email_configured(monkeypatch):
+    """The old fallback guarantee still holds: a failed SMS doesn't strand
+    the user if email is available."""
+    import backend.main as m
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=False, email=True)
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: False)
+    monkeypatch.setattr(m, "_send_email_otp", lambda email, code: True)
+
+    channel = _send_otp_code("+263771234567", "user@example.com", "123456")
+
+    assert channel == "email"
+
+
+def test_sms_only_channel_when_no_email_on_file(monkeypatch):
+    """No email address on record for this user -- SMS alone, no crash,
+    email function never even called."""
+    import backend.main as m
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=False, email=True)
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: True)
+    email_calls = []
+    monkeypatch.setattr(m, "_send_email_otp", lambda email, code: (email_calls.append(1), True)[1])
+
+    channel = _send_otp_code("+263771234567", None, "123456")
+
+    assert channel == "sms"
+    assert email_calls == []
+
+
+def test_whatsapp_success_stays_exclusive_even_when_email_also_configured(monkeypatch):
+    """WhatsApp is deliberately NOT folded into the dual-send -- it stays
+    an exclusive first preference (dormant in practice today), not
+    something this change needed to touch."""
+    import backend.main as m
+    _configure(monkeypatch, whatsapp=True, africastalking=True, twilio=False, email=True)
+    monkeypatch.setattr(m, "_send_whatsapp_otp", lambda phone, code: True)
+    sms_calls, email_calls = [], []
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: (sms_calls.append(1), True)[1])
+    monkeypatch.setattr(m, "_send_email_otp", lambda email, code: (email_calls.append(1), True)[1])
+
+    channel = _send_otp_code("+263771234567", "user@example.com", "123456")
+
+    assert channel == "whatsapp"
+    assert sms_calls == []
+    assert email_calls == []
+
+
+def test_returns_none_when_sms_and_email_both_fail(monkeypatch):
+    import backend.main as m
+    _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=False, email=True)
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: False)
+    monkeypatch.setattr(m, "_send_email_otp", lambda email, code: False)
+
+    channel = _send_otp_code("+263771234567", "user@example.com", "123456")
 
     assert channel is None
 

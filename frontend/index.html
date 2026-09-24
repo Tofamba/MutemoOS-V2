@@ -2998,11 +2998,14 @@ async function requestLoginOtp() {
     // Show where the code actually went — this used to always say "your
     // phone" regardless of channel, which was actively wrong whenever
     // WhatsApp wasn't configured and it silently went to email (or now SMS)
-    // instead.
-    const destinationText = data.channel === 'whatsapp' ? `WhatsApp (${phone})`
-                           : data.channel === 'sms' ? `SMS (${phone})`
-                           : data.channel === 'email' ? 'your email'
-                           : phone;
+    // instead. data.channel may now be "+"-joined (e.g. "sms+email") since
+    // the backend sends both simultaneously (2026-09-24 reliability fix,
+    // same code works from either) -- render each part and join with "and".
+    const _channelLabel = c => c === 'whatsapp' ? `WhatsApp (${phone})`
+                              : c === 'sms' ? `SMS (${phone})`
+                              : c === 'email' ? 'your email'
+                              : null;
+    const destinationText = (data.channel || '').split('+').map(_channelLabel).filter(Boolean).join(' and ') || phone;
     document.getElementById('login-phone-display').textContent = destinationText;
     document.getElementById('login-step-phone').style.display = 'none';
     document.getElementById('login-step-code').style.display = 'block';

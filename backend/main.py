@@ -1844,24 +1844,37 @@ def _send_otp_code(
     phone: str, email: Optional[str], code: str, sms_attempt_log: Optional[list] = None
 ) -> Optional[str]:
     """
-    Sends the OTP via whichever channel is actually configured. Prefers
-    WhatsApp (the eventual target, once Meta Business Verification
-    completes for the WhatsApp Business Account), then Africa's Talking
-    SMS (the PRIMARY SMS channel — see the constants above for why it's
-    checked ahead of Twilio), then Twilio SMS as a secondary/legacy SMS
-    fallback that's never actually been configured for this firm, and
-    finally email via Resend as a last-resort stopgap. Each channel
-    activates automatically as soon as its own env vars are set on
-    Railway — no further code change needed to "switch over" between
-    them.
+    Sends the OTP. WhatsApp (the eventual target, once Meta Business
+    Verification completes) stays an exclusive first preference, tried
+    alone -- it isn't actually configured/active for this firm today, so
+    this branch is dormant in practice, not something this change needed
+    to touch.
 
-    Returns the channel actually used ("whatsapp" / "sms" / "email"), or
-    None if nothing could be sent — this was previously just True/False,
-    which is why the login screen kept saying "code sent to your phone"
-    even when it had actually gone to email: the frontend had no way to
-    know which channel was really used. Africa's Talking and Twilio both
-    report as "sms" here — the frontend/digest only need to know it went
-    to SMS, not which provider handled it.
+    SMS + email reliability fix (2026-09-24): the code itself lives in
+    one place (otp_store, keyed by phone, generated once in request_otp()
+    before this function is even called) and verify_otp() only ever
+    checks that value -- it was already true, architecturally, that the
+    same code works no matter which channel delivered it. What was
+    actually wrong was the DELIVERY side: SMS ("accepted" by Africa's
+    Talking is not the same guarantee as "delivered" -- a real, previously
+    documented gap) was tried alone, with email only a last-resort
+    fallback if SMS failed outright. A slow-but-eventually-successful SMS
+    send left a lawyer staring at a blank phone with no way to know a
+    working email channel existed too.
+
+    Now SMS and email are both attempted on every request whenever both
+    are available for this user -- not a waterfall, not conditional on
+    one failing. Deliberately simple per instruction: always send both,
+    no cost-driven fallback-only logic (a later refinement if SMS volume
+    ever becomes a real cost concern).
+
+    Returns a "+"-joined string of every channel that actually sent
+    successfully (e.g. "sms+email", "sms", "email", "whatsapp"), or None
+    if nothing could be sent. Previously a single string ("whatsapp" /
+    "sms" / "email") since only one channel was ever used -- request_otp()
+    and the frontend's login screen both already treat this as free-form
+    text (split on "+" for display), not an enum, so this is additive, not
+    a breaking change to either.
 
     `sms_attempt_log`, if passed, collects one dict per real Africa's
     Talking attempt (success or failure) for request_otp() to persist to
@@ -1873,23 +1886,35 @@ def _send_otp_code(
         if _send_whatsapp_otp(phone, code):
             return "whatsapp"
         print(f"[otp] WhatsApp send failed for {phone}, falling back")
+
+    channels_sent = []
+
+    sms_sent = False
     if _AFRICAS_TALKING_CONFIGURED:
         at_detail: dict = {}
-        sent = _send_sms_via_africastalking(phone, code, result_detail=at_detail)
+        sms_sent = _send_sms_via_africastalking(phone, code, result_detail=at_detail)
         if sms_attempt_log is not None:
             sms_attempt_log.append(at_detail)
-        if sent:
-            return "sms"
-        print(f"[otp] Africa's Talking SMS send failed for {phone}, falling back")
-    if _TWILIO_SMS_CONFIGURED:
-        if _send_sms_otp(phone, code):
-            return "sms"
-        print(f"[otp] Twilio SMS send failed for {phone}, falling back")
+        if not sms_sent:
+            print(f"[otp] Africa's Talking SMS send failed for {phone}")
+    if not sms_sent and _TWILIO_SMS_CONFIGURED:
+        sms_sent = _send_sms_otp(phone, code)
+        if not sms_sent:
+            print(f"[otp] Twilio SMS send failed for {phone}")
+    if sms_sent:
+        channels_sent.append("sms")
+
     if email and _EMAIL_OTP_CONFIGURED:
         if _send_email_otp(email, code):
-            return "email"
-    print(f"[otp] No delivery channel available for {phone} (no email on file and neither WhatsApp nor SMS configured)")
-    return None
+            channels_sent.append("email")
+        else:
+            print(f"[otp] Email send failed for {phone}")
+
+    if not channels_sent:
+        print(f"[otp] No delivery channel succeeded for {phone} "
+              f"(no email on file or email send failed, and SMS unconfigured or failed)")
+        return None
+    return "+".join(channels_sent)
 
 def _send_whatsapp_otp(phone: str, code: str) -> bool:
     """
@@ -2153,10 +2178,17 @@ async def request_otp(req: OTPRequestBody):
     # (we returned early above for unknown ones with the same generic
     # message every time) — so this doesn't create a new way to probe
     # whether an arbitrary number is registered.
+    #
+    # `channel` may now be "+"-joined (e.g. "sms+email") since
+    # _send_otp_code() sends both simultaneously (2026-09-24 reliability
+    # fix) -- phrase multiple channels as a real sentence ("SMS and
+    # email") rather than leaking the internal "sms+email" join token.
+    _CHANNEL_LABELS = {"whatsapp": "WhatsApp", "sms": "SMS", "email": "email"}
+    channel_labels = [_CHANNEL_LABELS.get(c, c) for c in channel.split("+")]
     return {
         "sent": True,
         "channel": channel,
-        "message": f"A code has been sent via {channel}.",
+        "message": f"A code has been sent via {' and '.join(channel_labels)}.",
     }
 
 @app.post("/api/auth/verify-otp")
