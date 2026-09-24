@@ -2338,9 +2338,20 @@ select{cursor:pointer}
 <div id="note-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
   <div style="background:white;max-width:480px;width:90%;border-radius:8px;padding:1.5rem;box-shadow:0 10px 40px rgba(0,0,0,0.2)">
     <div style="font-weight:700;font-size:1rem;margin-bottom:1rem">📝 Add Progress Note</div>
-    <textarea id="note-modal-input" rows="4"
+    <!-- Optional short label (Progress Notes Phase 1, 2026-09-24) -- no
+         predefined categories, nothing mandatory, just a heading shown
+         prominently above the body in the Activity feed when present. -->
+    <input type="text" id="note-modal-heading" maxlength="200"
+      placeholder="Heading (optional) — e.g. Client call, Court filing…"
+      style="width:100%;padding:0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;margin-bottom:0.6rem;font-weight:600"/>
+    <!-- rows=6 (was 4) + oninput auto-grow (autoGrowTextarea) so the box
+         starts roomy and keeps growing with real content instead of
+         imposing a small fixed height -- no character limit here either,
+         the backend's own ~20,000-char ceiling is a defensive abuse
+         guard, not a UX limit. -->
+    <textarea id="note-modal-input" rows="6" oninput="autoGrowTextarea(this)"
       placeholder="e.g. Called client, confirmed meeting for 14 July 2026 at 2pm…"
-      style="width:100%;padding:0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;resize:vertical;margin-bottom:1rem"></textarea>
+      style="width:100%;padding:0.6rem;border:1px solid #ccc;border-radius:4px;font-size:0.9rem;font-family:inherit;resize:vertical;margin-bottom:1rem;overflow-y:hidden"></textarea>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="btn btn-outline" onclick="closeNoteModal()">Cancel</button>
       <button class="btn btn-primary" id="note-modal-submit">Add Note</button>
@@ -5368,6 +5379,11 @@ async function toggleMatter(id) {
 // markup/actions from the matter panel (note delete, document view/
 // download/extract-dates/delete) rather than swapping in Client Detail's
 // simplified read-only cards, which have none of those actions.
+// Populated by renderMatterPanel() each time it fetches a matter's
+// documents -- lets _matterNoteToggleExpand() re-render just the notes
+// list on a Read-more click without a full network re-fetch.
+let _matterActivityDocsCache = {};
+
 function _matterActivityHtml(id, notes, docs) {
   const items = [];
   (notes || []).forEach(n => items.push({ type: 'note', ts: n.created_at, data: n }));
@@ -5377,12 +5393,47 @@ function _matterActivityHtml(id, notes, docs) {
   return items.map(it => it.type === 'note' ? _matterNoteItemHtml(id, it.data) : _matterDocItemHtml(id, it.data)).join('');
 }
 
+// Progress Notes Phase 1 (2026-09-24) -- a note WITH a heading gets the
+// new date/author-first layout with a truncated body preview + "Read
+// more" expander (bodies can now run to ~20,000 chars server-side, so a
+// long one needs a preview, same spirit as the Matter Review Status
+// table's own truncate/expand pattern, just a longer preview length
+// since this is a real paragraph, not a table cell). A note with NO
+// heading falls back to the exact pre-existing display, unchanged --
+// full text, no truncation -- per instruction.
+const NOTE_PREVIEW_TRUNCATE_LEN = 300;
+let _matterNoteExpanded = new Set();
+
+function _matterNoteToggleExpand(matterId, noteId) {
+  if (_matterNoteExpanded.has(noteId)) _matterNoteExpanded.delete(noteId); else _matterNoteExpanded.add(noteId);
+  const matter = matters.find(m => m.id === matterId);
+  const container = document.getElementById(`notes-list-${matterId}`);
+  if (!matter || !container) return;
+  container.innerHTML = _matterActivityHtml(matterId, matter.progress_notes, _matterActivityDocsCache[matterId]);
+}
+
 function _matterNoteItemHtml(id, n) {
+  if (!n.heading) {
+    return `
+      <div class="note-item">
+        <div class="note-text">${escHtml(n.text)}</div>
+        <div class="note-footer">
+          <span>🖊 ${n.author} · ${n.created_at?.slice(0,10)}</span>
+          ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}" class="note-delete note-delete-btn">✕ Remove</button>` : ''}
+        </div>
+      </div>`;
+  }
+
+  const expanded = _matterNoteExpanded.has(n.id);
+  const needsExpand = (n.text || '').length > NOTE_PREVIEW_TRUNCATE_LEN;
+  const bodyText = expanded || !needsExpand ? n.text : `${n.text.slice(0, NOTE_PREVIEW_TRUNCATE_LEN)}…`;
   return `
     <div class="note-item">
-      <div class="note-text">${escHtml(n.text)}</div>
+      <div style="font-size:0.72rem;color:var(--ink3);margin-bottom:2px">${n.created_at?.slice(0,10)} · ${n.author}</div>
+      <div style="font-weight:700;margin-bottom:3px">${escHtml(n.heading)}</div>
+      <div class="note-text" style="white-space:pre-wrap">${escHtml(bodyText)}</div>
+      ${needsExpand ? `<a href="#" onclick="event.preventDefault();_matterNoteToggleExpand('${id}','${n.id}')" style="font-size:0.75rem;color:var(--blue);text-decoration:none">${expanded ? '▲ Show less' : '▼ Read more'}</a>` : ''}
       <div class="note-footer">
-        <span>🖊 ${n.author} · ${n.created_at?.slice(0,10)}</span>
         ${(window._userRole !== 'secretary') ? `<button data-matter="${id}" data-note="${n.id}" class="note-delete note-delete-btn">✕ Remove</button>` : ''}
       </div>
     </div>`;
@@ -5522,6 +5573,10 @@ async function renderMatterPanel(id) {
       fetch(`${API}/api/users`),
     ]);
     const docs = await docsRes.json();
+    // Cached so _matterNoteToggleExpand() can re-render just the notes
+    // list on a Read-more click without a full renderMatterPanel()
+    // re-fetch (which would also refetch documents/client/users).
+    _matterActivityDocsCache[id] = docs;
     const linkedClient = (clientRes && clientRes.ok) ? await clientRes.json() : null;
     const availableUsers = usersRes.ok ? await usersRes.json() : [];
     const status = matter.status || 'Active';
@@ -6017,7 +6072,7 @@ async function linkMatterToClient(matterId, clientId) {
   return data;
 }
 
-async function addNote(matterId, noteText, author) {
+async function addNote(matterId, noteText, author, heading) {
   const text = noteText || (document.getElementById(`note-input-${matterId}`)?.value || '').trim();
   if (!text) return;
   const noteAuthor = author || getCurrentUser() || 'NGM';
@@ -6039,7 +6094,7 @@ async function addNote(matterId, noteText, author) {
     const res = await fetch(`${API}/api/matters/${matterId}/notes`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ text, author: noteAuthor, next_review_date: nextReviewDate })
+      body: JSON.stringify({ text, heading: heading || null, author: noteAuthor, next_review_date: nextReviewDate })
     });
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
@@ -6054,7 +6109,7 @@ async function addNote(matterId, noteText, author) {
     const m = matters.find(m => m.id === matterId);
     if (m) {
       if (!m.progress_notes) m.progress_notes = [];
-      m.progress_notes.unshift({ id: data.id, text: data.text, author: data.author, created_at: data.created_at });
+      m.progress_notes.unshift({ id: data.id, text: data.text, heading: data.heading, author: data.author, created_at: data.created_at });
       m.last_activity = data.created_at;
       // renderMatterPanel() reads from this local cache, not a fresh
       // fetch — merge the review dates the server actually applied
@@ -7646,6 +7701,15 @@ function showDigestStatus(msg, type) {
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+// Generic textarea auto-grow (Progress Notes Phase 1, 2026-09-24) — resets
+// height to measure the real content height, then grows to fit, so a
+// textarea with a starting `rows` attribute keeps expanding as the user
+// types instead of scrolling internally at a fixed height.
+function autoGrowTextarea(el) {
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight}px`;
+}
+
 function escHtml(str) {
   if (!str) return '';
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -8996,11 +9060,14 @@ let _noteMatterId = null;
 function openNoteModal(matterId) {
   _noteMatterId = matterId;
   const modal = document.getElementById('note-modal');
+  const heading = document.getElementById('note-modal-heading');
   const input = document.getElementById('note-modal-input');
   const btn = document.getElementById('note-modal-submit');
   modal.style.display = 'flex';
+  heading.value = '';
   input.value = '';
-  setTimeout(() => input.focus(), 100);
+  input.style.height = 'auto';
+  setTimeout(() => heading.focus(), 100);
   // Wire submit button fresh each time
   btn.onclick = () => submitNoteModal();
   input.onkeydown = (e) => { if (e.key === 'Escape') closeNoteModal(); };
@@ -9012,11 +9079,12 @@ function closeNoteModal() {
 }
 
 async function submitNoteModal() {
+  const heading = document.getElementById('note-modal-heading').value.trim();
   const input = document.getElementById('note-modal-input');
   const text = input.value.trim();
   if (!text || !_noteMatterId) return;
   const author = getCurrentUser() || 'NGM';
-  await addNote(_noteMatterId, text, author);
+  await addNote(_noteMatterId, text, author, heading || null);
   closeNoteModal();
 }
 
