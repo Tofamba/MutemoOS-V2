@@ -191,6 +191,24 @@ def test_request_otp_logs_failed_africastalking_attempt_even_though_email_fallba
     assert usage_inserts[0][1][4] == "InsufficientBalance"  # provider_status
 
 
+def test_request_otp_phrases_combined_channel_as_a_real_sentence(monkeypatch):
+    """_send_otp_code() now returns a "+"-joined string when SMS and email
+    both succeed (2026-09-24 dual-send reliability fix) -- the user-facing
+    message must read as English ("SMS and email"), not leak the internal
+    "sms+email" join token, while `channel` itself stays the raw joined
+    value for the frontend's own per-part rendering."""
+    import backend.main as m
+    conn = _RequestOtpConn()
+    monkeypatch.setattr(m, "_db_pool", FakePool(conn))
+    monkeypatch.setattr(m, "AUTH_ENABLED", True)
+    monkeypatch.setattr(m, "_send_otp_code", lambda *a, **k: "sms+email")
+
+    result = asyncio.run(request_otp(OTPRequestBody(phone="+263771234567")))
+
+    assert result["channel"] == "sms+email"
+    assert result["message"] == "A code has been sent via SMS and email."
+
+
 def test_request_otp_logs_nothing_when_africastalking_never_attempted(monkeypatch):
     """No log entry at all when Africa's Talking isn't configured/reached --
     e.g. WhatsApp succeeded first, or nothing but email is configured."""
