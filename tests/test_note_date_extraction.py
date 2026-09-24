@@ -108,9 +108,9 @@ class _NoteFakeConnection:
             return {"id": self.matter_row["id"], "name": self.matter_row["name"],
                      "internal_ref": self.matter_row.get("internal_ref")}
         if q.startswith("INSERT INTO progress_notes"):
-            nid, matter_id, firm_id, text, author, user_id, created_at = args
+            nid, matter_id, firm_id, text, heading, author, user_id, created_at = args
             return {"id": nid, "matter_id": matter_id, "firm_id": firm_id, "text": text,
-                    "author": author, "user_id": user_id, "created_at": created_at}
+                    "heading": heading, "author": author, "user_id": user_id, "created_at": created_at}
         raise NotImplementedError(f"_NoteFakeConnection.fetchrow: unhandled query: {q}")
 
     async def execute(self, query, *args):

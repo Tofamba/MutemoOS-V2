@@ -448,6 +448,13 @@ async def run_migrations():
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_notes_matter ON progress_notes(matter_id);
+        -- Optional short free-text heading (2026-09-24, Progress Notes
+        -- Phase 1) -- no predefined categories, nothing mandatory, just a
+        -- way to label a note at a glance in the Activity feed. NULL for
+        -- every note created before this column existed and for any note
+        -- created without one going forward; _matterActivityHtml() falls
+        -- back to the pre-existing display when it's absent.
+        ALTER TABLE progress_notes ADD COLUMN IF NOT EXISTS heading TEXT;
 
         CREATE TABLE IF NOT EXISTS documents (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3961,8 +3968,17 @@ class ClientComplianceUpdate(BaseModel):
     # runClientConflictCheck() / markConflictReviewed() in index.html).
     conflict_check_reviewed: Optional[bool] = None
 
+# Progress Notes Phase 1 (2026-09-24) -- defensive abuse ceilings only,
+# enforced in add_progress_note(), not UX-facing limits meant to keep
+# notes short. 20,000 chars is generously beyond any real matter note
+# (roughly 3,000-4,000 words); 200 for the heading is generous for a
+# short label, not a title.
+PROGRESS_NOTE_TEXT_MAX_LENGTH = 20000
+PROGRESS_NOTE_HEADING_MAX_LENGTH = 200
+
 class ProgressNote(BaseModel):
     text: str
+    heading: Optional[str] = None
     author: Optional[str] = None
     # Matter review safety net — adding a note is the canonical "I just
     # worked on/reviewed this matter" action, so it stamps the review
@@ -7960,16 +7976,31 @@ async def add_progress_note(matter_id: str, note: ProgressNote, request: Request
     if not matter:
         raise HTTPException(status_code=404, detail="Matter not found")
 
+    # Progress Notes Phase 1 (2026-09-24): no UX-imposed short limit on the
+    # body -- this is a defensive abuse ceiling only, generous enough that
+    # no genuine matter note could ever hit it.
+    if len(note.text) > PROGRESS_NOTE_TEXT_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Note text exceeds the maximum length of {PROGRESS_NOTE_TEXT_MAX_LENGTH} characters",
+        )
+    heading = (note.heading or "").strip() or None
+    if heading and len(heading) > PROGRESS_NOTE_HEADING_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Note heading exceeds the maximum length of {PROGRESS_NOTE_HEADING_MAX_LENGTH} characters",
+        )
+
     author = note.author or (user.get("display_name") if user else None) or "Unknown"
     now = datetime.utcnow()
     nid = _uuid_mod.uuid4()
 
     async with _db_pool.acquire() as conn:
         note_row = await conn.fetchrow("""
-            INSERT INTO progress_notes (id, matter_id, firm_id, text, author, user_id, created_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+            INSERT INTO progress_notes (id, matter_id, firm_id, text, heading, author, user_id, created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
         """,
-        nid, _uuid_mod.UUID(matter_id), FIRM_ID, note.text, author,
+        nid, _uuid_mod.UUID(matter_id), FIRM_ID, note.text, heading, author,
         _uuid_mod.UUID(str(user["id"])) if user.get("id") else None, now
         )
         # Matter review safety net: adding a note is a real "reviewed
