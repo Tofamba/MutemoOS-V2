@@ -2943,6 +2943,81 @@ async def _temp_corpus_snapshot_publish(request: Request):
     return {"returncode": proc.returncode, "stdout": stdout.decode(errors="replace"),
             "stderr": stderr.decode(errors="replace")}
 
+
+# Fire-and-poll, not a single long-lived request -- ~5500 sequential rows
+# restored one at a time over the public proxy to the throwaway Postgres
+# genuinely takes longer than Railway's own edge-proxy request timeout
+# (confirmed live: two real attempts each hit a 502 "Application failed
+# to respond"/"upstream error" partway through, even though the work
+# itself was still progressing server-side). In-memory state is fine here
+# -- single process, one-off diagnostic, not app state.
+_RESTORE_TEST_STATE = {"status": "idle"}
+
+async def _run_restore_test():
+    global _RESTORE_TEST_STATE
+    _RESTORE_TEST_STATE = {"status": "running"}
+    try:
+        target_db_url = os.environ["THROWAWAY_RESTORE_DATABASE_URL"]
+        target_pool = await asyncpg.create_pool(target_db_url, min_size=1, max_size=2)
+        try:
+            await run_migrations(pool=target_pool)
+        finally:
+            await target_pool.close()
+
+        chroma_scratch = tempfile.mkdtemp(prefix="corpus-restore-test-")
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "scripts/corpus_snapshot.py", "restore",
+            "--database-url", target_db_url, "--chroma-path", chroma_scratch,
+            "--firm-id", str(FIRM_ID), "--snapshot", "latest", "--apply",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            cwd=repo_root,
+        )
+        stdout, stderr = await proc.communicate()
+        restore_result = {"returncode": proc.returncode, "stdout": stdout.decode(errors="replace"),
+                           "stderr": stderr.decode(errors="replace")}
+
+        search_results = []
+        if proc.returncode == 0:
+            import chromadb as _chromadb
+            client = _chromadb.PersistentClient(path=chroma_scratch)
+            target_conn = await asyncpg.connect(target_db_url)
+            try:
+                for q in ["politically exposed person", "notice of eviction", "arbitration agreement"]:
+                    q_vec = (await asyncio.to_thread(embed_texts, [q]))[0]
+                    hits = []
+                    for coll_name in ("legal_updates", "zlr_index"):
+                        try:
+                            coll = client.get_collection(coll_name)
+                        except Exception:
+                            continue
+                        res = coll.query(query_embeddings=[q_vec], n_results=3)
+                        ids = (res.get("ids") or [[]])[0]
+                        dists = (res.get("distances") or [[]])[0]
+                        for chunk_id, dist in zip(ids, dists):
+                            row = await target_conn.fetchrow(
+                                # chunks.id is TEXT, not UUID (unlike legal_updates.id/
+                                # zlr_entries.id) -- pass the Chroma id straight through.
+                                "SELECT text, source_name, reference, case_name, citation FROM chunks WHERE id=$1",
+                                chunk_id,
+                            )
+                            hits.append({
+                                "collection": coll_name, "chunk_id": chunk_id, "distance": dist,
+                                "found_in_target_postgres": bool(row),
+                                "label": (row["reference"] or row["case_name"] or row["source_name"]) if row else None,
+                                "text_snippet": (row["text"][:280] if row and row["text"] else None),
+                            })
+                    search_results.append({"query": q, "hits": hits})
+            finally:
+                await target_conn.close()
+
+        _RESTORE_TEST_STATE = {
+            "status": "done", "restore": restore_result,
+            "chroma_scratch_dir": chroma_scratch, "search_results": search_results,
+        }
+    except Exception as e:
+        _RESTORE_TEST_STATE = {"status": "error", "error": repr(e)}
+
 @app.post("/api/admin/temp-corpus-restore-test")
 async def _temp_corpus_restore_test(request: Request):
     require_admin_token(request)
@@ -2951,64 +3026,15 @@ async def _temp_corpus_restore_test(request: Request):
         raise HTTPException(status_code=500, detail="THROWAWAY_RESTORE_DATABASE_URL not set")
     if target_db_url == os.environ.get("DATABASE_URL"):
         raise HTTPException(status_code=400, detail="refusing to restore into this deployment's own database")
+    if _RESTORE_TEST_STATE.get("status") == "running":
+        return {"already_running": True}
+    asyncio.create_task(_run_restore_test())
+    return {"started": True}
 
-    # Migrate the throwaway DB's schema with its OWN pool, never the global
-    # _db_pool -- see run_migrations()'s own docstring for why swapping the
-    # global would be unsafe on a live multi-tenant app.
-    target_pool = await asyncpg.create_pool(target_db_url, min_size=1, max_size=2)
-    try:
-        await run_migrations(pool=target_pool)
-    finally:
-        await target_pool.close()
-
-    chroma_scratch = tempfile.mkdtemp(prefix="corpus-restore-test-")
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    proc = await asyncio.create_subprocess_exec(
-        "python3", "scripts/corpus_snapshot.py", "restore",
-        "--database-url", target_db_url, "--chroma-path", chroma_scratch,
-        "--firm-id", str(FIRM_ID), "--snapshot", "latest", "--apply",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        cwd=repo_root,
-    )
-    stdout, stderr = await proc.communicate()
-    restore_result = {"returncode": proc.returncode, "stdout": stdout.decode(errors="replace"),
-                       "stderr": stderr.decode(errors="replace")}
-
-    search_results = []
-    if proc.returncode == 0:
-        import chromadb as _chromadb
-        client = _chromadb.PersistentClient(path=chroma_scratch)
-        target_conn = await asyncpg.connect(target_db_url)
-        try:
-            for q in ["politically exposed person", "notice of eviction", "arbitration agreement"]:
-                q_vec = (await asyncio.to_thread(embed_texts, [q]))[0]
-                hits = []
-                for coll_name in ("legal_updates", "zlr_index"):
-                    try:
-                        coll = client.get_collection(coll_name)
-                    except Exception:
-                        continue
-                    res = coll.query(query_embeddings=[q_vec], n_results=3)
-                    ids = (res.get("ids") or [[]])[0]
-                    dists = (res.get("distances") or [[]])[0]
-                    for chunk_id, dist in zip(ids, dists):
-                        row = await target_conn.fetchrow(
-                            # chunks.id is TEXT, not UUID (unlike legal_updates.id/
-                            # zlr_entries.id) -- pass the Chroma id straight through.
-                            "SELECT text, source_name, reference, case_name, citation FROM chunks WHERE id=$1",
-                            chunk_id,
-                        )
-                        hits.append({
-                            "collection": coll_name, "chunk_id": chunk_id, "distance": dist,
-                            "found_in_target_postgres": bool(row),
-                            "label": (row["reference"] or row["case_name"] or row["source_name"]) if row else None,
-                            "text_snippet": (row["text"][:280] if row and row["text"] else None),
-                        })
-                search_results.append({"query": q, "hits": hits})
-        finally:
-            await target_conn.close()
-
-    return {"restore": restore_result, "chroma_scratch_dir": chroma_scratch, "search_results": search_results}
+@app.get("/api/admin/temp-corpus-restore-test-status")
+async def _temp_corpus_restore_test_status(request: Request):
+    require_admin_token(request)
+    return _RESTORE_TEST_STATE
 # ── END TEMPORARY corpus-snapshot real publish + restore test ───────────────
 
 
