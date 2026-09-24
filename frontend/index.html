@@ -332,8 +332,6 @@ select{cursor:pointer}
 .matter-meta{font-size:0.72rem;color:var(--ink3);font-family:var(--font-sans);margin-top:3px}
 .matter-expand{flex:1}
 .matter-actions{display:flex;gap:6px;align-items:center}
-.matter-docs{border-top:2px solid var(--paper2);padding:0;display:none;background:var(--paper)}
-.matter-docs.open{display:block}
 .matter-section{padding:0.85rem 1.1rem;border-bottom:1px solid var(--border)}
 .matter-section:last-child{border-bottom:none}
 .matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
@@ -1006,6 +1004,32 @@ select{cursor:pointer}
   </div>
 
   <div id="matters-list"></div>
+</div>
+
+<!-- ═══════════════ MATTER WORKSPACE (dedicated full-page view) ═══════════════ -->
+<!-- UX audit follow-up (2026-09-24): a matter used to open via inline
+     expansion within the Matters list above -- other matters stayed
+     visible above/below the expanded one, so opening one never actually
+     felt like leaving the list. This is a real dedicated view instead:
+     opening a matter hides the list entirely (via showTab(), same as
+     every other tab) and shows only this matter, with an explicit,
+     prominent "Back to Matters" exit rather than a small icon. The
+     content itself is untouched -- renderMatterPanel() builds the exact
+     same Overview/stage-tracker/Activity/etc. HTML it always has (see
+     openMatterWorkspace()/closeMatterWorkspace() in the script), just
+     into this container's own docs-content-${id} div instead of a
+     per-row one inside the matters list. -->
+<div id="tab-matter-workspace" style="display:none">
+  <button class="btn btn-outline" onclick="closeMatterWorkspace()"
+          style="font-size:0.9rem;font-weight:700;padding:0.65rem 1.3rem;margin-bottom:1.1rem">
+    ← Back to Matters
+  </button>
+  <div class="section-head" style="margin-bottom:1rem">
+    <h2 id="matter-workspace-title" style="margin-bottom:2px"></h2>
+    <p id="matter-workspace-subtitle" style="margin-bottom:2px;color:var(--ink3)"></p>
+    <p id="matter-workspace-client" style="color:var(--ink3);font-size:0.85rem"></p>
+  </div>
+  <div id="matter-workspace-body"></div>
 </div>
 
 <!-- Bulk Import modal (2026-09-06) -- same Excel/Word import + templates
@@ -3767,19 +3791,14 @@ function backToClientsList() {
   _currentClientDetailId = null;
 }
 
-// Jumps from a client's matter list to that matter's existing detail view
-// — the Matters tab's accordion-expand panel (there's no separate matter
-// detail page in this app). Filters the matters list down to just this one
-// first so it's guaranteed visible regardless of the tab's normal top-10
-// default, then expands and scrolls to it.
+// Jumps to a matter's dedicated workspace from anywhere in the app
+// (Client Detail's linked matters, Home's Needs Attention/Upcoming,
+// Calendar's synthetic deadline entries, etc.) -- used to switch to the
+// Matters tab, filter the list down to just this one, and expand it
+// inline; now just opens the workspace directly (2026-09-24 conversion,
+// see openMatterWorkspace()).
 function goToMatter(matterId) {
-  const matter = matters.find(m => m.id === matterId);
-  if (!matter) return;
-  showTab('matters');
-  renderMattersList([matter]);
-  const row = document.getElementById(`matter-docs-${matterId}`)?.closest('.matter-item');
-  if (row) row.scrollIntoView({behavior: 'smooth', block: 'start'});
-  toggleMatter(matterId);
+  openMatterWorkspace(matterId);
 }
 
 // null when creating a new client, the client's id when editing an existing one.
@@ -4730,9 +4749,15 @@ document.addEventListener('click', (e) => {
 
 function showTab(tab) {
   document.querySelectorAll('.nav-dropdown').forEach(d => d.classList.remove('open'));
-  ['dashboard','capture','vault','search','matters','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports','compliance-actions'].forEach(t => {
+  // matter-workspace (2026-09-24) has no nav button of its own -- it's not
+  // a nav destination, only reachable by opening a matter -- so the
+  // nav-${t} lookup is optional-chained for it specifically, and Matters
+  // itself stays highlighted while it's open (same idea as a nav-dropdown
+  // parent staying active for one of its children, see
+  // NAV_DROPDOWN_PARENT below).
+  ['dashboard','capture','vault','search','matters','matter-workspace','clients','calendar','legalupdates','draft','contract-review','zlr','users','reports','compliance-actions'].forEach(t => {
     document.getElementById(`tab-${t}`).style.display = t === tab ? 'block' : 'none';
-    document.getElementById(`nav-${t}`).classList.toggle('active', t === tab);
+    document.getElementById(`nav-${t}`)?.classList.toggle('active', t === tab || (t === 'matters' && tab === 'matter-workspace'));
   });
   document.querySelectorAll('.nav > .nav-dropdown > .nav-btn').forEach(b => b.classList.remove('active'));
   const parent = NAV_DROPDOWN_PARENT[tab];
@@ -5311,7 +5336,7 @@ function renderMattersList(filtered = null) {
     const refLine = [ref, extRef].filter(Boolean).join(' · ');
     return `
     <div class="matter-item" style="border-left-color:${matterHealthBorderColor(m)}">
-      <div class="matter-row" onclick="toggleMatter('${m.id}')">
+      <div class="matter-row" onclick="openMatterWorkspace('${m.id}')">
         <div class="matter-icon">${(() => {
           const t = (m.matter_type || '').toLowerCase().replace(/_/g,' ');
           return t.includes('labour') || t.includes('employment') ? '👷' :
@@ -5338,11 +5363,8 @@ function renderMattersList(filtered = null) {
         <div class="matter-actions">
           ${deadlineChipHtml(m)}
           ${(window._userRole !== 'secretary') ? `<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();deleteMatter('${m.id}')">🗑</button>` : ''}
-          <span style="color:var(--ink3);font-size:0.8rem" id="expand-icon-${m.id}">▶</span>
+          <span style="color:var(--ink3);font-size:0.8rem">→</span>
         </div>
-      </div>
-      <div class="matter-docs" id="matter-docs-${m.id}" onclick="event.stopPropagation()">
-        <div id="docs-content-${m.id}" style="font-size:0.8rem;color:var(--ink3)">Loading…</div>
       </div>
     </div>`
   }).join('');
@@ -5365,14 +5387,46 @@ function filterMatters(query) {
   renderMattersList(filtered);
 }
 
-async function toggleMatter(id) {
-  const docsEl = document.getElementById(`matter-docs-${id}`);
-  const icon = document.getElementById(`expand-icon-${id}`);
-  const isOpen = docsEl.classList.contains('open');
-  docsEl.classList.toggle('open', !isOpen);
-  icon.textContent = isOpen ? '▶' : '▼';
-  if (!isOpen) await renderMatterPanel(id);
-  // If closing, do nothing — don't re-render
+// ── Matter Workspace (dedicated full-page view, 2026-09-24) ─────────────────
+// A matter used to open via inline expansion within the Matters list --
+// other matters stayed visible above/below the expanded one, so it never
+// really felt like leaving the list. Opening a matter now hides the list
+// entirely (via showTab(), same mechanism as every other tab) and shows
+// only this matter, with an explicit "Back to Matters" exit. The content
+// itself is untouched -- renderMatterPanel() builds the exact same
+// Overview/stage-tracker/Activity/etc. HTML it always has; only the
+// container changed, from a per-row div inside the matters list to this
+// tab's own fixed body.
+let _workspaceMatterId = null;
+
+function openMatterWorkspace(id) {
+  const matter = matters.find(m => m.id === id);
+  if (!matter) return;
+  _workspaceMatterId = id;
+
+  const ref = matter.internal_ref || matter.number || '';
+  const extRef = matter.external_ref || '';
+  const refLine = [ref, extRef].filter(Boolean).join(' · ');
+  document.getElementById('matter-workspace-title').textContent = matter.name;
+  document.getElementById('matter-workspace-subtitle').textContent =
+    [refLine, matter.practice_area].filter(Boolean).join(' · ');
+  document.getElementById('matter-workspace-client').textContent =
+    matter.client_name ? `Client: ${matter.client_name}` : '';
+
+  // renderMatterPanel() targets docs-content-${id} directly -- give it
+  // somewhere to render into, same id convention as before so none of its
+  // internal wiring (note-add-btn-${id}, notes-list-${id}, etc.) needs to
+  // change.
+  document.getElementById('matter-workspace-body').innerHTML =
+    `<div id="docs-content-${id}" style="font-size:0.8rem;color:var(--ink3)">Loading…</div>`;
+
+  showTab('matter-workspace');
+  renderMatterPanel(id);
+}
+
+function closeMatterWorkspace() {
+  _workspaceMatterId = null;
+  showTab('matters');
 }
 
 // ── Matter Activity feed (UX audit fix #2) ──────────────────────────────────
@@ -5559,6 +5613,12 @@ async function renderMatterPanel(id) {
   const matter = matters.find(m => m.id === id);
   if (!matter) return;
   const content = document.getElementById(`docs-content-${id}`);
+  // Matter Workspace (2026-09-24): this container only exists while this
+  // matter's workspace is actually open (openMatterWorkspace() creates it
+  // fresh each time) -- a caller re-rendering after a field save for a
+  // matter that isn't the one currently open (or isn't open at all) has
+  // nothing to render into, same as this matter no longer existing.
+  if (!content) return;
   content.innerHTML = '<div style="padding:0.5rem 0;color:var(--ink3)">Loading…</div>';
 
   try {
@@ -5933,47 +5993,24 @@ async function updateMatterField(matterId, field, value) {
     if (updated && !updated.detail) Object.assign(m, updated);
     else m[field] = value;
   }
-  // renderMattersList() rebuilds every matter-item's HTML from scratch,
-  // including matter-docs-${id} -- and the "open" class that actually
-  // shows a panel (.matter-docs{display:none} / .open{display:block})
-  // is only ever added dynamically by toggleMatter(), never baked into
-  // that template. So without this, ANY field saved through this
-  // function -- not just the new AML Scope/Matter Risk fields, every one
-  // of them (status, internal_ref, external_ref, next_review_date, ...)
-  // -- silently collapses the matter's own open panel back to the
-  // matters list on every single save. Real bug found 2026-09-03 via the
-  // new AML fields specifically, because setting AML Scope + Reason +
-  // Matter Risk in one sitting is the first workflow that chains several
-  // quick edits on one open matter -- a single status change never made
-  // this annoying enough to notice before. Fixed at the root (here, not
-  // per-field): capture whether the panel was open before the rebuild,
-  // put it right back if so.
-  const wasOpen = document.getElementById(`matter-docs-${matterId}`)?.classList.contains('open');
-  // renderMattersList() closes every panel for one frame before wasOpen
-  // puts this one back -- while closed, the whole matters list is only as
-  // tall as its collapsed rows, which for an open panel with any real
-  // content (docs, notes, the full field set) is far shorter than the
-  // page was a moment ago. The browser clamps window scroll to that
-  // shorter document instantly, i.e. the viewport jumps to the new
-  // (much lower) bottom of the page -- then the panel reopens and the
-  // page grows back, but nothing was ever restoring where the user had
-  // actually been looking, so it just stays wherever it got clamped to.
-  // Real bug found 2026-09-04, reproduced on any field (status,
-  // next_review_date, AML scope all tried) -- this collapse/reopen
-  // sequence is the one shared path every field save goes through, so
-  // the fix belongs here, not per-field. window.scrollY (not a
-  // container's scrollTop) is correct: the matters tab has no scrolling
-  // container of its own, the page itself scrolls.
-  const scrollY = window.scrollY;
+  // Matter Workspace (2026-09-24 conversion): refresh the background
+  // matters list (its own summary chips need to reflect this save
+  // whenever the user does go back to it) and, if this matter's
+  // dedicated workspace is what's actually open right now, re-render it
+  // with the just-saved server response so field edits reflect
+  // immediately. This replaces an older "was the inline panel open,
+  // restore scroll position after closing/reopening it" dance that
+  // existed because the panel used to live inside the matters list's own
+  // DOM -- closing/reopening it there changed the visible page's height
+  // out from under the user (real bug, 2026-09-03/04). The workspace is
+  // now a fully separate container on its own tab, so a background list
+  // refresh -- which only ever happens while that tab is hidden, since
+  // it's impossible to be looking at the list and have a workspace open
+  // at the same time -- can't cause that same visible jump.
   renderMattersList();
-  if (wasOpen) {
-    const docsEl = document.getElementById(`matter-docs-${matterId}`);
-    const icon = document.getElementById(`expand-icon-${matterId}`);
-    if (docsEl) docsEl.classList.add('open');
-    if (icon) icon.textContent = '▼';
+  if (_workspaceMatterId === matterId) {
     await renderMatterPanel(matterId);
   }
-  window.scrollTo(0, scrollY);
 }
 
 // Matter Risk (2026-09-17, risk rating rationale) -- a dedicated handler,
@@ -6023,18 +6060,11 @@ async function updateMatterRisk(matterId, newValue) {
   if (reasonEl) reasonEl.value = reason;
   if (selectEl) selectEl.dataset.prevValue = newValue;
 
-  // Same open-panel/scroll preservation dance as updateMatterField.
-  const wasOpen = document.getElementById(`matter-docs-${matterId}`)?.classList.contains('open');
-  const scrollY = window.scrollY;
+  // Same reasoning as updateMatterField -- see its own comment.
   renderMattersList();
-  if (wasOpen) {
-    const docsEl = document.getElementById(`matter-docs-${matterId}`);
-    const icon = document.getElementById(`expand-icon-${matterId}`);
-    if (docsEl) docsEl.classList.add('open');
-    if (icon) icon.textContent = '▼';
+  if (_workspaceMatterId === matterId) {
     await renderMatterPanel(matterId);
   }
-  window.scrollTo(0, scrollY);
 }
 
 // Same as updateMatterField, but also re-renders the currently-open matter
