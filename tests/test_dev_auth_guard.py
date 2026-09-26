@@ -23,7 +23,7 @@ _RELEVANT_VARS = [
     "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
     "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER",
     "RESEND_API_KEY", "SMTP_HOST",
-    "MUTEMO_ALLOW_DEV_AUTH",
+    "MUTEMO_ALLOW_DEV_AUTH", "MUTEMO_ADMIN_TOKEN",
     "RAILWAY_ENVIRONMENT_NAME", "RAILWAY_SERVICE_NAME",
 ]
 
@@ -52,10 +52,14 @@ def test_local_dev_with_no_railway_env_is_unaffected():
 def test_railway_deployment_with_no_auth_and_no_flag_fails_to_start():
     """The core guard: a Railway-hosted service with AUTH_ENABLED=False and
     no explicit opt-in must refuse to start, not silently serve traffic
-    under a synthetic dev user."""
+    under a synthetic dev user. MUTEMO_ADMIN_TOKEN is set here so this
+    exercises the AUTH_ENABLED guard specifically, independent of the
+    separate MUTEMO_ADMIN_TOKEN guard covered by
+    test_admin_token_startup_guard.py."""
     result = _run_import_in_subprocess({
         "RAILWAY_ENVIRONMENT_NAME": "production",
         "RAILWAY_SERVICE_NAME": "MutemoOS-V2",
+        "MUTEMO_ADMIN_TOKEN": "fake-token-for-test",
     })
     assert result.returncode != 0, "expected import to fail (raise RuntimeError), but it succeeded"
     assert "MUTEMO_ALLOW_DEV_AUTH" in result.stderr
@@ -68,6 +72,7 @@ def test_railway_deployment_with_explicit_dev_auth_flag_starts_fine():
         "RAILWAY_ENVIRONMENT_NAME": "production",
         "RAILWAY_SERVICE_NAME": "mutemoos-staging",
         "MUTEMO_ALLOW_DEV_AUTH": "true",
+        "MUTEMO_ADMIN_TOKEN": "fake-token-for-test",
     })
     assert result.returncode == 0, f"expected clean import, got:\n{result.stderr}"
 
@@ -79,5 +84,6 @@ def test_railway_deployment_with_real_auth_configured_needs_no_flag():
         "RAILWAY_ENVIRONMENT_NAME": "production",
         "RAILWAY_SERVICE_NAME": "MutemoOS-V2",
         "RESEND_API_KEY": "fake-key-for-test",
+        "MUTEMO_ADMIN_TOKEN": "fake-token-for-test",
     })
     assert result.returncode == 0, f"expected clean import, got:\n{result.stderr}"

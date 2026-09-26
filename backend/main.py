@@ -1732,6 +1732,38 @@ def require_admin_token(request: Request):
         if token != ADMIN_TOKEN:
             raise HTTPException(status_code=403, detail="Admin access required")
 
+# require_admin_token() above silently allows access when ADMIN_TOKEN is
+# unset -- fine for a local dev import, not fine for a deployed service:
+# /api/admin/reindex, /api/admin/reset-chromadb, /api/admin/verify-chunk-hashes,
+# /api/admin/bootstrap, and every other bare-require_admin_token() endpoint
+# would be reachable with NO credential at all. Same "refuse to start rather
+# than silently serve unauthenticated" posture as the AUTH_ENABLED guard
+# below, with no opt-out flag -- unlike AUTH_ENABLED's synthetic-dev-user
+# fallback, there's no legitimate deployed scenario where leaving these
+# endpoints unauthenticated is intentional.
+if os.environ.get("RAILWAY_ENVIRONMENT_NAME") and not ADMIN_TOKEN:
+    raise RuntimeError(
+        "MUTEMO_ADMIN_TOKEN is not set on a Railway deployment "
+        f"(RAILWAY_SERVICE_NAME={os.environ.get('RAILWAY_SERVICE_NAME')!r}). Every "
+        "endpoint gated by require_admin_token() alone (admin reindex/reset, "
+        "chunk-hash verification, bootstrap, etc.) would be reachable with no "
+        "credential at all. Set MUTEMO_ADMIN_TOKEN before deploying."
+    )
+
+# Domains most likely to belong to Mutemo Desk/Tofamba rather than the firm
+# being onboarded -- checked (not enforced) by bootstrap_admin() below.
+# Configurable since "the vendor's domain" isn't something this codebase can
+# know on its own. Deliberately a soft flag, not a block: this is a
+# convention check, and the one real incident it guards against (see
+# bootstrap_admin()'s docstring) actually used a generic outlook.com
+# address, which a domain-only check can't catch -- this closes the
+# obviously-ours case, not every case.
+MUTEMO_VENDOR_DOMAINS = {
+    d.strip().lower()
+    for d in os.environ.get("MUTEMO_VENDOR_DOMAINS", "tofamba.com").split(",")
+    if d.strip()
+}
+
 # ── Legal feed service token ─────────────────────────────────────────────────
 # A separate, narrowly-scoped credential for mutemo-legal-feed's own
 # machine-to-machine pushes — checked ONLY on FEED_UPLOAD_PATHS below, never
@@ -2560,7 +2592,26 @@ async def list_users(request: Request):
 
 @app.patch("/api/users/{user_id}")
 async def update_user(user_id: str, body: dict, request: Request):
-    """Admin only: update a user's role, display_name, email, or phone."""
+    """
+    Admin only: update a user's role, display_name, email, phone, or
+    is_active.
+
+    2026-09-26 standing-access audit: is_active was already a writable
+    field here, but nothing in the UI ever set it (see the new Deactivate/
+    Reactivate buttons in loadUsers()), and setting it did NOT actually cut
+    off access -- get_current_user() and session_auth_middleware both key
+    off the sessions table alone, never joining/checking users.is_active.
+    A "deactivated" user with a still-live session kept working normally
+    until that session's own 45-min-idle/7-day expiry. Deactivating now
+    cascades everywhere a still-live credential could exist: the app
+    session itself, per-user reminder/digest delivery (which also never
+    checked is_active -- see _maybe_send_reminder/_maybe_send_digest), and
+    Cloudflare Access (both the live SSO session and the app's own allow
+    policy, so a deactivated user can't even reach the login prompt).
+    Reactivating is the mirror image for Cloudflare Access, so undoing a
+    deactivation doesn't leave someone "active" in our own users table but
+    still locked out at the SSO layer.
+    """
     user = await get_current_user(request)
     _check_permission(user, "admin:users")
     allowed_fields = {"role", "display_name", "is_active", "email", "phone"}
@@ -2569,6 +2620,9 @@ async def update_user(user_id: str, body: dict, request: Request):
         raise HTTPException(status_code=400, detail="No valid fields to update")
     if "role" in updates and updates["role"] not in ("partner", "associate", "secretary", "admin"):
         raise HTTPException(status_code=400, detail="Invalid role")
+    if updates.get("is_active") is False and user.get("id") and str(user["id"]) == user_id:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account.")
+
     set_clauses = ", ".join(f"{k}=${i+2}" for i, k in enumerate(updates.keys()))
     values = list(updates.values())
     async with _db_pool.acquire() as conn:
@@ -2578,6 +2632,22 @@ async def update_user(user_id: str, body: dict, request: Request):
         )
     if not row:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if "is_active" in updates:
+        target_email = row["email"]
+        if updates["is_active"] is False:
+            async with _db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM sessions WHERE user_id=$1", row["id"])
+                await conn.execute(
+                    "UPDATE user_reminder_settings SET enabled=FALSE, digest_enabled=FALSE WHERE user_id=$1",
+                    row["id"],
+                )
+            if target_email:
+                await _revoke_cloudflare_access_session(target_email)
+                await _remove_email_from_cloudflare_access(target_email)
+        elif updates["is_active"] is True and target_email:
+            await _add_email_to_cloudflare_access(target_email)
+
     return dict(row)
 
 # ── Invites ───────────────────────────────────────────────────────────────────
@@ -2641,6 +2711,65 @@ async def _add_email_to_cloudflare_access(email: str) -> Optional[str]:
     except Exception as e:
         print(f"[invite] Cloudflare Access update failed: {e}")
         return None
+
+async def _remove_email_from_cloudflare_access(email: str) -> bool:
+    """
+    Inverse of _add_email_to_cloudflare_access() above -- removes an email
+    from the Access allow policy's include list. Used by update_user() when
+    deactivating a user, so "deactivated" means they can't even reach the
+    Cloudflare Access login prompt for this app, not just that our own OTP
+    check would reject them afterwards. Same defensive shape as
+    _revoke_cloudflare_access_session(): never raises, logs and returns
+    False on any failure so a Cloudflare hiccup never blocks the
+    already-committed users.is_active update.
+    """
+    CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID = _get_cf_vars()
+    if not all([CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_APP_ID]):
+        print("[deactivate] Cloudflare vars not set — skipping CF Access removal")
+        return False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.get(
+                f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/access/apps/{CLOUDFLARE_ACCESS_APP_ID}/policies",
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+            )
+            resp.raise_for_status()
+            policies = resp.json().get("result", [])
+
+            allow_policy = next((p for p in policies if p.get("decision") == "allow"), None)
+            if not allow_policy:
+                print("[deactivate] No Allow policy found in Cloudflare Access app")
+                return False
+
+            policy_id = allow_policy["id"]
+            existing_include = allow_policy.get("include", [])
+            new_include = [
+                r for r in existing_include
+                if r.get("email", {}).get("email") != email
+            ]
+            if len(new_include) == len(existing_include):
+                print(f"[deactivate] {email} was not in Cloudflare Access policy — nothing to remove")
+                return True
+
+            update_resp = await http.put(
+                f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/access/apps/{CLOUDFLARE_ACCESS_APP_ID}/policies/{policy_id}",
+                headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"},
+                json={
+                    "name": allow_policy["name"],
+                    "decision": "allow",
+                    "include": new_include,
+                    "exclude": allow_policy.get("exclude", []),
+                    "require": allow_policy.get("require", []),
+                },
+            )
+            update_resp.raise_for_status()
+            print(f"[deactivate] Removed {email} from Cloudflare Access policy")
+            return True
+
+    except Exception as e:
+        print(f"[deactivate] Cloudflare Access removal failed (non-fatal): {e}")
+        return False
 
 async def _revoke_cloudflare_access_session(email: str) -> bool:
     """
@@ -2918,6 +3047,16 @@ async def bootstrap_admin(req: BootstrapAdminRequest, request: Request):
     any admin already exists for this firm, regardless of whether the
     token is valid — a provisioning credential for a one-time gap, not a
     standing backdoor.
+
+    2026-09-26 standing-access audit: the "exactly how Lenard had to
+    bootstrap his own account" line above is a real, confirmed incident,
+    not a hypothetical -- nothing here stops the caller from naming their
+    own (vendor) phone/email instead of the firm's nominated admin, and
+    that's what actually happened at least once. Since the whole point is
+    that the firm's admin should belong to the firm, not to Mutemo Desk,
+    this now flags (does not block -- see MUTEMO_VENDOR_DOMAINS above) a
+    bootstrap email whose domain matches a configured vendor domain, both
+    in the server log and in the response, so it can't recur silently.
     """
     if not ADMIN_TOKEN:
         raise HTTPException(status_code=503, detail="Bootstrap is not available - MUTEMO_ADMIN_TOKEN is not configured on this server.")
@@ -2939,6 +3078,16 @@ async def bootstrap_admin(req: BootstrapAdminRequest, request: Request):
     phone = req.phone.strip()
     if not phone:
         raise HTTPException(status_code=400, detail="Phone number is required — this is what gates account creation.")
+
+    email_domain = req.email.strip().lower().rsplit("@", 1)[-1] if "@" in req.email else ""
+    vendor_domain_flag = email_domain in MUTEMO_VENDOR_DOMAINS
+    if vendor_domain_flag:
+        print(
+            f"[bootstrap] WARNING: bootstrap email {req.email!r} matches a configured "
+            "vendor domain (MUTEMO_VENDOR_DOMAINS) -- confirm this is the firm's own "
+            "nominated administrator, not a Mutemo Desk/Tofamba account. Proceeding "
+            "(this is a flag, not a block)."
+        )
 
     # Reuses the exact same invites-table + normal phone/OTP login path as
     # every other user, rather than creating a parallel account-creation
@@ -2968,6 +3117,7 @@ async def bootstrap_admin(req: BootstrapAdminRequest, request: Request):
         "message": f"Admin invite created for {phone}. Log in normally via the phone/OTP login screen to complete setup.",
         "cloudflare_updated": cf_rule_id is not None,
         "email_sent": email_sent,
+        "vendor_domain_flag": vendor_domain_flag,
     }
 
 @app.get("/api/admin/export-legal-corpus")
