@@ -3498,7 +3498,7 @@ function renderClientsList(filtered = null) {
     const count = clientMatterCount(c.id);
     return `
     <div class="matter-item">
-      <div class="matter-row" onclick="openClientDetail('${c.id}')">
+      <div class="matter-row" onclick="openClientDetail('${c.id}', null)">
         <div class="matter-icon">👤</div>
         <div class="matter-expand">
           <div class="matter-name">
@@ -3546,7 +3546,20 @@ function _clientDetailField(label, value) {
 
 let _currentClientDetailId = null;
 
-async function openClientDetail(id) {
+// Where "← Back" from this client's detail view should go (2026-09-26
+// Client/Matter navigation fix). null (the default -- entering from the
+// Clients list itself) means "back to the Clients list", the pre-existing
+// behavior. {type:'matter', id} means this client was opened via a
+// matter's "View Client →" link, so back should return to that matter's
+// workspace instead of the list. Only a caller that's genuinely opening a
+// NEW client view passes `origin` explicitly (even as null, to clear a
+// stale one); every "refresh the currently-open view in place" call below
+// (after an edit/compliance save) omits it entirely so the existing
+// origin survives the refresh.
+let _clientDetailOrigin = null;
+
+async function openClientDetail(id, origin) {
+  if (origin !== undefined) _clientDetailOrigin = origin;
   document.getElementById('clients-list-view').style.display = 'none';
   const detailView = document.getElementById('client-detail-view');
   const content = document.getElementById('client-detail-content');
@@ -3585,7 +3598,7 @@ function _clientUpcomingDeadlinesHtml(client) {
   items.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
   return items.map(it => `
     <div class="matter-item">
-      <div class="matter-row" ${it.matterId ? `onclick="goToMatter('${it.matterId}')"` : ''}>
+      <div class="matter-row" ${it.matterId ? `onclick="goToMatterFromClient('${it.matterId}', '${client.id}')"` : ''}>
         <div class="matter-icon">⏰</div>
         <div class="matter-expand">
           <div class="matter-name">${escHtml(it.label || '')}</div>
@@ -3615,14 +3628,14 @@ function _clientRecentActivityHtml(client) {
     if (it.type === 'note') {
       const n = it.data;
       return `
-        <div class="note-item" style="cursor:pointer" onclick="goToMatter('${it.matterId}')">
+        <div class="note-item" style="cursor:pointer" onclick="goToMatterFromClient('${it.matterId}', '${client.id}')">
           <div class="note-text">${escHtml(n.text)}</div>
           <div class="note-footer"><span>🖊 ${escHtml(n.author || '')} · ${escHtml(it.matterName)} · ${(n.created_at||'').slice(0,10)}</span></div>
         </div>`;
     }
     const d = it.data;
     return `
-      <div class="doc-item" style="cursor:pointer" onclick="goToMatter('${it.matterId}')">
+      <div class="doc-item" style="cursor:pointer" onclick="goToMatterFromClient('${it.matterId}', '${client.id}')">
         <div class="doc-icon">📄</div>
         <div style="flex:1;min-width:0">
           <div class="doc-name" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(d.filename)}</div>
@@ -3713,7 +3726,7 @@ function renderClientDetailContent(client) {
         const ref = m.internal_ref || m.number || '';
         return `
         <div class="matter-item">
-          <div class="matter-row" onclick="goToMatter('${m.id}')">
+          <div class="matter-row" onclick="goToMatterFromClient('${m.id}', '${client.id}')">
             <div class="matter-icon">📁</div>
             <div class="matter-expand">
               <div class="matter-name">
@@ -3786,9 +3799,18 @@ async function onLinkMatterSelectChange(clientId) {
 }
 
 function backToClientsList() {
+  // If this client was opened via a matter's "View Client →" link, return
+  // to that matter's workspace instead of the plain list -- see
+  // _clientDetailOrigin's own comment above openClientDetail().
+  const origin = _clientDetailOrigin;
+  _clientDetailOrigin = null;
+  _currentClientDetailId = null;
+  if (origin && origin.type === 'matter') {
+    openMatterWorkspace(origin.id);
+    return;
+  }
   document.getElementById('client-detail-view').style.display = 'none';
   document.getElementById('clients-list-view').style.display = 'block';
-  _currentClientDetailId = null;
 }
 
 // Jumps to a matter's dedicated workspace from anywhere in the app
@@ -3798,7 +3820,17 @@ function backToClientsList() {
 // inline; now just opens the workspace directly (2026-09-24 conversion,
 // see openMatterWorkspace()).
 function goToMatter(matterId) {
-  openMatterWorkspace(matterId);
+  openMatterWorkspace(matterId, null);
+}
+
+// Same as goToMatter(), but remembers which client this matter was opened
+// from (2026-09-26 Client/Matter navigation fix) so the workspace's
+// "← Back to Matters" button returns to that client instead of the plain
+// Matters list. Used by Client Detail's own Matters list/Upcoming
+// Deadlines/Recent Activity -- everywhere else keeps using plain
+// goToMatter(), unaffected.
+function goToMatterFromClient(matterId, clientId) {
+  openMatterWorkspace(matterId, { type: 'client', id: clientId });
 }
 
 // null when creating a new client, the client's id when editing an existing one.
@@ -5399,9 +5431,20 @@ function filterMatters(query) {
 // tab's own fixed body.
 let _workspaceMatterId = null;
 
-function openMatterWorkspace(id) {
+// Where "← Back to Matters" should go (2026-09-26 Client/Matter navigation
+// fix) -- mirrors _clientDetailOrigin's own comment. null (the default) is
+// the pre-existing behavior, back to the Matters list. {type:'client', id}
+// means this matter was opened from that client's own Matters list/
+// Upcoming Deadlines/Recent Activity, so back should return there instead.
+// Only a caller opening a genuinely NEW matter passes `origin` explicitly
+// (even as null); backToClientsList() below omits it when reopening a
+// workspace so the original origin survives the round trip.
+let _matterWorkspaceOrigin = null;
+
+function openMatterWorkspace(id, origin) {
   const matter = matters.find(m => m.id === id);
   if (!matter) return;
+  if (origin !== undefined) _matterWorkspaceOrigin = origin;
   _workspaceMatterId = id;
 
   const ref = matter.internal_ref || matter.number || '';
@@ -5425,7 +5468,17 @@ function openMatterWorkspace(id) {
 }
 
 function closeMatterWorkspace() {
+  // If this matter was opened from a client's own Matters list/Upcoming
+  // Deadlines/Recent Activity, return there instead of the plain Matters
+  // list -- see _matterWorkspaceOrigin's own comment above.
+  const origin = _matterWorkspaceOrigin;
+  _matterWorkspaceOrigin = null;
   _workspaceMatterId = null;
+  if (origin && origin.type === 'client') {
+    showTab('clients');
+    openClientDetail(origin.id);
+    return;
+  }
   showTab('matters');
 }
 
@@ -5558,7 +5611,7 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers) {
       <span style="font-size:0.72rem;color:var(--ink3);font-weight:600">CLIENT</span>
       <span style="font-size:0.85rem">${escHtml(linkedClient.full_name)}</span>
       ${complianceStatusChipHtml(linkedClient.compliance_status)}
-      <a href="#" onclick="event.preventDefault();goToClientFromMatter('${linkedClient.id}')" style="font-size:0.78rem;color:var(--blue);text-decoration:none">View Client →</a>
+      <a href="#" onclick="event.preventDefault();goToClientFromMatter('${linkedClient.id}', '${id}')" style="font-size:0.78rem;color:var(--blue);text-decoration:none">View Client →</a>
     </div>` : (matter.client_name ? `
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border)">
       <span style="font-size:0.72rem;color:var(--ink3);font-weight:600">CLIENT</span>
@@ -5603,10 +5656,16 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers) {
 // the reverse direction of goToMatter() (client -> matter). Needs a real
 // fetch (openClientDetail), not just a tab switch, since the Clients tab's
 // detail view isn't populated until explicitly opened.
-function goToClientFromMatter(clientId) {
+//
+// matterId is optional (2026-09-26 Client/Matter navigation fix): when
+// called from a matter's own "View Client →" link, it's passed so the
+// client's "← Back" returns to that matter instead of the Clients list.
+// Callers with no real matter context (e.g. Home's compliance-action rows,
+// which link a client directly) simply omit it, clearing any stale origin.
+function goToClientFromMatter(clientId, matterId) {
   if (!clientId) return;
   showTab('clients');
-  openClientDetail(clientId);
+  openClientDetail(clientId, matterId ? { type: 'matter', id: matterId } : null);
 }
 
 async function renderMatterPanel(id) {
