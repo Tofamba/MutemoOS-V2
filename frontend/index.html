@@ -9153,10 +9153,45 @@ async function loadUsers() {
             <option value="secretary" ${u.role==='secretary'?'selected':''}>Secretary</option>
             <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
           </select>
+          ${u.is_active
+            ? (String(u.id) === String(window._userId) ? '' : `<button class="btn btn-outline" style="font-size:0.7rem;padding:4px 8px;color:var(--red)" title="Revoke this person's access" onclick="deactivateUser('${u.id}', '${(u.display_name||'').replace(/'/g,"\\'")}')">Deactivate</button>`)
+            : `<button class="btn btn-outline" style="font-size:0.7rem;padding:4px 8px" title="Restore this person's access" onclick="reactivateUser('${u.id}', '${(u.display_name||'').replace(/'/g,"\\'")}')">Reactivate</button>`
+          }
         </div>
       </div>
     `).join('');
   } catch(e) { el.innerHTML = '<em>Error loading users.</em>'; }
+}
+
+async function deactivateUser(userId, displayName) {
+  if (!confirm(`Deactivate ${displayName}? They will be signed out immediately and can no longer log in until reactivated.`)) return;
+  try {
+    const res = await fetch(`${API}/api/users/${userId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ is_active: false })
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || 'Failed');
+    }
+    showInviteStatus(`✓ ${displayName} deactivated.`, 'success');
+    loadUsers();
+  } catch(e) { showInviteStatus(e.message === 'Failed' ? 'Could not deactivate user.' : e.message, 'error'); }
+}
+
+async function reactivateUser(userId, displayName) {
+  if (!confirm(`Reactivate ${displayName}? They will be able to log in again.`)) return;
+  try {
+    const res = await fetch(`${API}/api/users/${userId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ is_active: true })
+    });
+    if (!res.ok) throw new Error('Failed');
+    showInviteStatus(`✓ ${displayName} reactivated.`, 'success');
+    loadUsers();
+  } catch(e) { showInviteStatus('Could not reactivate user.', 'error'); }
 }
 
 async function editUserContact(userId, currentEmail, currentPhone) {
