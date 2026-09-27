@@ -42,6 +42,10 @@ from backend.case_binder import provision_case_binder
 from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text, INTAKE_MATTER_TYPE_TO_PRACTICE_AREA
 from backend.matter_health import compute_matter_health
 from backend.conveyancing import CONVEYANCING_MILESTONES
+from backend.title_deeds_checklist import (
+    CLIENT_TYPE_TO_CHECKLIST_CATEGORY, SPA_CATEGORIES, category_display_label,
+    checklist_items_for_category, compute_checklist_completion, known_categories,
+)
 from backend.matter_stages import resolve_stage_sequence, stage_storage_field
 from backend.deadline_engine import try_compute_deadline
 from backend.legal_taxonomy import classify_firm_document, classify_legal_update, classify_zlr_entry, authority_strength_for, AuthorityStrength, classify_legal_update_for_backfill, classify_zlr_entry_for_backfill
@@ -826,6 +830,47 @@ async def run_migrations():
         );
         CREATE INDEX IF NOT EXISTS idx_compliance_exceptions_firm_status
             ON compliance_exceptions(firm_id, status);
+
+        -- Title/Deeds Digitization Validation checklist (2026-09-27) --
+        -- modeled directly on beneficial_owners/authorized_representatives
+        -- above, not a new tracking mechanism: a status enum, a
+        -- responsible person, and document_id as the evidence link
+        -- (straight FK into documents, same pattern as
+        -- authorized_representatives.authority_document_id). The catalog
+        -- of item_key/item_label pairs per category lives in
+        -- config/title_deeds_checklist.yml (backend/title_deeds_checklist.py),
+        -- same config-driven convention as case_binder_templates.yml --
+        -- this table only ever holds a snapshot of that config at the
+        -- moment a matter's checklist was seeded, not a live join back to
+        -- it, so a later wording edit in the YAML never silently rewrites
+        -- what an already-collected item's label said at the time.
+        --
+        -- category distinguishes the three main checklists (individual/
+        -- company/trust, chosen by the client's client_type) from the two
+        -- SPA/representative sub-checklist variants (spa_principal/
+        -- spa_representative) -- the latter additive to whichever main
+        -- checklist already applies, not a replacement for it. UNIQUE
+        -- (matter_id, category, item_key) is what makes re-seeding an
+        -- already-seeded category a safe no-op rather than a duplicate
+        -- row -- see the seed endpoint's own ON CONFLICT DO NOTHING.
+        CREATE TABLE IF NOT EXISTS matter_checklist_items (
+            id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            matter_id               UUID NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+            firm_id                 UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            category                TEXT NOT NULL
+                CHECK (category IN ('individual', 'company', 'trust', 'spa_principal', 'spa_representative')),
+            item_key                TEXT NOT NULL,
+            item_label              TEXT NOT NULL,
+            status                  TEXT NOT NULL DEFAULT 'Outstanding'
+                CHECK (status IN ('Collected', 'Outstanding')),
+            responsible_user_id     UUID REFERENCES users(id),
+            document_id             UUID REFERENCES documents(id),
+            collected_date          DATE,
+            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (matter_id, category, item_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_matter_checklist_items_matter ON matter_checklist_items(matter_id);
 
         CREATE TABLE IF NOT EXISTS legal_updates (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4112,6 +4157,16 @@ class AuthorizedRepresentativeUpdate(BaseModel):
     verification_status: Optional[str] = None
     verified_date: Optional[str] = None
 
+# ── Title/Deeds Digitization Validation checklist ───────────────────────────
+class ChecklistSeedBody(BaseModel):
+    category: str  # validated against title_deeds_checklist.known_categories()
+
+class ChecklistItemUpdate(BaseModel):
+    status: Optional[str] = None
+    responsible_user_id: Optional[str] = None
+    document_id: Optional[str] = None
+    collected_date: Optional[str] = None
+
 # ── AML/KYC: compliance / PEP (s20) ──────────────────────────────────────────
 
 class ClientComplianceUpdate(BaseModel):
@@ -4778,6 +4833,18 @@ def _row_to_authorized_representative(row) -> dict:
         d["created_at"] = d["created_at"].isoformat()
     if d.get("verified_date"):
         d["verified_date"] = str(d["verified_date"])
+    return d
+
+def _row_to_checklist_item(row) -> dict:
+    d = dict(row)
+    for k in ("id", "matter_id", "firm_id", "responsible_user_id", "document_id"):
+        if d.get(k):
+            d[k] = str(d[k])
+    for k in ("created_at", "updated_at"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    if d.get("collected_date"):
+        d["collected_date"] = str(d["collected_date"])
     return d
 
 def _row_to_client_compliance(row) -> dict:
@@ -5917,6 +5984,30 @@ async def list_matters(request: Request):
         # array the panel reads a given matter from.
         m["matter_health"] = compute_matter_health(m)
         matters.append(m)
+
+    # Title/Deeds checklist completion (2026-09-27) -- batched, not one
+    # query per matter, same "resolved once per call" stance as
+    # names_by_user_id above. Only matters actually flagged for this
+    # workflow are ever queried; every other matter simply never gets a
+    # title_deeds_checklist key at all, so the frontend's own gate on
+    # matter.matter_type === 'title_deeds_validation' before rendering
+    # anything checklist-related stays the single source of truth for
+    # "does this matter even have one" -- this isn't a second one.
+    title_deeds_ids = [_uuid_mod.UUID(m["id"]) for m in matters if m.get("matter_type") == "title_deeds_validation"]
+    if title_deeds_ids:
+        async with _db_pool.acquire() as conn:
+            checklist_rows = await conn.fetch(
+                "SELECT matter_id, status FROM matter_checklist_items WHERE matter_id = ANY($1) AND firm_id=$2",
+                title_deeds_ids, FIRM_ID
+            )
+        items_by_matter: dict = {}
+        for r in checklist_rows:
+            items_by_matter.setdefault(str(r["matter_id"]), []).append({"status": r["status"]})
+        for m in matters:
+            if m.get("matter_type") == "title_deeds_validation":
+                m["title_deeds_checklist"] = {
+                    "completion": compute_checklist_completion(items_by_matter.get(m["id"], []))
+                }
     return matters
 
 def _name_tokens(s: str) -> set:
@@ -6011,7 +6102,8 @@ async def create_matter(matter: MatterCreate, request: Request):
             except ValueError:
                 raise HTTPException(status_code=400, detail="client_id must be a valid UUID")
             client_row = await conn.fetchrow(
-                "SELECT full_name, client_number FROM clients WHERE id=$1 AND firm_id=$2", client_id, FIRM_ID
+                "SELECT full_name, client_number, client_type FROM clients WHERE id=$1 AND firm_id=$2",
+                client_id, FIRM_ID
             )
             if not client_row:
                 raise HTTPException(status_code=404, detail="Client not found")
@@ -6038,7 +6130,28 @@ async def create_matter(matter: MatterCreate, request: Request):
             created_by=_uuid_mod.UUID(str(user["id"])) if user.get("id") else None,
             created_at=now, last_activity=now,
         )
-    m = _row_to_matter(row)
+        m = _row_to_matter(row)
+        # Title/Deeds Digitization Validation (2026-09-27): auto-seed the
+        # main checklist right away when the client's client_type maps
+        # cleanly (Individual/Company/Trust) -- the whole point of the
+        # workflow flag is that a lawyer shouldn't have to remember a
+        # second manual step. A client_type outside that map (Partnership/
+        # Estate/NonProfit/Government/Other), or no client_id at all yet,
+        # is left unseeded on purpose -- see CLIENT_TYPE_TO_CHECKLIST_
+        # CATEGORY's own comment for why guessing a category for those
+        # would be inventing data, not deriving it. checklist stays None
+        # (not an empty summary) so the frontend can tell "not this
+        # workflow"/"not yet seeded" apart from "seeded with zero items",
+        # which can't actually happen (every real category has items).
+        m["title_deeds_checklist"] = None
+        if matter.matter_type == "title_deeds_validation" and client_id is not None:
+            category = CLIENT_TYPE_TO_CHECKLIST_CATEGORY.get(client_row["client_type"])
+            if category:
+                _, seeded_items = await _seed_checklist_category(conn, row["id"], category)
+                m["title_deeds_checklist"] = {
+                    "category": category, "category_label": category_display_label(category),
+                    "completion": compute_checklist_completion(seeded_items),
+                }
     m["progress_notes"] = []
     return m
 
@@ -11631,6 +11744,177 @@ async def sms_usage_by_firm_report(request: Request):
     async with _db_pool.acquire() as conn:
         rows = await _fetch_sms_usage_by_firm(conn)
     return rows
+
+# ── Title/Deeds Digitization Validation checklist ───────────────────────────
+# See matter_checklist_items' own migration comment (run_migrations()) and
+# backend/title_deeds_checklist.py's module docstring for the pattern this
+# reuses: config-driven item catalog (case_binder.py's own convention) +
+# beneficial_owners/authorized_representatives' status/responsible-person/
+# document-evidence shape. Gated at matter:read/matter:edit like every
+# other matter sub-resource -- not a new permission tier.
+
+async def _seed_checklist_category(conn, matter_id: "_uuid_mod.UUID", category: str) -> tuple:
+    """
+    Shared by POST .../checklist/seed and create_matter()'s own
+    auto-seed-on-creation call -- one place doing the idempotent
+    insert (UNIQUE(matter_id, category, item_key) + ON CONFLICT DO
+    NOTHING) so the two call sites can never drift into different
+    seeding behavior. Returns (seeded: bool, items: list[dict]) --
+    `seeded` is False when the category already had rows (a safe
+    no-op, not an error).
+    """
+    items = checklist_items_for_category(category)
+    existing_count = await conn.fetchval(
+        "SELECT COUNT(*) FROM matter_checklist_items WHERE matter_id=$1 AND category=$2",
+        matter_id, category
+    )
+    if not existing_count:
+        for item in items:
+            await conn.execute("""
+                INSERT INTO matter_checklist_items (matter_id, firm_id, category, item_key, item_label)
+                VALUES ($1,$2,$3,$4,$5)
+                ON CONFLICT (matter_id, category, item_key) DO NOTHING
+            """, matter_id, FIRM_ID, category, item["item_key"], item["item_label"])
+    rows = await conn.fetch(
+        "SELECT * FROM matter_checklist_items WHERE matter_id=$1 AND category=$2 ORDER BY item_key",
+        matter_id, category
+    )
+    return not existing_count, [_row_to_checklist_item(r) for r in rows]
+
+@app.get("/api/matters/{matter_id}/checklist")
+async def get_matter_checklist(matter_id: str, request: Request):
+    """
+    Every checklist item seeded on this matter so far, across every
+    category it has (the main individual/company/trust checklist, plus
+    either SPA/representative sub-checklist if one was added) -- grouped
+    by category, each with its own completion count, plus one overall
+    count across all of them. "6 of 10 collected", computed the same
+    place Matter Health/AML scope already are (compute_checklist_completion,
+    same small-pure-function-over-a-list-of-dicts shape as
+    compute_matter_health()), meant to be surfaced at a glance on the
+    matter, not buried behind a click into this endpoint.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    try:
+        mid = _uuid_mod.UUID(matter_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="matter_id must be a valid UUID")
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM matter_checklist_items WHERE matter_id=$1 AND firm_id=$2 ORDER BY category, item_key",
+            mid, FIRM_ID
+        )
+    items = [_row_to_checklist_item(r) for r in rows]
+    by_category: dict = {}
+    for item in items:
+        by_category.setdefault(item["category"], []).append(item)
+    categories = [
+        {"category": cat, "category_label": category_display_label(cat),
+         "items": cat_items, "completion": compute_checklist_completion(cat_items)}
+        for cat, cat_items in by_category.items()
+    ]
+    return {"categories": categories, "overall_completion": compute_checklist_completion(items)}
+
+@app.post("/api/matters/{matter_id}/checklist/seed", status_code=201)
+async def seed_matter_checklist(matter_id: str, body: ChecklistSeedBody, request: Request):
+    """
+    Seeds this matter's checklist for one category from
+    config/title_deeds_checklist.yml. The three main checklists
+    (individual/company/trust) are normally auto-seeded by create_matter()
+    the moment a title_deeds_validation matter's client_type maps cleanly
+    (see that function's own comment) -- this is what it calls, and also
+    what a lawyer calls by hand when the client_type didn't map, or to
+    add either SPA/representative sub-checklist variant, which nothing on
+    a matter can determine on its own ("only applicable when the
+    registered owner acts through a Special Power of Attorney or an
+    appointed representative" -- a real-world fact, not derivable data).
+
+    Idempotent: re-seeding a category that already has rows is a safe
+    no-op (UNIQUE(matter_id, category, item_key) below + ON CONFLICT DO
+    NOTHING), same "safe to call again" stance as this app's own
+    migrations -- a lawyer re-clicking "Add checklist" is normal, not a
+    mistake to reject with an error.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "matter:edit")
+    if body.category not in known_categories():
+        raise HTTPException(status_code=422, detail=f"category must be one of: {', '.join(known_categories())}")
+    try:
+        mid = _uuid_mod.UUID(matter_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="matter_id must be a valid UUID")
+
+    async with _db_pool.acquire() as conn:
+        matter_row = await conn.fetchrow("SELECT id FROM matters WHERE id=$1 AND firm_id=$2", mid, FIRM_ID)
+        if not matter_row:
+            raise HTTPException(status_code=404, detail="Matter not found")
+        seeded, items = await _seed_checklist_category(conn, mid, body.category)
+    return {
+        "seeded": seeded,
+        "category": body.category,
+        "category_label": category_display_label(body.category),
+        "items": items,
+    }
+
+@app.patch("/api/matters/{matter_id}/checklist/{item_id}")
+async def update_checklist_item(matter_id: str, item_id: str, update: ChecklistItemUpdate, request: Request):
+    """
+    Marks one checklist item Collected/Outstanding, (re)assigns who's
+    responsible, and/or links it to the actual Vault document once
+    uploaded -- the exact dynamic-field-set PATCH shape
+    update_authorized_representative() above already uses (validate
+    enums/UUIDs/dates, build SET from whichever fields were actually
+    sent, scope the WHERE by both matter_id and firm_id).
+
+    Marking an item Collected with no collected_date supplied defaults it
+    to today -- the normal case (a lawyer ticks it off when it physically
+    arrives); collected_date stays explicitly settable for backdating a
+    document that was actually received earlier.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "matter:edit")
+    try:
+        mid = _uuid_mod.UUID(matter_id)
+        iid = _uuid_mod.UUID(item_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="matter_id/item_id must be valid UUIDs")
+
+    fields = {k: v for k, v in update.dict().items() if v is not None}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    if "status" in fields and fields["status"] not in ("Collected", "Outstanding"):
+        raise HTTPException(status_code=422, detail="status must be one of: Collected, Outstanding")
+    if "responsible_user_id" in fields:
+        try:
+            fields["responsible_user_id"] = _uuid_mod.UUID(fields["responsible_user_id"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="responsible_user_id must be a valid UUID")
+    if "document_id" in fields:
+        try:
+            fields["document_id"] = _uuid_mod.UUID(fields["document_id"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+    if "collected_date" in fields:
+        try:
+            fields["collected_date"] = date.fromisoformat(fields["collected_date"])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="collected_date must be in YYYY-MM-DD format")
+    if fields.get("status") == "Collected" and "collected_date" not in fields:
+        fields["collected_date"] = date.today()
+
+    fields["updated_at"] = datetime.utcnow()
+    set_clauses = ", ".join(f"{k}=${i+4}" for i, k in enumerate(fields.keys()))
+    values = list(fields.values())
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE matter_checklist_items SET {set_clauses} "
+            f"WHERE id=$1 AND matter_id=$2 AND firm_id=$3 RETURNING *",
+            iid, mid, FIRM_ID, *values
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Checklist item not found")
+    return _row_to_checklist_item(row)
 
 # ── Documents ─────────────────────────────────────────────────────────────────
 

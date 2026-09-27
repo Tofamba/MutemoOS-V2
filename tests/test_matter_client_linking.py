@@ -58,12 +58,15 @@ class FakeConnection:
                     return {"allocated": allocated}
             return None
 
-        if q.startswith("SELECT full_name, client_number FROM clients WHERE id=$1 AND firm_id=$2"):
+        if q.startswith("SELECT full_name, client_number, client_type FROM clients WHERE id=$1 AND firm_id=$2"):
             # create_matter's lookup — includes client_number so it can
-            # number the new matter under that client.
+            # number the new matter under that client, and client_type
+            # (2026-09-27) so a title_deeds_validation matter can
+            # auto-seed its checklist category.
             for c in self.clients:
                 if c["id"] == args[0] and c["firm_id"] == args[1]:
-                    return {"full_name": c["full_name"], "client_number": c.get("client_number")}
+                    return {"full_name": c["full_name"], "client_number": c.get("client_number"),
+                            "client_type": c.get("client_type")}
             return None
 
         if q.startswith("SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2"):

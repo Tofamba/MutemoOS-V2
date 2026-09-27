@@ -2296,6 +2296,7 @@ select{cursor:pointer}
           <option value="estate">Estate / Probate</option>
           <option value="insurance">Insurance Claim</option>
           <option value="constitutional">Constitutional</option>
+          <option value="title_deeds_validation">Title/Deeds Digitization Validation</option>
           <option value="other">Other</option>
         </select>
       </div>
@@ -5493,6 +5494,18 @@ function closeMatterWorkspace() {
 // documents -- lets _matterNoteToggleExpand() re-render just the notes
 // list on a Read-more click without a full network re-fetch.
 let _matterActivityDocsCache = {};
+// Title/Deeds Digitization Validation checklist (2026-09-27) -- same
+// per-matter-id cache convention as _matterActivityDocsCache above, so a
+// seed/PATCH can re-render just the checklist section without a full
+// renderMatterPanel() re-fetch. _matterDocsCache/_matterAvailableUsersCache
+// duplicate what's already in _matterActivityDocsCache/renderMatterPanel's
+// own local availableUsers -- kept as their own cache rather than reusing
+// those directly, since the checklist section's evidence/responsible-
+// person pickers are the only place that needs random access to them by
+// matter id outside renderMatterPanel's own call stack.
+let _matterChecklistCache = {};
+let _matterDocsCache = {};
+let _matterAvailableUsersCache = {};
 
 function _matterActivityHtml(id, notes, docs) {
   const items = [];
@@ -5689,10 +5702,16 @@ async function renderMatterPanel(id) {
     // latter two degrade to null/[] rather than failing the whole panel —
     // no linked client, or a 403 on /api/users for a non-admin role, are
     // both normal, expected states, not errors.
-    const [docsRes, clientRes, usersRes] = await Promise.all([
+    // Title/Deeds checklist (2026-09-27) is its own fetch, only issued for
+    // matters actually flagged for that workflow -- every other matter
+    // never makes this call at all, matching list_matters()' own "only
+    // matters actually flagged" batching stance server-side.
+    const isTitleDeeds = matter.matter_type === 'title_deeds_validation';
+    const [docsRes, clientRes, usersRes, checklistRes] = await Promise.all([
       fetch(`${API}/api/matters/${id}/documents`),
       matter.client_id ? fetch(`${API}/api/clients/${matter.client_id}`) : Promise.resolve(null),
       fetch(`${API}/api/users`),
+      isTitleDeeds ? fetch(`${API}/api/matters/${id}/checklist`) : Promise.resolve(null),
     ]);
     const docs = await docsRes.json();
     // Cached so _matterNoteToggleExpand() can re-render just the notes
@@ -5701,6 +5720,12 @@ async function renderMatterPanel(id) {
     _matterActivityDocsCache[id] = docs;
     const linkedClient = (clientRes && clientRes.ok) ? await clientRes.json() : null;
     const availableUsers = usersRes.ok ? await usersRes.json() : [];
+    // Cached the same way, so _seedTitleDeedsChecklist()/_updateChecklistItem()
+    // can re-render just the checklist section after a seed/PATCH without
+    // a full renderMatterPanel() re-fetch.
+    _matterAvailableUsersCache[id] = availableUsers;
+    _matterDocsCache[id] = docs;
+    _matterChecklistCache[id] = (checklistRes && checklistRes.ok) ? await checklistRes.json() : null;
     const status = matter.status || 'Active';
     const notes = matter.progress_notes || [];
     const html = `
@@ -5738,6 +5763,11 @@ async function renderMatterPanel(id) {
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">HEALTH</label>
             ${matterHealthChipHtml(matter)}
           </div>
+          ${matter.title_deeds_checklist ? `
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:70px">CHECKLIST</label>
+            ${_tdcCompletionChipHtml(matter.title_deeds_checklist.completion)}
+          </div>` : ''}
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">CLIENT</label>
             <input type="text" id="matter-client-search-${id}" placeholder="🔍 Search clients…"
@@ -5917,6 +5947,8 @@ async function renderMatterPanel(id) {
       </div>
       ` : ''}
 
+      ${isTitleDeeds ? `<div id="checklist-content-${id}">${_matterChecklistHtml(id)}</div>` : ''}
+
       <!-- Activity — merged notes + documents, most recent first (UX audit
            fix #2: same merge/sort pattern as Client Detail's own
            _clientRecentActivityHtml(), reusing the matter panel's OWN
@@ -5986,6 +6018,166 @@ async function renderMatterPanel(id) {
   } catch(e) {
     content.innerHTML = '<p style="color:var(--ink3)">Could not load matter details.</p>';
   }
+}
+
+// ── Title/Deeds Digitization Validation checklist ───────────────────────────
+// Gated entirely on matter.matter_type === 'title_deeds_validation' (the
+// New Matter form's own Matter Type option) -- renderMatterPanel() only
+// ever fetches/caches checklist data for a matter actually flagged this
+// way, so this section is either genuinely absent from the DOM or has
+// real data, never a half-loaded state for an unrelated matter.
+
+const TDC_CATEGORY_LABELS = {
+  individual: 'Individual', company: 'Company', trust: 'Trust',
+  spa_principal: 'SPA / Representative — Principal-Led (notarized SPA)',
+  spa_representative: 'SPA / Representative — Representative-Led (sworn affidavit)',
+};
+
+function _tdcCompletionChipHtml(completion) {
+  if (!completion || !completion.total) return `<span class="chip chip-gray">Not started</span>`;
+  const color = completion.status === 'complete' ? 'chip-green' : completion.status === 'in_progress' ? 'chip-gold' : 'chip-gray';
+  return `<span class="chip ${color}">${completion.collected} of ${completion.total} collected</span>`;
+}
+
+function _matterChecklistHtml(id) {
+  const data = _matterChecklistCache[id];
+  if (!data) {
+    return `<div class="matter-section" style="background:var(--white)">
+      <div class="matter-section-title">🗂 Title/Deeds Checklist</div>
+      <p style="color:var(--ink3);font-size:0.8rem">Loading…</p>
+    </div>`;
+  }
+
+  const docs = _matterDocsCache[id] || [];
+  const users = _matterAvailableUsersCache[id] || [];
+  const mainCategories = ['individual', 'company', 'trust'];
+  const spaCategories = ['spa_principal', 'spa_representative'];
+  const hasMain = data.categories.some(c => mainCategories.includes(c.category));
+  const hasSpa = data.categories.some(c => spaCategories.includes(c.category));
+
+  const pickerHtml = !hasMain ? `
+    <p style="font-size:0.8rem;color:var(--ink3);margin-bottom:6px">No checklist seeded yet — pick the applicable one:</p>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:${hasSpa ? '0' : '10px'}">
+      ${mainCategories.map(cat =>
+        `<button class="btn btn-sm btn-outline" onclick="_seedTitleDeedsChecklist('${id}','${cat}')">+ ${TDC_CATEGORY_LABELS[cat]}</button>`
+      ).join('')}
+    </div>` : '';
+
+  const spaPickerHtml = !hasSpa ? `
+    <div style="${hasMain ? '' : 'margin-top:10px;padding-top:10px;border-top:1px solid var(--border)'}">
+      <p style="font-size:0.78rem;color:var(--ink3);margin-bottom:6px">Only if the registered owner is acting through a Special Power of Attorney or an appointed representative — otherwise leave this out:</p>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-sm btn-outline" onclick="_seedTitleDeedsChecklist('${id}','spa_principal')">+ Principal-led (notarized SPA)</button>
+        <button class="btn btn-sm btn-outline" onclick="_seedTitleDeedsChecklist('${id}','spa_representative')">+ Representative-led (sworn affidavit)</button>
+      </div>
+    </div>` : '';
+
+  const categoriesHtml = data.categories.map(cat => `
+    <div style="margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+        <strong style="font-size:0.82rem">${escHtml(TDC_CATEGORY_LABELS[cat.category] || cat.category)}</strong>
+        ${_tdcCompletionChipHtml(cat.completion)}
+      </div>
+      <div style="overflow:auto;border:1px solid var(--border);border-radius:8px">
+        <table style="width:100%;border-collapse:collapse;font-size:0.78rem">
+          <thead>
+            <tr style="text-align:left;background:var(--paper2)">
+              <th style="padding:5px 8px">Item</th>
+              <th style="padding:5px 8px">Status</th>
+              <th style="padding:5px 8px">Responsible</th>
+              <th style="padding:5px 8px">Evidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${cat.items.map(item => `
+              <tr style="border-top:1px solid var(--border)">
+                <td style="padding:5px 8px">${escHtml(item.item_label)}</td>
+                <td style="padding:5px 8px;white-space:nowrap">
+                  <button class="chip ${item.status === 'Collected' ? 'chip-green' : 'chip-gray'}" style="cursor:pointer;border:none"
+                    onclick="_toggleChecklistItemStatus('${id}','${item.id}','${item.status}')"
+                    title="Click to mark ${item.status === 'Collected' ? 'Outstanding' : 'Collected'}">
+                    ${item.status === 'Collected' ? '✓ Collected' : '○ Outstanding'}
+                  </button>
+                  ${item.collected_date ? `<span style="color:var(--ink3);font-size:0.7rem"> (${item.collected_date})</span>` : ''}
+                </td>
+                <td style="padding:5px 8px">
+                  <select style="font-size:0.75rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--paper)"
+                    onchange="_updateChecklistItemField('${id}','${item.id}','responsible_user_id',this.value)">
+                    <option value="">—</option>
+                    ${users.map(u => `<option value="${u.id}" ${item.responsible_user_id===u.id?'selected':''}>${escHtml(u.display_name || u.phone || 'Unnamed')}</option>`).join('')}
+                  </select>
+                </td>
+                <td style="padding:5px 8px">
+                  <select style="font-size:0.75rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--paper)"
+                    onchange="_updateChecklistItemField('${id}','${item.id}','document_id',this.value)">
+                    <option value="">— none —</option>
+                    ${docs.map(d => `<option value="${d.id}" ${item.document_id===d.id?'selected':''}>${escHtml(d.filename)}</option>`).join('')}
+                  </select>
+                  ${item.document_id ? `<button class="btn btn-sm btn-outline" style="margin-left:4px;padding:1px 5px" onclick="viewDocument('${item.document_id}','')" title="View linked document">👁</button>` : ''}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `).join('');
+
+  return `
+    <div class="matter-section" style="background:var(--white)">
+      <div class="matter-section-title">🗂 Title/Deeds Checklist
+        <span style="margin-left:auto">${_tdcCompletionChipHtml(data.overall_completion)}</span>
+      </div>
+      <p style="font-size:0.72rem;color:var(--ink3);margin:-4px 0 8px">The firm's own document-collection checklist for this Title/Deeds Digitization Validation matter — client-readiness tracking only, no connection to the government portal.</p>
+      ${categoriesHtml}
+      ${pickerHtml}
+      ${spaPickerHtml}
+    </div>`;
+}
+
+function _rerenderChecklistSection(id) {
+  const container = document.getElementById(`checklist-content-${id}`);
+  if (container) container.innerHTML = _matterChecklistHtml(id);
+}
+
+async function _refetchAndRerenderChecklist(id) {
+  try {
+    const res = await fetch(`${API}/api/matters/${id}/checklist`);
+    _matterChecklistCache[id] = res.ok ? await res.json() : null;
+  } catch(e) { /* leave the cache as-is on a transient failure */ }
+  _rerenderChecklistSection(id);
+}
+
+async function _seedTitleDeedsChecklist(matterId, category) {
+  try {
+    const res = await fetch(`${API}/api/matters/${matterId}/checklist/seed`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({category}),
+    });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || 'Failed to add checklist'); }
+  } catch(e) { alert(`Error: ${e.message}`); }
+  await _refetchAndRerenderChecklist(matterId);
+}
+
+async function _toggleChecklistItemStatus(matterId, itemId, currentStatus) {
+  await _updateChecklistItemField(matterId, itemId, 'status', currentStatus === 'Collected' ? 'Outstanding' : 'Collected');
+}
+
+// field is one of status/responsible_user_id/document_id -- whichever
+// control fired. An empty-string value means the placeholder option
+// ("—"/"— none —") was re-selected -- nothing to clear to yet on this
+// backend (PATCH only ever sets a field, never unsets one), so this is a
+// no-op rather than sending a value the API would reject.
+async function _updateChecklistItemField(matterId, itemId, field, value) {
+  if (value === '') return;
+  try {
+    const res = await fetch(`${API}/api/matters/${matterId}/checklist/${itemId}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({[field]: value}),
+    });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || 'Failed to update checklist item'); }
+  } catch(e) { alert(`Error: ${e.message}`); }
+  await _refetchAndRerenderChecklist(matterId);
 }
 
 const MATTER_CLIENT_PLACEHOLDER = '<option value="">— No client linked —</option>';
