@@ -8256,6 +8256,50 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
                 "SELECT display_name FROM users WHERE id=$1", _uuid_mod.UUID(m["responsible_lawyer_id"])
             )
             m["responsible_lawyer_name"] = lawyer_row["display_name"] if lawyer_row else None
+
+        # Title/Deeds Digitization Validation (2026-09-27): create_matter()
+        # auto-seeds the checklist at creation time, but that's a one-shot
+        # trigger -- a matter retyped INTO title_deeds_validation later, or
+        # one that already had this type but got its client linked only
+        # afterward, never got a second chance. Rather than special-casing
+        # "matter_type just changed" specifically, this runs on the
+        # resulting state after ANY update: if the matter is now
+        # title_deeds_validation, its (possibly just-linked) client's
+        # client_type maps to a category, and that category has no rows
+        # yet, seed it -- idempotent (UNIQUE(matter_id, category,
+        # item_key) + ON CONFLICT DO NOTHING inside _seed_checklist_category),
+        # so this is always safe to just check on every save, not only the
+        # one PATCH that happens to touch matter_type or client_id.
+        #
+        # Always attached (None when not applicable), same convention as
+        # create_matter()'s own response -- not conditional on whether
+        # `matter_type` was actually part of THIS PATCH, because a matter
+        # can just as easily be leaving title_deeds_validation on this
+        # exact call (e.g. correcting a wrong type back out). Always
+        # including the real current value here, rather than only when
+        # relevant, is what lets the frontend's Object.assign(m, updated)
+        # merge correctly clear a stale chip rather than leaving one
+        # behind from before this edit.
+        m["title_deeds_checklist"] = None
+        if m.get("matter_type") == "title_deeds_validation" and m.get("client_id"):
+            client_row = await conn.fetchrow(
+                "SELECT client_type FROM clients WHERE id=$1 AND firm_id=$2",
+                _uuid_mod.UUID(m["client_id"]), FIRM_ID
+            )
+            category = CLIENT_TYPE_TO_CHECKLIST_CATEGORY.get(client_row["client_type"]) if client_row else None
+            if category:
+                await _seed_checklist_category(conn, _uuid_mod.UUID(matter_id), category)
+            # Overall completion across every category this matter has
+            # (main + any SPA/representative sub-checklist), same shape as
+            # list_matters()' own batched summary -- not scoped to just the
+            # category (if any) this call happened to seed, since a matter
+            # can carry more than one category at once.
+            all_rows = await conn.fetch(
+                "SELECT status FROM matter_checklist_items WHERE matter_id=$1", _uuid_mod.UUID(matter_id)
+            )
+            m["title_deeds_checklist"] = {
+                "completion": compute_checklist_completion([dict(r) for r in all_rows])
+            }
     m["progress_notes"] = [_row_to_note(n) for n in note_rows]
     return m
 
