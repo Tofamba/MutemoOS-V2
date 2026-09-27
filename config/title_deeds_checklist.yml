@@ -1,0 +1,113 @@
+# Title/Deeds Digitization Validation — document-collection checklist
+# catalog, keyed by category. Read by backend/title_deeds_checklist.py,
+# same "config-driven, editable without touching Python" convention as
+# config/case_binder_templates.yml.
+#
+# individual/company/trust are the three main checklists, chosen by the
+# client's client_type (see CLIENT_TYPE_TO_CHECKLIST_CATEGORY in that
+# module). spa_principal/spa_representative are an ADDITIONAL sub-
+# checklist, seeded alongside whichever main checklist applies, only
+# when the registered owner is acting through a Special Power of
+# Attorney or an appointed representative rather than in person.
+#
+# item_key is a stable machine key (never rename once real matters have
+# rows referencing it -- same "stable code, free-text label" split as
+# compliance_exceptions.issue_code/issue_label elsewhere in this app).
+# item_label is what's actually shown; edit it freely.
+
+individual:
+  - item_key: original_title_deed
+    item_label: Original Title Deed
+  - item_key: previous_deed_of_transfer
+    item_label: Previous Deed of Transfer (optional)
+  - item_key: passport_photo
+    item_label: Passport Photo
+  - item_key: contact_details
+    item_label: Contact Details
+  - item_key: email
+    item_label: Email
+  - item_key: physical_address
+    item_label: Physical Address
+  - item_key: notarized_affidavit_thumbprint
+    item_label: Notarized Affidavit + Right Thumbprint
+  - item_key: biometrics
+    item_label: Biometrics (POS Machine)
+  - item_key: fees
+    item_label: Fees
+
+company:
+  - item_key: certificate_of_incorporation
+    item_label: Certificate of Incorporation
+  - item_key: registration_number
+    item_label: Registration Number
+  - item_key: cr5
+    item_label: CR5 (Registered Address)
+  - item_key: cr6
+    item_label: CR6 (Directors)
+  - item_key: company_resolution
+    item_label: Company Resolution Authorizing Representative
+  - item_key: original_title_deed
+    item_label: Original Title Deed
+  - item_key: previous_deed_of_transfer
+    item_label: Previous Deed of Transfer (optional)
+  - item_key: representative_passport_photo
+    item_label: Representative's Passport Photo
+  - item_key: contact_details
+    item_label: Contact Info
+  - item_key: notarized_affidavit_thumbprint
+    item_label: Notarized Affidavit + Thumbprint
+  - item_key: biometrics
+    item_label: Biometrics (POS Machine)
+  - item_key: fees
+    item_label: Fees
+
+trust:
+  - item_key: deed_of_trust
+    item_label: Deed of Trust
+  - item_key: trust_resolution
+    item_label: Trust Resolution Authorizing Representative
+  - item_key: registration_number
+    item_label: Registration Number
+  - item_key: original_title_deed
+    item_label: Original Title Deed
+  - item_key: previous_deed_of_transfer
+    item_label: Previous Deed of Transfer (optional)
+  - item_key: representative_passport_photo
+    item_label: Representative's Passport Photo
+  - item_key: contact_details
+    item_label: Contact Details
+  - item_key: email
+    item_label: Email (optional)
+  - item_key: physical_address
+    item_label: Physical Address
+  - item_key: notarized_affidavit_thumbprint
+    item_label: Notarized Affidavit + Thumbprint
+  - item_key: biometrics
+    item_label: Biometrics (POS Machine)
+  - item_key: fees
+    item_label: Fees
+
+# SPA/representative validation path (2. in the request) — only
+# applicable when the registered owner isn't validating in person.
+# Two mutually-exclusive variants depending on who's actually present:
+# the principal (owner) themselves via a notarized SPA, or an appointed
+# representative acting on sworn affidavit + biometrics.
+spa_principal:
+  - item_key: notarized_spa
+    item_label: Notarized Special Power of Attorney
+  - item_key: principal_fingerprints
+    item_label: Principal's Fingerprints
+  - item_key: principal_passport_photos
+    item_label: Principal's Passport Photos
+  - item_key: certified_passport_biodata
+    item_label: Certified Passport Biodata Page
+  - item_key: title_deed
+    item_label: Title Deed
+
+spa_representative:
+  - item_key: sworn_affidavit_fingerprints
+    item_label: Sworn Affidavit + Fingerprints
+  - item_key: biometric_capture
+    item_label: Successful Biometric Capture
+  - item_key: certified_national_id
+    item_label: Certified National ID Copy
