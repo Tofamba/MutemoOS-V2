@@ -6083,7 +6083,21 @@ function _matterChecklistHtml(id) {
     </div>`;
   }
 
-  const docs = _matterDocsCache[id] || [];
+  // Real bug found in staging verification (2026-09-27): the evidence
+  // picker was listing EVERY document on the matter, including Case
+  // Binder's own auto-provisioned starter drafts (POST /api/onboarding/
+  // intake, source='auto_provisioned' -- see that column's own migration
+  // comment in run_migrations(), added for exactly this "don't let an
+  // auto-provisioned placeholder look like something a lawyer actually
+  // uploaded" distinction, just never actually consumed anywhere before
+  // now). Those are real rows, correctly matter-scoped -- not a wrong
+  // data source -- but they're placeholder text stubs ("[Placeholder
+  // content -- real Vault template not yet wired in.]"), never genuine
+  // evidence of anything. Filtered out here, not from
+  // _matterDocsCache/the Activity feed generally -- Case Binder items
+  // still belong in the matter's own document list, just never as a
+  // pickable checklist evidence option.
+  const docs = (_matterDocsCache[id] || []).filter(d => d.source !== 'auto_provisioned');
   const users = _matterAvailableUsersCache[id] || [];
   const mainCategories = ['individual', 'company', 'trust'];
   const spaCategories = ['spa_principal', 'spa_representative'];
@@ -6143,11 +6157,13 @@ function _matterChecklistHtml(id) {
                   </select>
                 </td>
                 <td style="padding:5px 8px">
+                  ${docs.length ? `
                   <select style="font-size:0.75rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--paper)"
                     onchange="_updateChecklistItemField('${id}','${item.id}','document_id',this.value)">
                     <option value="">— none —</option>
                     ${docs.map(d => `<option value="${d.id}" ${item.document_id===d.id?'selected':''}>${escHtml(d.filename)}</option>`).join('')}
-                  </select>
+                  </select>` : `
+                  <span style="font-size:0.72rem;color:var(--ink3);font-style:italic">No documents uploaded yet — upload to Vault first</span>`}
                   ${item.document_id ? `<button class="btn btn-sm btn-outline" style="margin-left:4px;padding:1px 5px" onclick="viewDocument('${item.document_id}','')" title="View linked document">👁</button>` : ''}
                 </td>
               </tr>
