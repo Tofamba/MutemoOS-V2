@@ -5201,6 +5201,31 @@ const PRACTICE_AREAS = [
   'Debt Collection', 'Criminal', 'Other',
 ];
 
+// Matches the New Matter modal's own #nm-type <option> list verbatim
+// (2026-09-27, Matter Workspace's own Matter Type field) -- deliberately
+// NOT a general fix for the "three separately-drifted option lists"
+// problem the PRACTICE_AREAS comment above already flags (#nm-type,
+// #new-matter-type, #filter-matter-type each have their own values today,
+// confirmed as an existing, lower-priority gap, not one to fold into this
+// change). This is a fourth list, kept in sync with #nm-type by hand for
+// now -- unifying all of them behind one shared array/populate function,
+// the same way PRACTICE_AREAS already is, is a clean follow-up if that
+// drift ever becomes a real problem, not attempted here.
+const MATTER_TYPE_OPTIONS = [
+  ['commercial_property', 'Commercial Property'],
+  ['residential_property', 'Residential Property'],
+  ['employment', 'Employment / Labour'],
+  ['family', 'Family / Matrimonial'],
+  ['criminal', 'Criminal'],
+  ['commercial_contract', 'Commercial Contract'],
+  ['debt_collection', 'Debt Collection'],
+  ['estate', 'Estate / Probate'],
+  ['insurance', 'Insurance Claim'],
+  ['constitutional', 'Constitutional'],
+  ['title_deeds_validation', 'Title/Deeds Digitization Validation'],
+  ['other', 'Other'],
+];
+
 // Must match backend/conveyancing.py's CONVEYANCING_MILESTONES exactly —
 // same "single source of truth, mirrored" convention as PRACTICE_AREAS
 // above. Only shown/used when a matter's practice_area is exactly
@@ -5759,6 +5784,16 @@ async function renderMatterPanel(id) {
             </select>
           </div>
           ${matter.custom_status ? `<span class="chip chip-gray">${escHtml(matter.custom_status)}</span>` : ''}
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:80px">MATTER TYPE</label>
+            <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+                    onchange="if(this.value) updateMatterField('${id}','matter_type',this.value)">
+              <option value="">${matter.matter_type ? '— Change —' : '— Select type —'}</option>
+              ${MATTER_TYPE_OPTIONS.map(([v, label]) =>
+                `<option value="${v}" ${v===matter.matter_type?'selected':''}>${label}</option>`
+              ).join('')}
+            </select>
+          </div>
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">HEALTH</label>
             ${matterHealthChipHtml(matter)}

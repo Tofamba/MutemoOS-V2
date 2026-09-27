@@ -39,11 +39,13 @@ from backend.main import (
     ChecklistItemUpdate,
     ChecklistSeedBody,
     MatterCreate,
+    MatterUpdate,
     create_matter,
     get_matter_checklist,
     list_matters,
     seed_matter_checklist,
     update_checklist_item,
+    update_matter,
 )
 
 
@@ -682,3 +684,220 @@ def test_list_matters_omits_checklist_key_for_non_title_deeds_matters(monkeypatc
     result = asyncio.run(list_matters(FakeRequest()))
 
     assert "title_deeds_checklist" not in result[0]
+
+
+# ── update_matter(): idempotent auto-seed on the resulting state ───────────
+# Confirmed with the user (2026-09-27): create_matter()'s auto-seed is a
+# one-shot creation-time trigger; this covers the two real gaps that left
+# open -- a matter retyped INTO title_deeds_validation after creation, and
+# one that already had this type but only got its client linked
+# afterward. Runs on ANY update's resulting state, not specifically on
+# "matter_type just changed" or "client_id just changed" -- one rule
+# covers both real scenarios.
+
+class UpdateMatterFakeConnection:
+    def __init__(self, matters, clients=None, checklist_items=None):
+        self.matters = matters
+        self.clients = clients if clients is not None else []
+        self.checklist_items = checklist_items if checklist_items is not None else []
+
+    async def fetchval(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("SELECT COUNT(*) FROM matter_checklist_items WHERE matter_id=$1 AND category=$2"):
+            matter_id, category = args
+            return sum(1 for i in self.checklist_items if i["matter_id"] == matter_id and i["category"] == category)
+        raise NotImplementedError(f"fetchval: unhandled query: {q}")
+
+    async def fetchrow(self, query, *args):
+        q = " ".join(query.split())
+
+        if q.startswith("SELECT full_name FROM clients WHERE id=$1 AND firm_id=$2"):
+            client_id, firm_id = args
+            for c in self.clients:
+                if c["id"] == client_id and c["firm_id"] == firm_id:
+                    return {"full_name": c["full_name"]}
+            return None
+
+        if q.startswith("SELECT client_type FROM clients WHERE id=$1 AND firm_id=$2"):
+            client_id, firm_id = args
+            for c in self.clients:
+                if c["id"] == client_id and c["firm_id"] == firm_id:
+                    return {"client_type": c.get("client_type")}
+            return None
+
+        if q.startswith("UPDATE matters SET"):
+            m = re.search(r"SET (.+) WHERE id=\$1 AND firm_id=\$(\d+)", q)
+            cols = re.findall(r"(\w+)=\$\d+", m.group(1))
+            matter_id = args[0]
+            firm_id = args[-1]
+            values = args[1:1 + len(cols)]
+            for row in self.matters:
+                if row["id"] == matter_id and row["firm_id"] == firm_id:
+                    for col, val in zip(cols, values):
+                        row[col] = val
+                    return dict(row)
+            return None
+
+        raise NotImplementedError(f"fetchrow: unhandled query: {q}")
+
+    async def fetch(self, query, *args):
+        q = " ".join(query.split())
+
+        if q.startswith("SELECT * FROM progress_notes"):
+            return []
+
+        if q.startswith("SELECT * FROM matter_checklist_items WHERE matter_id=$1 AND category=$2"):
+            matter_id, category = args
+            return [dict(i) for i in self.checklist_items if i["matter_id"] == matter_id and i["category"] == category]
+
+        if q.startswith("SELECT status FROM matter_checklist_items WHERE matter_id=$1"):
+            matter_id, = args
+            return [{"status": i["status"]} for i in self.checklist_items if i["matter_id"] == matter_id]
+
+        raise NotImplementedError(f"fetch: unhandled query: {q}")
+
+    async def execute(self, query, *args):
+        q = " ".join(query.split())
+        if q.startswith("INSERT INTO matter_checklist_items"):
+            matter_id, firm_id, category, item_key, item_label = args
+            if any(i["matter_id"] == matter_id and i["category"] == category and i["item_key"] == item_key
+                   for i in self.checklist_items):
+                return "INSERT 0 0"
+            self.checklist_items.append({
+                "id": uuid.uuid4(), "matter_id": matter_id, "firm_id": firm_id, "category": category,
+                "item_key": item_key, "item_label": item_label, "status": "Outstanding",
+                "responsible_user_id": None, "document_id": None, "collected_date": None,
+                "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+            })
+            return "INSERT 0 1"
+        return "OK"
+
+
+class UpdateMatterFakePool:
+    def __init__(self, **kwargs):
+        self.conn = UpdateMatterFakeConnection(**kwargs)
+
+    def acquire(self):
+        return _FakeAcquireCtx(self.conn)
+
+
+def _existing_matter(*, matter_type=None, client_id=None, firm_id=FIRM_ID):
+    return {"id": uuid.uuid4(), "firm_id": firm_id, "name": "Existing Matter", "matter_type": matter_type,
+            "client_id": client_id, "status": "Active", "custom_status": None, "next_deadline": None,
+            "next_deadline_note": None, "responsible_lawyer_id": None}
+
+
+def test_update_matter_auto_seeds_when_retyped_to_title_deeds_validation(monkeypatch):
+    import backend.main as m
+    client = _client(client_type="Individual")
+    matter = _existing_matter(matter_type="conveyancing", client_id=client["id"])
+    pool = UpdateMatterFakePool(matters=[matter], clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner_user())
+
+    result = asyncio.run(update_matter(
+        str(matter["id"]), MatterUpdate(matter_type="title_deeds_validation"), FakeRequest()
+    ))
+
+    assert result["title_deeds_checklist"]["completion"] == {"collected": 0, "total": 9, "status": "not_started"}
+    assert len(pool.conn.checklist_items) == 9
+
+
+def test_update_matter_auto_seeds_when_client_linked_after_the_fact(monkeypatch):
+    """The matter already had the workflow type at creation but no
+    client yet -- create_matter() couldn't seed anything then; linking a
+    client now must get the same second chance as retyping does."""
+    import backend.main as m
+    client = _client(client_type="Company")
+    matter = _existing_matter(matter_type="title_deeds_validation", client_id=None)
+    pool = UpdateMatterFakePool(matters=[matter], clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner_user())
+
+    result = asyncio.run(update_matter(
+        str(matter["id"]), MatterUpdate(client_id=str(client["id"])), FakeRequest()
+    ))
+
+    assert result["title_deeds_checklist"]["completion"]["total"] == 12
+    assert {i["category"] for i in pool.conn.checklist_items} == {"company"}
+
+
+def test_update_matter_reseed_is_a_safe_noop(monkeypatch):
+    import backend.main as m
+    client = _client(client_type="Trust")
+    matter = _existing_matter(matter_type="title_deeds_validation", client_id=client["id"])
+    existing_items = [
+        {"id": uuid.uuid4(), "matter_id": matter["id"], "firm_id": FIRM_ID, "category": "trust",
+         "item_key": k, "item_label": k, "status": "Collected" if k == "fees" else "Outstanding",
+         "responsible_user_id": None, "document_id": None, "collected_date": None}
+        for k in ("fees", "registration_number")
+    ]
+    pool = UpdateMatterFakePool(matters=[matter], clients=[client], checklist_items=existing_items)
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner_user())
+
+    result = asyncio.run(update_matter(
+        str(matter["id"]), MatterUpdate(internal_ref="NGM 42"), FakeRequest()
+    ))
+
+    # a re-seed attempt would try to insert the OTHER 10 trust items too --
+    # confirms it stayed a no-op and just reported the real existing state
+    assert len(pool.conn.checklist_items) == 2
+    assert result["title_deeds_checklist"]["completion"] == {"collected": 1, "total": 2, "status": "in_progress"}
+
+
+def test_update_matter_title_deeds_checklist_stays_none_for_ordinary_matters(monkeypatch):
+    import backend.main as m
+    client = _client(client_type="Individual")
+    matter = _existing_matter(matter_type="conveyancing", client_id=client["id"])
+    pool = UpdateMatterFakePool(matters=[matter], clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner_user())
+
+    result = asyncio.run(update_matter(str(matter["id"]), MatterUpdate(internal_ref="NGM 1"), FakeRequest()))
+
+    assert result["title_deeds_checklist"] is None
+    assert pool.conn.checklist_items == []
+
+
+def test_update_matter_clears_stale_checklist_chip_when_retyped_away(monkeypatch):
+    """The Object.assign(m, updated) merge on the frontend only clears a
+    stale key if the response actually includes it -- confirms the
+    backend always attaches title_deeds_checklist (None here), not only
+    when the matter still qualifies."""
+    import backend.main as m
+    client = _client(client_type="Individual")
+    matter = _existing_matter(matter_type="title_deeds_validation", client_id=client["id"])
+    existing_items = [{"id": uuid.uuid4(), "matter_id": matter["id"], "firm_id": FIRM_ID, "category": "individual",
+                        "item_key": "fees", "item_label": "Fees", "status": "Outstanding",
+                        "responsible_user_id": None, "document_id": None, "collected_date": None}]
+    pool = UpdateMatterFakePool(matters=[matter], clients=[client], checklist_items=existing_items)
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner_user())
+
+    result = asyncio.run(update_matter(str(matter["id"]), MatterUpdate(matter_type="conveyancing"), FakeRequest()))
+
+    assert result["title_deeds_checklist"] is None
+    # the rows themselves are untouched -- retyping away doesn't delete
+    # collected progress, it just stops surfacing it while the type differs
+    assert len(pool.conn.checklist_items) == 1
+
+
+def test_update_matter_reports_existing_state_without_seeding_for_unmapped_client_type(monkeypatch):
+    """Partnership has no defined checklist -- retyping to
+    title_deeds_validation with a Partnership client must not seed
+    anything, but still honestly reports zero progress rather than
+    omitting the key."""
+    import backend.main as m
+    client = _client(client_type="Partnership")
+    matter = _existing_matter(matter_type="conveyancing", client_id=client["id"])
+    pool = UpdateMatterFakePool(matters=[matter], clients=[client])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, _partner_user())
+
+    result = asyncio.run(update_matter(
+        str(matter["id"]), MatterUpdate(matter_type="title_deeds_validation"), FakeRequest()
+    ))
+
+    assert result["title_deeds_checklist"]["completion"] == {"collected": 0, "total": 0, "status": "not_started"}
+    assert pool.conn.checklist_items == []
