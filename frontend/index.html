@@ -2350,6 +2350,25 @@ select{cursor:pointer}
   </div>
 </div>
 
+<!-- ═══════════════ CALENDAR EVENT DETAIL MODAL ═══════════════ -->
+<!-- Compact-card/detail-view split (2026-09-27): the card in
+     renderEventList() now shows title/meta + small indicator icons only
+     (📝/👥/📎) -- full notes, the attendee list with each person's real
+     status, and the linked document all live here instead, opened via
+     openEventDetail(). Synthetic matter-deadline entries (e._matterId
+     set) never get a click handler onto this modal -- see
+     _matterDeadlineSyntheticEvents()'s own comment for why they're not
+     real rows. -->
+<div id="calendar-event-detail-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--white);border-radius:12px;padding:1.5rem;width:min(520px,92vw);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.2)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+      <div id="ced-title" style="font-weight:700;font-size:1rem"></div>
+      <button onclick="closeEventDetail()" style="background:none;border:none;font-size:1.2rem;cursor:pointer;color:var(--ink3)">✕</button>
+    </div>
+    <div id="ced-body"></div>
+  </div>
+</div>
+
 <!-- ═══════════════ DATE EXTRACTION MODAL ═══════════════ -->
 <div id="date-extract-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;overflow-y:auto">
   <div style="background:white;max-width:600px;margin:2rem auto;border-radius:8px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
@@ -8011,16 +8030,17 @@ function renderEventList(elId, events, showEmpty) {
         <div class="cal-day">${day}</div>
         <div class="cal-month">${month}</div>
       </div>
-      <div class="cal-details">
+      <div class="cal-details"${e._matterId ? '' : ` onclick="openEventDetail('${e.id}')" style="cursor:pointer" title="Click for full details"`}>
         <div class="cal-title">${escHtml(e.title)}</div>
         <div class="cal-meta">
           ${e.time ? `<strong>${e.time}</strong> · ` : ''}
           ${e.court ? `${escHtml(e.court)} · ` : ''}
           ${e.matter_name ? `${escHtml(e.matter_name)} · ` : ''}
           ${daysLabel}
+          ${e.notes ? ` <span title="Has notes">📝</span>` : ''}
+          ${(e.attendees && e.attendees.length) ? ` <span title="${e.attendees.length} attendee(s)">👥</span>` : ''}
+          ${e.document_id ? ` <span title="Has a linked document">📎</span>` : ''}
         </div>
-        ${e.notes ? `<div style="font-size:0.72rem;color:var(--ink3);margin-top:3px">${escHtml(e.notes)}</div>` : ''}
-        ${(e.attendees && e.attendees.length) ? `<div style="font-size:0.7rem;color:var(--ink3);margin-top:4px">👥 ${e.attendees.map(a => escHtml(a.name || a.email)).join(', ')}</div>` : ''}
       </div>
       ${e._matterId ? `
       <div style="display:flex;align-items:center;flex-shrink:0">
@@ -8033,6 +8053,157 @@ function renderEventList(elId, events, showEmpty) {
       </div>`}
     </div>`;
   }).join('');
+}
+
+// ── Calendar event detail view ───────────────────────────────────────────────
+// Compact card (above) shows title/meta + indicator icons only; this modal
+// is where the full notes text, each attendee's real status (accepted/
+// declined/pending -- already tracked in calendar_events.attendees,
+// never surfaced anywhere before this), and the linked document all
+// actually live. calEvents (populated by renderCalendar()) is the source
+// of truth -- no separate fetch needed to open the modal itself, only to
+// resolve the linked matter's own documents for the picker.
+
+let _cedEventId = null;
+// null = not loaded yet for the currently-open event, [] = loaded and
+// genuinely empty (already filtered to real, non-auto_provisioned docs --
+// same filter just added for the Title/Deeds checklist's own evidence
+// picker, reused here rather than reintroduced).
+let _cedMatterDocs = null;
+
+const CAL_ATTENDEE_STATUS_CHIP = { accepted: 'chip-green', declined: 'chip-red', pending: 'chip-gray' };
+function _ceAttendeeStatusLabel(status) {
+  return status === 'accepted' ? '✓ Accepted' : status === 'declined' ? '✕ Declined' : '⏳ Pending';
+}
+
+function openEventDetail(eventId) {
+  const event = calEvents.find(e => e.id === eventId);
+  if (!event) return;
+  _cedEventId = eventId;
+  _cedMatterDocs = null;
+  document.getElementById('ced-title').textContent = event.title;
+  document.getElementById('calendar-event-detail-modal').style.display = 'flex';
+  _renderEventDetailBody(event);
+  if (event.matter_id) _loadEventDetailDocuments(event.matter_id);
+}
+
+function closeEventDetail() {
+  document.getElementById('calendar-event-detail-modal').style.display = 'none';
+  _cedEventId = null;
+  _cedMatterDocs = null;
+}
+
+function _renderEventDetailBody(event) {
+  const body = document.getElementById('ced-body');
+  if (!body) return;
+  const d = new Date(event.date + 'T12:00:00');
+  const dateLabel = d.toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
+  const attendees = event.attendees || [];
+
+  body.innerHTML = `
+    <div style="font-size:0.82rem;color:var(--ink3);margin-bottom:14px">
+      ${dateLabel}${event.time ? ` · <strong>${event.time}</strong>` : ''}
+      ${event.court ? ` · ${escHtml(event.court)}` : ''}
+      ${event.matter_name ? ` · ${escHtml(event.matter_name)}` : ''}
+    </div>
+
+    <div style="margin-bottom:14px">
+      <div style="font-size:0.72rem;color:var(--ink3);font-weight:600;margin-bottom:4px">NOTES</div>
+      ${event.notes ? `<div style="font-size:0.85rem;white-space:pre-wrap">${escHtml(event.notes)}</div>` : `<em style="color:var(--ink3);font-size:0.82rem">No notes.</em>`}
+    </div>
+
+    <div style="margin-bottom:14px">
+      <div style="font-size:0.72rem;color:var(--ink3);font-weight:600;margin-bottom:4px">ATTENDEES</div>
+      ${attendees.length ? `
+      <div style="display:flex;flex-direction:column;gap:5px">
+        ${attendees.map(a => `
+          <div style="display:flex;align-items:center;gap:6px;font-size:0.82rem">
+            <span>${escHtml(a.name || a.email)}</span>
+            <span class="chip ${CAL_ATTENDEE_STATUS_CHIP[a.status] || 'chip-gray'}">${_ceAttendeeStatusLabel(a.status)}</span>
+          </div>
+        `).join('')}
+      </div>` : `<em style="color:var(--ink3);font-size:0.82rem">No attendees invited.</em>`}
+    </div>
+
+    <div>
+      <div style="font-size:0.72rem;color:var(--ink3);font-weight:600;margin-bottom:4px">LINKED DOCUMENT</div>
+      <div id="ced-document-picker"><em style="color:var(--ink3);font-size:0.82rem">Loading…</em></div>
+    </div>
+  `;
+  _renderEventDocumentPicker(event);
+}
+
+function _renderEventDocumentPicker(event) {
+  const el = document.getElementById('ced-document-picker');
+  if (!el) return;
+  if (!event.matter_id) {
+    el.innerHTML = `<em style="color:var(--ink3);font-size:0.82rem">No linked matter — link this event to a matter to attach a document.</em>`;
+    return;
+  }
+  if (_cedMatterDocs === null) {
+    el.innerHTML = `<em style="color:var(--ink3);font-size:0.82rem">Loading…</em>`;
+    return;
+  }
+  if (!_cedMatterDocs.length) {
+    el.innerHTML = `<em style="color:var(--ink3);font-size:0.82rem">No documents uploaded yet — upload to Vault first.</em>`;
+    return;
+  }
+  const linked = _cedMatterDocs.find(d => d.id === event.document_id);
+  el.innerHTML = `
+    <select style="font-size:0.82rem;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--paper)"
+      onchange="_updateEventDocument('${event.id}', this.value)">
+      <option value="">— none —</option>
+      ${_cedMatterDocs.map(d => `<option value="${d.id}" ${event.document_id===d.id?'selected':''}>${escHtml(d.filename)}</option>`).join('')}
+    </select>
+    ${event.document_id ? `<button class="btn btn-sm btn-outline" style="margin-left:4px" onclick="viewDocument('${event.document_id}','${escHtml(linked ? linked.filename : '')}')" title="View linked document">👁</button>` : ''}
+  `;
+}
+
+// Case Binder's own auto-provisioned starter drafts (source='auto_provisioned')
+// are filtered out here -- the exact same distinction just added to the
+// Title/Deeds checklist's own evidence picker (see _matterChecklistHtml's
+// own comment for the full story: real rows, correctly matter-scoped, but
+// placeholder text stubs that are never genuine evidence of anything).
+async function _loadEventDetailDocuments(matterId) {
+  try {
+    const res = await fetch(`${API}/api/matters/${matterId}/documents`);
+    const docs = res.ok ? await res.json() : [];
+    _cedMatterDocs = docs.filter(d => d.source !== 'auto_provisioned');
+  } catch(e) {
+    _cedMatterDocs = [];
+  }
+  // Only re-render if this event's detail view is still the one open --
+  // the fetch is async and the modal may have been closed/reopened on a
+  // different event by the time it resolves.
+  const event = calEvents.find(e => e.id === _cedEventId);
+  if (event) _renderEventDocumentPicker(event);
+}
+
+// The dedicated PATCH /api/calendar/{id}/document endpoint -- deliberately
+// NOT the general updateMatterField-style PATCH used elsewhere, since that
+// path (update_calendar_event() server-side) bumps `sequence` and
+// re-notifies every attendee with an "event updated" invite. Linking a
+// document is not a reschedule.
+async function _updateEventDocument(eventId, documentId) {
+  try {
+    const res = await fetch(`${API}/api/calendar/${eventId}/document`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ document_id: documentId || null }),
+    });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || 'Failed to update document link'); }
+  } catch(e) {
+    alert(`Error: ${e.message}`);
+  }
+  // Same "full refetch after any mutation" convention as
+  // deleteEvent()/respondToCalendarInvite() -- refreshes both the card
+  // list and, if this event's detail view is still open, its body too
+  // (re-render, not close: the lawyer is likely about to pick another
+  // field in the same modal).
+  await renderCalendar();
+  if (_cedEventId === eventId) {
+    const event = calEvents.find(e => e.id === eventId);
+    if (event) _renderEventDetailBody(event);
+  }
 }
 
 async function promptInviteToEvent(eventId) {

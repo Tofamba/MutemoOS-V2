@@ -1007,6 +1007,18 @@ async def run_migrations(pool: asyncpg.Pool = None):
         );
         ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS attendees JSONB DEFAULT '[]'::jsonb;
         ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS sequence INTEGER NOT NULL DEFAULT 0;
+        -- Calendar detail view (2026-09-27): the one genuinely new piece of
+        -- the compact-card/detail-view split -- notes and attendees already
+        -- existed. Nullable, no ON DELETE action specified (same as
+        -- authority_document_id/matter_checklist_items.document_id) since a
+        -- deleted document leaving a dangling reference is an existing,
+        -- accepted shape elsewhere in this schema, not a new one introduced
+        -- here. Deliberately updated through its own dedicated endpoint
+        -- (PATCH /api/calendar/{id}/document), NOT the general reschedule
+        -- PATCH -- that path bumps `sequence` and re-notifies every
+        -- attendee ("event updated"), which is correct for an actual
+        -- schedule change but wrong for simply attaching evidence.
+        ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS document_id UUID REFERENCES documents(id);
         CREATE INDEX IF NOT EXISTS idx_calendar_firm ON calendar_events(firm_id);
         CREATE INDEX IF NOT EXISTS idx_calendar_date ON calendar_events(firm_id, date);
 
@@ -4151,6 +4163,13 @@ class ClientComplianceUpdate(BaseModel):
 PROGRESS_NOTE_TEXT_MAX_LENGTH = 20000
 PROGRESS_NOTE_HEADING_MAX_LENGTH = 200
 
+# Calendar event notes (2026-09-27, compact-card/detail-view split) -- same
+# "defensive abuse ceiling only, not a UX-facing short limit" stance as
+# Progress Notes above, reusing that exact value rather than picking a
+# second, separately-tuned number for what's the same kind of free-text
+# field. Enforced in add_calendar_event()/update_calendar_event().
+CALENDAR_NOTES_MAX_LENGTH = PROGRESS_NOTE_TEXT_MAX_LENGTH
+
 class ProgressNote(BaseModel):
     text: str
     heading: Optional[str] = None
@@ -4221,6 +4240,20 @@ class CalendarEventUpdate(BaseModel):
     event_type: Optional[str] = None
     update_message: Optional[str] = None  # note to attendees explaining the change
 
+class CalendarEventDocumentUpdate(BaseModel):
+    # Its own tiny body/endpoint (PATCH /api/calendar/{id}/document),
+    # deliberately NOT folded into CalendarEventUpdate above -- that path
+    # bumps `sequence` and re-notifies every attendee ("event updated"),
+    # correct for an actual reschedule, wrong for simply attaching
+    # evidence. Unlike the dict()-filter PATCH convention used everywhere
+    # else in this app (where an omitted/None field is never distinguishable
+    # from "clear it", so no endpoint here can actually unlink -- see
+    # authority_document_id/matter_checklist_items.document_id), this is a
+    # single-field body: the handler always applies exactly what's given,
+    # so both omitting document_id and sending it as null genuinely clear
+    # the link, not just "leave unchanged".
+    document_id: Optional[str] = None
+
 class CalendarEvent(BaseModel):
     title: str
     matter_id: Optional[str] = None
@@ -4230,6 +4263,7 @@ class CalendarEvent(BaseModel):
     time: Optional[str] = None
     court: Optional[str] = None
     notes: Optional[str] = None
+    document_id: Optional[str] = None
     attendees: Optional[List[Attendee]] = None
     invite_message: Optional[str] = None
 
@@ -5466,7 +5500,7 @@ def _row_to_note(row) -> dict:
 
 def _row_to_event(row) -> dict:
     d = dict(row)
-    for k in ("id", "firm_id", "matter_id", "created_by"):
+    for k in ("id", "firm_id", "matter_id", "created_by", "document_id"):
         if d.get(k):
             d[k] = str(d[k])
     if d.get("created_at"):
@@ -16553,6 +16587,11 @@ async def add_calendar_event(event: CalendarEvent, background_tasks: BackgroundT
         datetime.strptime(event.date, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(status_code=422, detail=f"Invalid date format: {event.date}. Use YYYY-MM-DD.")
+    if event.notes and len(event.notes) > CALENDAR_NOTES_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Notes exceed the maximum length of {CALENDAR_NOTES_MAX_LENGTH} characters",
+        )
 
     matter_id_uuid = None
     if event.matter_id:
@@ -16568,17 +16607,25 @@ async def add_calendar_event(event: CalendarEvent, background_tasks: BackgroundT
         except ValueError:
             pass
 
+    document_id_uuid = None
+    if event.document_id:
+        try:
+            document_id_uuid = _uuid_mod.UUID(event.document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+
     attendees_list = [a.dict() for a in event.attendees] if event.attendees else []
 
     async with _db_pool.acquire() as conn:
         attendees_list = await _resolve_attendee_users(conn, FIRM_ID, attendees_list)
         row = await conn.fetchrow("""
-            INSERT INTO calendar_events (firm_id, matter_id, title, date, time, event_type, court, matter_name, notes, attendees, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11) RETURNING *
+            INSERT INTO calendar_events (firm_id, matter_id, title, date, time, event_type, court, matter_name, notes, document_id, attendees, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12) RETURNING *
         """,
         FIRM_ID, matter_id_uuid, event.title,
         datetime.strptime(event.date, "%Y-%m-%d").date(),
         time_val, event.event_type, event.court, event.matter_name, event.notes,
+        document_id_uuid,
         json.dumps(attendees_list),
         _uuid_mod.UUID(str(user["id"])) if user and user.get("id") else None
         )
@@ -16661,6 +16708,11 @@ async def update_calendar_event(event_id: str, update: CalendarEventUpdate,
                 datetime.strptime(new_date, "%Y-%m-%d")
             except ValueError:
                 raise HTTPException(status_code=422, detail=f"Invalid date format: {new_date}. Use YYYY-MM-DD.")
+        if update.notes is not None and len(update.notes) > CALENDAR_NOTES_MAX_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Notes exceed the maximum length of {CALENDAR_NOTES_MAX_LENGTH} characters",
+            )
 
         new_time_val = None
         if update.time is not None:
@@ -16708,6 +16760,42 @@ async def update_calendar_event(event_id: str, update: CalendarEventUpdate,
         )
 
     return result
+
+@app.patch("/api/calendar/{event_id}/document")
+async def update_calendar_event_document(event_id: str, update: CalendarEventDocumentUpdate, request: Request):
+    """
+    Links or clears the event's evidence document -- a dedicated endpoint
+    rather than folding document_id into the general update_calendar_event()
+    PATCH above, on purpose: that path bumps `sequence` and re-notifies
+    every attendee with an "event updated" calendar invite, correct for
+    an actual reschedule, wrong for simply attaching a document.
+    Single-field body, always applied as given (see
+    CalendarEventDocumentUpdate's own docstring) -- unlike most PATCH
+    endpoints in this app, this one can genuinely clear the link, not
+    just set it.
+    """
+    user = await get_current_user(request)
+    _check_permission(user, "calendar:create")
+    try:
+        eid = _uuid_mod.UUID(event_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="event_id must be a valid UUID")
+
+    document_id_uuid = None
+    if update.document_id:
+        try:
+            document_id_uuid = _uuid_mod.UUID(update.document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="document_id must be a valid UUID")
+
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE calendar_events SET document_id=$1 WHERE id=$2 AND firm_id=$3 RETURNING *",
+            document_id_uuid, eid, FIRM_ID
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return _row_to_event(row)
 
 @app.delete("/api/calendar/{event_id}")
 async def delete_calendar_event(event_id: str, background_tasks: BackgroundTasks, request: Request):
