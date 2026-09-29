@@ -208,6 +208,9 @@ async def run_migrations(pool: asyncpg.Pool = None):
         -- Backfilled below (needs a bound FIRM_ID param -- this block has
         -- none) rather than here.
         ALTER TABLE otp_store ADD COLUMN IF NOT EXISTS firm_id UUID REFERENCES firms(id) ON DELETE CASCADE;
+        -- SEC-001: persistent resend throttle. Kept in PostgreSQL rather than
+        -- process memory so restarts and multiple workers cannot bypass it.
+        ALTER TABLE otp_store ADD COLUMN IF NOT EXISTS last_sent_at TIMESTAMPTZ;
 
         CREATE TABLE IF NOT EXISTS matters (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1882,6 +1885,7 @@ if os.environ.get("RAILWAY_ENVIRONMENT_NAME") and not AUTH_ENABLED and not MUTEM
 OTP_TTL_SECONDS     = 300
 SESSION_TTL_SECONDS = 86400 * 7
 MAX_OTP_ATTEMPTS    = 5
+OTP_RESEND_COOLDOWN_SECONDS = int(os.environ.get("MUTEMO_OTP_RESEND_COOLDOWN_SECONDS", "60"))
 # Shared-device session hardening (2026-08-27): SESSION_TTL_SECONDS above is
 # an absolute cap from login, not a safety net for someone who forgets to
 # log out on a shared boardroom/library machine -- a session created at
@@ -2229,13 +2233,28 @@ async def request_otp(req: OTPRequestBody):
         return {"sent": True, "message": "If this number is registered, a code has been sent."}
     known_email = known_row["email"]
 
+    # SEC-001: suppress rapid resend requests before generating a replacement
+    # code or touching attempts. The state is persistent, so a process restart
+    # does not reset the cooldown. Return the same generic shape used for an
+    # unknown number so throttling does not become an account-enumeration oracle.
+    async with _db_pool.acquire() as conn:
+        recent = await conn.fetchrow("""
+            SELECT 1 FROM otp_store
+            WHERE phone=$1 AND firm_id=$2
+              AND last_sent_at IS NOT NULL
+              AND last_sent_at > NOW() - make_interval(secs => $3)
+        """, phone, FIRM_ID, OTP_RESEND_COOLDOWN_SECONDS)
+    if recent:
+        return {"sent": True, "message": "If this number is registered, a code has been sent."}
+
     code = f"{secrets.randbelow(1000000):06d}"
     expires = datetime.utcnow() + timedelta(seconds=OTP_TTL_SECONDS)
     async with _db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO otp_store (phone, code, attempts, expires_at, firm_id)
-            VALUES ($1, $2, 0, $3, $4)
-            ON CONFLICT (phone) DO UPDATE SET code=$2, attempts=0, expires_at=$3, firm_id=$4
+            INSERT INTO otp_store (phone, code, attempts, expires_at, firm_id, last_sent_at)
+            VALUES ($1, $2, 0, $3, $4, NOW())
+            ON CONFLICT (phone) DO UPDATE SET
+                code=$2, attempts=0, expires_at=$3, firm_id=$4, last_sent_at=NOW()
         """, phone, code, expires, FIRM_ID)
 
     sms_attempts: list = []
