@@ -544,6 +544,28 @@ def scope_corpus_absence_claims(answer_text: str) -> tuple:
     return text, qc_log
 
 
+# Typographic characters that routinely differ between how source
+# documents are ingested (PDF/Word extraction commonly produces curly
+# quotes, apostrophes, and en/em dashes) and how the model reproduces
+# them in generated prose. Folded to their ASCII equivalents before
+# comparison so a same-content quote isn't flagged purely over which
+# quote-mark style was used on either side. Confirmed live: the real
+# ingested legal corpus (e.g. HH 11-22) genuinely contains curly quotes
+# and apostrophes ("appellant's objection", curly-quoted statements),
+# so this isn't a hypothetical edge case for this content.
+_TYPOGRAPHIC_FOLD = {
+    '“': '"', '”': '"',  # left/right double quotation mark
+    '‘': "'", '’': "'",  # left/right single quotation mark / apostrophe
+    '–': '-', '—': '-',  # en dash, em dash
+}
+
+
+def _fold_typographic_chars(text: str) -> str:
+    for char, replacement in _TYPOGRAPHIC_FOLD.items():
+        text = text.replace(char, replacement)
+    return text
+
+
 def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
     """
     Deterministic QC pass. Verifies blockquoted text (the existing
@@ -558,7 +580,7 @@ def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
     the downgrade note so a lawyer can inspect both.
     """
     paragraphs = re.split(r'\n\s*\n', answer_text)
-    normalized_context = ' '.join(retrieved_context.split())
+    normalized_context = _fold_typographic_chars(' '.join(retrieved_context.split()))
     qc_log = []
     new_paragraphs = []
 
@@ -568,7 +590,7 @@ def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
             quote_text = ' '.join(
                 line.lstrip('>').strip() for line in stripped.split('\n')
             ).strip()
-            normalized_quote = ' '.join(quote_text.split())
+            normalized_quote = _fold_typographic_chars(' '.join(quote_text.split()))
 
             if normalized_quote and normalized_quote in normalized_context:
                 new_paragraphs.append(para)
@@ -609,10 +631,78 @@ def verify_citations(answer_text: str, retrieved_context: str) -> tuple:
     return '\n\n'.join(new_paragraphs), qc_log
 
 
+# A single party-name token. `*` (not `+`) after the leading capital so a
+# lone anonymized initial (e.g. "G") is a complete, valid token on its
+# own — Zimbabwean tax and family-law citations routinely anonymize one
+# party to a single letter (confirmed live: "G (Private) Limited v ZIMRA
+# HH 11-22"), and the previous `+`-only pattern couldn't match "G" at all,
+# silently sliding the whole match onto the next capitalized word instead
+# ("Limited v ZIMRA") and checking an arbitrary truncated fragment rather
+# than the real case name.
+#
+# Each token may be directly followed by a short, letters-only
+# parenthetical corporate-form annotation — "(Private)", "(Pvt)", "(Pty)",
+# "(Nominees)", etc. Restricted to letters/dots/spaces (no digits) so it
+# never swallows the trailing citation parenthetical, which is what
+# actually terminates the match and is virtually always digit-bearing
+# ("(HH 11-22)", "(SC 45/20)", "(4) SA 288").
+_CASE_PARTY_FORM = r"(?:\s*\([A-Za-z][A-Za-z\.\s]{0,20}\))?"
+_CASE_PARTY_WORD = r"[A-Z][A-Za-z\.\'\-]*" + _CASE_PARTY_FORM
+_CASE_PARTY_WORD_CONT = r"[A-Za-z\.\'\-&]+" + _CASE_PARTY_FORM
+
 CASE_CITATION_PATTERN = re.compile(
-    r"([A-Z][A-Za-z\.\'\-]+(?:\s+[A-Z][A-Za-z\.\'\-]+)*\s+v\.?\s+"
-    r"[A-Z][A-Za-z\.\'\-]+(?:\s+[A-Za-z\.\'\-&]+)*)\s*\(([^)]{2,40})\)"
+    r"(" + _CASE_PARTY_WORD + r"(?:\s+" + _CASE_PARTY_WORD + r")*"
+    r"\s+v\.?\s+"
+    + _CASE_PARTY_WORD + r"(?:\s+" + _CASE_PARTY_WORD_CONT + r")*)"
+    r"\s*\(([^)]{2,40})\)"
 )
+
+# Corporate-form abbreviation pairs common in Zimbabwean/South African case
+# citations, folded to a shared canonical spelling before the case-name
+# substring check. Without this, a genuinely correct, genuinely retrieved
+# citation can still false-positive purely because the model wrote out the
+# full form ("Limited", "(Private)") while the source document uses the
+# abbreviated form, or vice versa — confirmed live as a real, independent
+# failure mode from the truncation bug above.
+_CASE_NAME_ABBREVIATIONS = [
+    # Generic corporate-form suffixes, applicable to any company name.
+    (re.compile(r'\bprivate\b'), 'pvt'),
+    (re.compile(r'\blimited\b'), 'ltd'),
+    (re.compile(r'\bproprietary\b'), 'pty'),
+    # Named institutions that are almost always referred to by abbreviation
+    # in citations/prose but whose own judgments spell the full name out
+    # in the case header -- confirmed live: the real HH 11-22 judgment
+    # never abbreviates "ZIMBABWE REVENUE AUTHORITY" to "ZIMRA" in its own
+    # header text, only in later body prose. Extend this list as other
+    # frequently-litigated respondents surface the same gap.
+    (re.compile(r'\bzimbabwe revenue authority\b'), 'zimra'),
+]
+
+
+def _normalize_case_name_abbreviations(text: str) -> str:
+    for pattern, replacement in _CASE_NAME_ABBREVIATIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+_CASE_NAME_V_CONNECTOR = re.compile(r'\bv\.?\b')
+
+
+def _case_name_versus_variant(normalized_case_name: str) -> Optional[str]:
+    """Real Zimbabwean/ZimLII judgment headers routinely spell the party
+    connector as "versus" rather than the "v"/"v." shorthand used in
+    citations and everyday legal prose -- confirmed live: the real HH
+    11-22 judgment's own header text never uses "v" at all ("G (PRIVATE)
+    LIMITED versus ZIMBABWE REVENUE AUTHORITY"), and the citation is never
+    restated in "X v Y" shorthand anywhere in the body. Without this, a
+    genuinely-retrieved, correctly-cited case can still false-positive
+    purely because the source document's own header spells the connector
+    differently than the model's answer does. Returns None when no "v"
+    connector was present to substitute (nothing to try).
+    """
+    variant = _CASE_NAME_V_CONNECTOR.sub('versus', normalized_case_name)
+    return variant if variant != normalized_case_name else None
+
 
 def verify_inline_case_citations(
     answer_text: str,
@@ -636,15 +726,20 @@ def verify_inline_case_citations(
     unconfirmed one. The default preserves the original research-path
     wording exactly, so existing callers are unaffected.
     """
-    normalized_context = ' '.join(retrieved_context.split()).lower()
+    normalized_context = _normalize_case_name_abbreviations(' '.join(retrieved_context.split()).lower())
     qc_log = []
     result_text = answer_text
     for match in CASE_CITATION_PATTERN.finditer(answer_text):
         case_name = match.group(1).strip()
         citation = match.group(2).strip()
         full_match = match.group(0)
-        normalized_case_name = ' '.join(case_name.split()).lower()
-        if normalized_case_name not in normalized_context:
+        normalized_case_name = _normalize_case_name_abbreviations(' '.join(case_name.split()).lower())
+        found = normalized_case_name in normalized_context
+        if not found:
+            versus_variant = _case_name_versus_variant(normalized_case_name)
+            if versus_variant is not None:
+                found = versus_variant in normalized_context
+        if not found:
             qc_log.append({
                 "qc_status": "inline_citation_unverified",
                 "case_name": case_name,
