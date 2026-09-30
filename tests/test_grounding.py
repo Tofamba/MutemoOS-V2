@@ -37,10 +37,13 @@ from types import SimpleNamespace
 import backend.grounding as g
 import backend.main as m
 from backend.grounding import (
+    CASE_CITATION_PATTERN,
     REPHRASE_SUGGESTION,
     apply_confidence_safeguard,
     run_legal_research_agent,
     scope_corpus_absence_claims,
+    verify_citations,
+    verify_inline_case_citations,
 )
 from backend.main import synthesise_answer_sync
 
@@ -262,3 +265,218 @@ def test_research_gap_map_instruction_forbids_corpus_absence_claims(monkeypatch)
     assert "RESEARCH GAP MAP" in content
     assert 'NEVER state or imply that something "is absent from,"' in content
     assert "not found in the sources retrieved for this query" in content
+
+
+# ── verify_citations(): typographic normalization (2026-09-30 false-positive fix) ──
+#
+# Real incident: accurate, verbatim quotes from the VAT Act [Chapter
+# 23:12] and G (Private) Limited v ZIMRA (HH 11-22) were repeatedly
+# flagged "Requires verification" despite being byte-for-byte present in
+# the retrieved context. Root cause confirmed by direct execution and a
+# live retrieval trace against real staging data (2026-09-30): the real
+# ingested corpus genuinely contains curly quotes/apostrophes and
+# en/em-dashes (PDF/Word-sourced ingestion), but verify_citations() only
+# ever normalized whitespace -- any single typographic character
+# difference between the stored chunk and the model's reproduced
+# blockquote caused a full false-positive mismatch.
+
+def test_verify_citations_identical_quote_passes():
+    context = "The applicant sought a declaratur regarding input tax credits."
+    answer = f"> {context}"
+    result, qc_log = verify_citations(answer, context)
+    assert qc_log == []
+    assert result == answer
+
+
+def test_verify_citations_curly_vs_straight_quotes_now_passes():
+    context = 'For the purposes of this Act, “enterprise” means any activity.'
+    answer = '> For the purposes of this Act, "enterprise" means any activity.'
+    result, qc_log = verify_citations(answer, context)
+    assert qc_log == []
+
+
+def test_verify_citations_smart_apostrophe_vs_straight_now_passes():
+    context = "the appellant’s objection to the penalty"
+    answer = "> the appellant's objection to the penalty"
+    result, qc_log = verify_citations(answer, context)
+    assert qc_log == []
+
+
+def test_verify_citations_en_dash_em_dash_vs_hyphen_now_passes():
+    context = "see also section 6 — as amended."
+    answer = "> see also section 6 - as amended."
+    result, qc_log = verify_citations(answer, context)
+    assert qc_log == []
+
+    context2 = "see also section 6 – as amended."
+    answer2 = "> see also section 6 - as amended."
+    result2, qc_log2 = verify_citations(answer2, context2)
+    assert qc_log2 == []
+
+
+def test_verify_citations_genuine_mismatch_still_flagged():
+    """The fix must not mask real content differences -- only typographic
+    ones. A footnote marker genuinely added to the quote (not present in
+    the source) is a real mismatch and must still be caught."""
+    context = "any activity carried on continuously or regularly."
+    answer = "> any activity carried on continuously or regularly.[1]"
+    result, qc_log = verify_citations(answer, context)
+    assert len(qc_log) == 1
+    assert qc_log[0]["qc_status"] == "citation_unmatched"
+    assert "Requires verification" in result
+
+
+def test_verify_citations_real_hh1122_quote_with_curly_chars_passes():
+    """Regression for the actual reported case: a realistic reproduction
+    of HH 11-22's style (curly quotes, curly apostrophe) as ingested,
+    quoted back with straight equivalents -- the exact real-world shape
+    of the original false positive."""
+    context = (
+        "stated his reason for disallowing the appellant’s objection to the "
+        "100% penalty as follows: “In this case, ZIMRA only registered your "
+        "client compulsorily after an analysis of the nature of services "
+        "rendered.”"
+    )
+    answer = (
+        '> stated his reason for disallowing the appellant\'s objection to the '
+        '100% penalty as follows: "In this case, ZIMRA only registered your '
+        'client compulsorily after an analysis of the nature of services '
+        'rendered."'
+    )
+    result, qc_log = verify_citations(answer, context)
+    assert qc_log == []
+
+
+# ── CASE_CITATION_PATTERN / verify_inline_case_citations(): truncation fix ──
+#
+# Real incident (same 2026-09-30 investigation): "G (Private) Limited v
+# ZIMRA (HH 11-22)" was flagged [UNVERIFIED] even in a title line, while
+# the real case was genuinely retrieved and genuinely present in context
+# (confirmed via a live retrieval trace against real staging data). Root
+# cause: the old pattern required every party-name token to be >=2 chars
+# via a `+` quantifier and excluded parentheses from the token character
+# class, so it couldn't match "G" (a single anonymized initial) or
+# "(Private)" at all -- it silently slid the match onto the next
+# capitalized word ("Limited v ZIMRA") and checked that arbitrary
+# fragment instead of the real case name.
+
+def test_regex_no_longer_truncates_single_letter_anonymized_party():
+    text = "G (Private) Limited v ZIMRA (HH 11-22)"
+    m_ = CASE_CITATION_PATTERN.search(text)
+    assert m_ is not None
+    assert m_.group(1) == "G (Private) Limited v ZIMRA"
+    assert m_.group(2) == "HH 11-22"
+
+
+def test_regex_handles_pvt_abbreviation_and_markdown_heading():
+    text = "## G (Pvt) Ltd v ZIMRA (HH 11-22): VAT input tax analysis"
+    m_ = CASE_CITATION_PATTERN.search(text)
+    assert m_ is not None
+    assert m_.group(1) == "G (Pvt) Ltd v ZIMRA"
+
+
+def test_regex_handles_parenthetical_corporate_form_on_both_parties():
+    text = "Moyo (Private) Limited v Chikwanha (Pvt) Ltd (HH 5-21)"
+    m_ = CASE_CITATION_PATTERN.search(text)
+    assert m_ is not None
+    assert m_.group(1) == "Moyo (Private) Limited v Chikwanha (Pvt) Ltd"
+    assert m_.group(2) == "HH 5-21"
+
+
+def test_regex_still_matches_ordinary_case_with_no_parenthetical_parties():
+    """Regression guard: the fix must not break the common, already-working
+    case with no corporate-form parentheses at all."""
+    text = "Moyo v Chikwanha (SC 45/20)"
+    m_ = CASE_CITATION_PATTERN.search(text)
+    assert m_ is not None
+    assert m_.group(1) == "Moyo v Chikwanha"
+    assert m_.group(2) == "SC 45/20"
+
+
+def test_regex_still_matches_v_with_period():
+    text = "Ndlovu v. Mangwana (HH 200-19)"
+    m_ = CASE_CITATION_PATTERN.search(text)
+    assert m_ is not None
+    assert m_.group(1) == "Ndlovu v. Mangwana"
+
+
+def test_regex_does_not_swallow_digit_bearing_citation_as_party_form():
+    """The disambiguation the whole fix relies on: a party-form
+    parenthetical is letters-only, so a digit-bearing trailing citation
+    (always the real terminator) is never mistaken for one."""
+    text = "G (Private) Limited v ZIMRA (HH 11-22)"
+    m_ = CASE_CITATION_PATTERN.search(text)
+    assert m_.group(2) == "HH 11-22"
+    assert "HH 11-22" not in m_.group(1)
+
+
+def test_inline_verification_real_case_full_form_not_flagged():
+    answer = "## G (Private) Limited v ZIMRA (HH 11-22): VAT input tax analysis\n\nThe court held that..."
+    context = (
+        "G (PRIVATE) LIMITED v ZIMRA HH 11-22 "
+        "The applicant, G (Private) Limited, sought a declaratur regarding input tax credits."
+    )
+    result, qc_log = verify_inline_case_citations(answer, context)
+    assert qc_log == []
+    assert "UNVERIFIED" not in result
+
+
+def test_inline_verification_real_case_abbreviated_form_not_flagged():
+    """Real, independent failure mode found live: even with the regex
+    fixed, a correctly-retrieved case could still false-positive purely
+    because the model wrote the full form ("Limited"/"Private") while the
+    source spells it abbreviated ("Ltd"/"Pvt"), or vice versa. Covered by
+    _normalize_case_name_abbreviations()."""
+    answer = "## G (Private) Limited v ZIMRA (HH 11-22): VAT input tax analysis\n\nThe court held that..."
+    context = (
+        "G (Pvt) Ltd v ZIMRA HH 11-22 "
+        "The applicant, G (Pvt) Ltd, sought a declaratur regarding input tax credits."
+    )
+    result, qc_log = verify_inline_case_citations(answer, context)
+    assert qc_log == []
+
+
+def test_inline_verification_real_case_context_reversed_abbreviation_not_flagged():
+    """Same abbreviation gap in the other direction: model writes the
+    abbreviated form, source spells it out in full."""
+    answer = "## G (Pvt) Ltd v ZIMRA (HH 11-22): VAT input tax analysis\n\nThe court held that..."
+    context = (
+        "G (Private) Limited v ZIMRA HH 11-22 "
+        "The applicant, G (Private) Limited, sought a declaratur regarding input tax credits."
+    )
+    result, qc_log = verify_inline_case_citations(answer, context)
+    assert qc_log == []
+
+
+def test_inline_verification_genuinely_absent_case_still_flagged():
+    """The fix must not become a rubber stamp -- a case genuinely absent
+    from the retrieved context must still be flagged."""
+    answer = "## Chirwa v ZIMRA (HH 99-23): unrelated case\n\nThe court held that..."
+    context = "G (Private) Limited v ZIMRA HH 11-22 sought a declaratur regarding input tax credits."
+    result, qc_log = verify_inline_case_citations(answer, context)
+    assert len(qc_log) == 1
+    assert qc_log[0]["case_name"] == "Chirwa v ZIMRA"
+    assert "UNVERIFIED" in result
+
+
+def test_inline_verification_real_hh1122_live_retrieval_regression():
+    """Exact regression for the live-retrieval trace run against real
+    staging data (2026-09-30): the real chunk 0 text of HH 11-22, as
+    actually ingested, must no longer flag the correctly-cited case."""
+    answer = "## G (Private) Limited v ZIMRA (HH 11-22): VAT input tax analysis\n\nThe court held that..."
+    context = (
+        "1 HH 11-22 FA 6/20 G (PRIVATE) LIMITED versus ZIMBABWE REVENUE AUTHORITY "
+        "SPECIAL COURT FOR INCOME TAX APPEALS ZIYAMBI AJ HARARE, 6 January 2022 "
+        "Income Tax Appeal D. Ochieng, for the appellant S. Bhebhe, for the "
+        "respondent ZIYAMBI AJ: [1] On 28 December 2017, the respondent's "
+        "Commissioner General (“the Commissioner”) disallowed the appellant's "
+        "objection to a number of VAT assessments made against it for the years "
+        "2015-2016 totalling US$206 880. This is an appeal against that decision "
+        "and it is brought in terms of S 33 of the Value Added Tax Act "
+        "[Chapter 23:12] (“the Act”). "
+        "In this case, ZIMRA only registered your client compulsorily after an "
+        "analysis of the nature of services rendered."
+    )
+    result, qc_log = verify_inline_case_citations(answer, context)
+    assert qc_log == []
+    assert "UNVERIFIED" not in result
