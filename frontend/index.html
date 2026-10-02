@@ -598,6 +598,14 @@ select{cursor:pointer}
     </div>
   </div>
 
+  <div class="dash-section" id="home-notifications-section" style="display:none">
+    <div class="dash-section-header">
+      <div class="dash-section-title">🔔 Notifications</div>
+      <span class="dash-section-link" onclick="markAllNotificationsRead()">Mark all read</span>
+    </div>
+    <div class="dash-section-body" id="home-notifications"></div>
+  </div>
+
   <div class="dash-section">
     <div class="dash-section-header">
       <div class="dash-section-title">🚩 Needs Attention</div>
@@ -4861,6 +4869,7 @@ async function renderDashboard() {
   _dashGreeting();
   const portfolioData = await _fetchMyPortfolioData();
   await Promise.all([
+    _homeNotifications(),
     _homeNeedsAttention(portfolioData),
     _homeUpcoming(),
     _dashActivity(),
@@ -4871,6 +4880,42 @@ async function renderDashboard() {
   _dashFees();
   _dashPracticeAreas();
   _dashCompliance();
+}
+
+// Home notifications (2026-10-02): the in-app half of "a matter was assigned
+// to / taken from you" (the email goes out separately, server-side). Shows
+// unread items; hidden entirely when there are none, so a quiet Home stays
+// quiet. Clicking one marks it read and opens its matter.
+async function _homeNotifications() {
+  const section = document.getElementById('home-notifications-section');
+  const el = document.getElementById('home-notifications');
+  if (!section || !el) return;
+  let data = null;
+  try {
+    const res = await fetch(`${API}/api/notifications`);
+    data = res.ok ? await res.json() : null;
+  } catch (e) { data = null; }
+  const unread = ((data && data.notifications) || []).filter(n => !n.read_at);
+  if (!unread.length) { section.style.display = 'none'; el.innerHTML = ''; return; }
+  section.style.display = '';
+  el.innerHTML = unread.map(n => `
+    <div class="dash-row" style="cursor:pointer" onclick="openNotification('${n.id}', ${n.matter_id ? `'${n.matter_id}'` : 'null'})">
+      <div class="dash-row-main">
+        <div class="dash-row-title" style="white-space:normal">${escHtml(n.title)}</div>
+        <div class="dash-row-meta" style="white-space:pre-line">${escHtml(n.body || '')}</div>
+      </div>
+    </div>`).join('');
+}
+
+async function openNotification(notificationId, matterId) {
+  try { await fetch(`${API}/api/notifications/${notificationId}/read`, { method: 'POST' }); } catch (e) {}
+  if (matterId && matters.some(m => m.id === matterId)) { goToMatter(matterId); return; }
+  _homeNotifications();
+}
+
+async function markAllNotificationsRead() {
+  try { await fetch(`${API}/api/notifications/read-all`, { method: 'POST' }); } catch (e) {}
+  _homeNotifications();
 }
 
 function _dashGreeting() {
@@ -6286,6 +6331,14 @@ async function updateMatterField(matterId, field, value) {
       body: JSON.stringify({ [field]: value })
     });
     updated = await res.json().catch(() => null);
+    // A refused reassignment (403) must not be mirrored into the local
+    // cache as if it had succeeded -- show the server's reason and
+    // re-render with the unchanged value.
+    if (res.status === 403) {
+      alert((updated && updated.detail) || 'You do not have permission to change this.');
+      if (_workspaceMatterId === matterId) await renderMatterPanel(matterId);
+      return;
+    }
   }
   // Merge the full server response (not just the one field) into the local
   // cache — picks up server-computed fields too, e.g. fee_balance, which

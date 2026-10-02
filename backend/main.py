@@ -1247,6 +1247,25 @@ async def run_migrations(pool: asyncpg.Pool = None):
         CREATE INDEX IF NOT EXISTS idx_audit_logs_firm ON audit_logs(firm_id);
         CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(target_type, target_id);
 
+        -- In-app notifications (2026-10-02): the Home screen's own record of
+        -- "something happened that concerns you" (first use: a matter was
+        -- assigned to / taken from you). Deliberately generic (kind + title
+        -- + body + optional matter) so later features reuse it rather than
+        -- growing a second store. Email goes out separately through
+        -- send_user_notification(); this table is only the in-app half.
+        CREATE TABLE IF NOT EXISTS user_notifications (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL,
+            title       TEXT NOT NULL,
+            body        TEXT,
+            matter_id   UUID REFERENCES matters(id) ON DELETE CASCADE,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            read_at     TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_notifications_user ON user_notifications(user_id, created_at DESC);
+
         -- RBZ compliance export audit trail — a dedicated table rather than
         -- another audit_logs row: report_history needs structured
         -- client_count/matter_count columns for the history table the
@@ -4880,6 +4899,16 @@ async def _log_compliance_event(conn, user: dict, target_type: str, target_id, a
     PATCH regardless of whether anything changed, so the history stays a
     meaningful record of real events rather than noise.
     """
+    await _log_audit_event(conn, user, target_type, target_id, action, details)
+
+
+async def _log_audit_event(conn, user: dict, target_type: str, target_id, action: str, details: dict = None):
+    """
+    Neutral audit_logs insert for events that are not compliance events
+    (first use: matter responsible-lawyer reassignment). Use a distinct
+    target_type so these never appear in the compliance-history timeline,
+    which selects by target_type='MATTER'/'CLIENT' regardless of action.
+    """
     await conn.execute(
         """INSERT INTO audit_logs (firm_id, user_id, actor_name, actor_role, action,
                                    target_type, target_id, details)
@@ -7943,6 +7972,154 @@ async def download_matter_template_excel():
                             filename="MutemoDesk_Matter_Import_Template.xlsx")
     raise HTTPException(status_code=404, detail="Template not found")
 
+def can_reassign_responsible_lawyer(actor_id, actor_role: str, owner_id, owner_role, owner_active: bool,
+                                    new_lawyer_id) -> bool:
+    """
+    Who may change a matter's responsible_lawyer_id (2026-10-02). Previously
+    any role with matter:edit could, which let anyone self-assign onto a
+    colleague's matter.
+
+    - The current responsible lawyer may always hand their own matter on.
+    - A partner or admin may reassign a matter owned by a non-partner (an
+      associate, secretary, or admin), but never another partner's matter --
+      only that partner can move it. Exception: a deactivated owner's
+      matters, which would otherwise be stuck forever.
+    - Unassigned matter: a partner/admin may assign anyone; anyone else may
+      only claim it for themselves.
+    """
+    if owner_id is None:
+        return actor_role in ("partner", "admin") or (actor_id is not None and new_lawyer_id == actor_id)
+    if actor_id is not None and owner_id == actor_id:
+        return True
+    if actor_role not in ("partner", "admin"):
+        return False
+    if not owner_active:
+        return True
+    return owner_role != "partner"
+
+
+async def create_user_notification(user_id, kind: str, title: str, body: str,
+                                   matter_id=None, send_email: bool = True) -> None:
+    """
+    One call that records the in-app (Home) notification and sends the
+    email, through the shared send_user_notification() primitive. The two
+    halves are independent -- a failed email never prevents the in-app row
+    and vice versa -- and neither ever raises into the caller, since a
+    notification problem must not fail the action that triggered it.
+    """
+    if not _db_pool or not user_id:
+        return
+    try:
+        async with _db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO user_notifications (firm_id, user_id, kind, title, body, matter_id) "
+                "VALUES ($1, $2, $3, $4, $5, $6)",
+                FIRM_ID, user_id, kind, title, body, matter_id,
+            )
+    except Exception as e:
+        print(f"[notification] in-app record failed for user {user_id}: {e}")
+    if send_email:
+        try:
+            await send_user_notification(user_id, title, body)
+        except Exception as e:
+            print(f"[notification] email failed for user {user_id}: {e}")
+
+
+async def _notify_matter_reassignment(actor: dict, matter: dict, old_owner: dict, new_owner: dict) -> None:
+    """Tells the new responsible lawyer a matter is theirs, and the previous
+    one it moved. The person who made the change is never notified of their
+    own action, and nobody is notified twice."""
+    actor_id = _uuid_mod.UUID(str(actor["id"])) if actor.get("id") else None
+    actor_name = actor.get("display_name") or "A colleague"
+    ref = matter["name"] + (f" ({matter['matter_number']})" if matter.get("matter_number") else "")
+    if new_owner["id"] != actor_id:
+        prev = f" It was previously held by {old_owner['name']}." if old_owner.get("name") else ""
+        await create_user_notification(
+            new_owner["id"], "matter_assigned", f"Matter assigned to you — {matter['name']}",
+            f"{actor_name} assigned {ref} to you as responsible lawyer.{prev}\n\n"
+            f"Open it from your Home screen in Mutemo Desk.",
+            matter_id=matter["id"],
+        )
+    if old_owner.get("id") and old_owner["id"] != actor_id and old_owner["id"] != new_owner["id"]:
+        await create_user_notification(
+            old_owner["id"], "matter_reassigned_away", f"Matter reassigned — {matter['name']}",
+            f"{actor_name} reassigned {ref} from you to {new_owner['name']}.",
+            matter_id=matter["id"],
+        )
+
+
+def _row_to_user_notification(row) -> dict:
+    d = dict(row)
+    for k in ("id", "matter_id"):
+        if d.get(k):
+            d[k] = str(d[k])
+    for k in ("created_at", "read_at"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    return d
+
+
+@app.get("/api/notifications")
+async def list_my_notifications(request: Request):
+    """The caller's own Home notifications, newest first (unread and the
+    most recent read ones), plus the unread count. Self-scoped by user id --
+    no role permission, since every user may read their own."""
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not user.get("id"):
+        return {"unread_count": 0, "notifications": []}
+    uid = _uuid_mod.UUID(str(user["id"]))
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, kind, title, body, matter_id, created_at, read_at FROM user_notifications "
+            "WHERE user_id=$1 AND firm_id=$2 ORDER BY created_at DESC LIMIT 30",
+            uid, FIRM_ID
+        )
+        unread = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM user_notifications WHERE user_id=$1 AND firm_id=$2 AND read_at IS NULL",
+            uid, FIRM_ID
+        )
+    return {"unread_count": unread["n"], "notifications": [_row_to_user_notification(r) for r in rows]}
+
+
+@app.post("/api/notifications/read-all")
+async def mark_all_notifications_read(request: Request):
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not user.get("id"):
+        return {"updated": 0}
+    async with _db_pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE user_notifications SET read_at=NOW() WHERE user_id=$1 AND firm_id=$2 AND read_at IS NULL",
+            _uuid_mod.UUID(str(user["id"])), FIRM_ID
+        )
+    return {"updated": int(result.split()[-1]) if result else 0}
+
+
+@app.post("/api/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, request: Request):
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        nid = _uuid_mod.UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="notification_id must be a valid UUID")
+    if not user.get("id"):
+        raise HTTPException(status_code=404, detail="Notification not found")
+    async with _db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE user_notifications SET read_at=COALESCE(read_at, NOW()) "
+            "WHERE id=$1 AND user_id=$2 AND firm_id=$3 RETURNING id",
+            nid, _uuid_mod.UUID(str(user["id"])), FIRM_ID
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"read": True}
+
+
 @app.patch("/api/matters/{matter_id}")
 async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
     user = await get_current_user(request)
@@ -8015,6 +8192,8 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
     # eventually does.
     fields["next_review_date"], fields["last_reviewed_date"] = _resolve_review_dates(fields.get("next_review_date"))
 
+    reassignment = None  # set below only when responsible_lawyer_id genuinely changes
+
     async with _db_pool.acquire() as conn:
         if "client_id" in fields:
             # Same UUID-typing caveat as next_deadline above, plus a firm-
@@ -8047,6 +8226,34 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             if not lawyer_row:
                 raise HTTPException(status_code=404, detail="User not found")
             fields["responsible_lawyer_id"] = lawyer_uuid
+
+            owner_row = await conn.fetchrow(
+                "SELECT m.name, m.matter_number, m.responsible_lawyer_id, u.role AS owner_role, "
+                "u.is_active AS owner_active, u.display_name AS owner_name "
+                "FROM matters m LEFT JOIN users u ON u.id = m.responsible_lawyer_id "
+                "WHERE m.id=$1 AND m.firm_id=$2",
+                _uuid_mod.UUID(matter_id), FIRM_ID
+            )
+            if not owner_row:
+                raise HTTPException(status_code=404, detail="Matter not found")
+            old_owner_id = owner_row["responsible_lawyer_id"]
+            if old_owner_id != lawyer_uuid:
+                actor_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+                if not can_reassign_responsible_lawyer(
+                    actor_id, user.get("role", "secretary"), old_owner_id, owner_row["owner_role"],
+                    bool(owner_row["owner_active"]), lawyer_uuid,
+                ):
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Only the responsible lawyer can reassign this matter "
+                               "(partners and admins can reassign matters held by non-partners).",
+                    )
+                reassignment = {
+                    "matter": {"id": _uuid_mod.UUID(matter_id), "name": owner_row["name"],
+                               "matter_number": owner_row["matter_number"]},
+                    "old_owner": {"id": old_owner_id, "name": owner_row["owner_name"]},
+                    "new_owner_id": lawyer_uuid,
+                }
 
         # Fetched before the UPDATE, only when relevant, so Part C
         # compliance history logs the real old->new transition -- not
@@ -8085,6 +8292,15 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
             f"UPDATE matters SET {set_clauses} WHERE id=$1 AND firm_id=${len(values)+2} RETURNING *",
             _uuid_mod.UUID(matter_id), *values, FIRM_ID
         )
+
+        if row and reassignment:
+            await _log_audit_event(
+                conn, user, "MATTER_ASSIGNMENT", row["id"], "RESPONSIBLE_LAWYER_CHANGED",
+                {"matter_name": reassignment["matter"]["name"],
+                 "from_user_id": str(reassignment["old_owner"]["id"]) if reassignment["old_owner"]["id"] else None,
+                 "from_name": reassignment["old_owner"]["name"],
+                 "to_user_id": str(reassignment["new_owner_id"])},
+            )
 
         if row and aml_fields_touched and before:
             new_scope = row.get("aml_scope") or "NotAssessed"
@@ -8172,6 +8388,11 @@ async def update_matter(matter_id: str, update: MatterUpdate, request: Request):
                 "completion": compute_checklist_completion([dict(r) for r in all_rows])
             }
     m["progress_notes"] = [_row_to_note(n) for n in note_rows]
+    if reassignment:
+        await _notify_matter_reassignment(
+            user, reassignment["matter"], reassignment["old_owner"],
+            {"id": reassignment["new_owner_id"], "name": m["responsible_lawyer_name"] or "a colleague"},
+        )
     return m
 
 @app.post("/api/matters/{matter_id}/notes")
