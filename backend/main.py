@@ -1266,6 +1266,34 @@ async def run_migrations(pool: asyncpg.Pool = None):
         );
         CREATE INDEX IF NOT EXISTS idx_user_notifications_user ON user_notifications(user_id, created_at DESC);
 
+        -- Matter Collaboration (2026-10-02): a matter's responsible lawyer
+        -- invites a firm colleague to confer on that one matter. This is a
+        -- coordination record (who is part of the conversation), NOT an
+        -- access grant -- every staff role already reads every matter, and
+        -- this table changes none of those permissions. Access starts
+        -- immediately (no acceptance step); a collaborator can leave, the
+        -- responsible lawyer can revoke. State is derived, not stored:
+        -- active = revoked_at IS NULL AND (expires_at IS NULL OR expires_at
+        -- > NOW()). expires_at is reserved for later; nothing sets it yet.
+        CREATE TABLE IF NOT EXISTS matter_collaborators (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            matter_id   UUID NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            invited_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+            reason      TEXT,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at  TIMESTAMPTZ,
+            revoked_at  TIMESTAMPTZ,
+            revoked_by  UUID REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_matter_collaborators_active
+            ON matter_collaborators(matter_id, user_id) WHERE revoked_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_matter_collaborators_user
+            ON matter_collaborators(user_id) WHERE revoked_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_matter_collaborators_firm
+            ON matter_collaborators(firm_id, matter_id);
+
         -- RBZ compliance export audit trail — a dedicated table rather than
         -- another audit_logs row: report_history needs structured
         -- client_count/matter_count columns for the history table the
@@ -8046,6 +8074,210 @@ async def _notify_matter_reassignment(actor: dict, matter: dict, old_owner: dict
             f"{actor_name} reassigned {ref} from you to {new_owner['name']}.",
             matter_id=matter["id"],
         )
+
+
+# ── Matter Collaboration (2026-10-02) ────────────────────────────────────────
+# The matter's RESPONSIBLE LAWYER (and only them -- not a partner/admin
+# override) invites a firm colleague to confer on that one matter. This is a
+# coordination record, not an access grant: every staff role already reads
+# every matter, and nothing here changes any existing permission. Access to
+# the collaboration itself (who is in the conversation) is what these
+# endpoints govern. Immediate -- no acceptance step; the collaborator can
+# leave, the responsible lawyer can revoke. See the matter_collaborators
+# migration comment for the derived "active" definition.
+
+COLLABORATION_REASON_MAX_LENGTH = 1000
+
+
+class CollaboratorInvite(BaseModel):
+    user_id: str
+    reason: Optional[str] = None
+
+
+def _row_to_collaborator(row) -> dict:
+    d = dict(row)
+    for k in ("id", "user_id", "matter_id"):
+        if d.get(k):
+            d[k] = str(d[k])
+    for k in ("created_at", "expires_at"):
+        if d.get(k):
+            d[k] = d[k].isoformat()
+    return d
+
+
+def _require_real_identity(user: dict) -> "_uuid_mod.UUID":
+    if not user or not user.get("id"):
+        raise HTTPException(status_code=403, detail="A real login is required for collaboration.")
+    return _uuid_mod.UUID(str(user["id"]))
+
+
+def _parse_uuid_or_400(value: str, name: str) -> "_uuid_mod.UUID":
+    try:
+        return _uuid_mod.UUID(value)
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail=f"{name} must be a valid UUID")
+
+
+@app.get("/api/colleagues")
+async def list_colleagues(request: Request):
+    """Active firm users other than the caller -- id and name only -- for the
+    collaboration invite picker. Open to every authenticated role (the
+    responsible lawyer may be an associate; GET /api/users is admin-gated)."""
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not user.get("id"):
+        return []
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, display_name FROM users WHERE firm_id=$1 AND is_active=TRUE AND id<>$2 "
+            "ORDER BY display_name",
+            FIRM_ID, _uuid_mod.UUID(str(user["id"]))
+        )
+    return [{"id": str(r["id"]), "display_name": r["display_name"]} for r in rows]
+
+
+@app.post("/api/matters/{matter_id}/collaborators", status_code=201)
+async def invite_collaborator(matter_id: str, body: CollaboratorInvite, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:edit")
+    caller_id = _require_real_identity(user)
+    mid = _parse_uuid_or_400(matter_id, "matter_id")
+    invitee_id = _parse_uuid_or_400(body.user_id, "user_id")
+    reason = (body.reason or "").strip() or None
+    if reason and len(reason) > COLLABORATION_REASON_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reason exceeds the maximum length of {COLLABORATION_REASON_MAX_LENGTH} characters",
+        )
+
+    async with _db_pool.acquire() as conn:
+        matter = await conn.fetchrow(
+            "SELECT id, name, matter_number, responsible_lawyer_id, is_sentinel FROM matters "
+            "WHERE id=$1 AND firm_id=$2",
+            mid, FIRM_ID
+        )
+        if not matter:
+            raise HTTPException(status_code=404, detail="Matter not found")
+        if matter["responsible_lawyer_id"] != caller_id:
+            raise HTTPException(status_code=403, detail="Only the responsible lawyer can invite collaborators.")
+        if matter["is_sentinel"]:
+            raise HTTPException(status_code=400, detail="This is not a client matter.")
+        if invitee_id == caller_id:
+            raise HTTPException(status_code=400, detail="You are already responsible for this matter.")
+        invitee = await conn.fetchrow(
+            "SELECT id, display_name, is_active FROM users WHERE id=$1 AND firm_id=$2",
+            invitee_id, FIRM_ID
+        )
+        if not invitee:
+            raise HTTPException(status_code=404, detail="User not found")
+        if not invitee["is_active"]:
+            raise HTTPException(status_code=400, detail="That user's account is not active.")
+        try:
+            row = await conn.fetchrow(
+                "INSERT INTO matter_collaborators (firm_id, matter_id, user_id, invited_by, reason) "
+                "VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                FIRM_ID, mid, invitee_id, caller_id, reason
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="This colleague is already collaborating on this matter.")
+        await _log_audit_event(
+            conn, user, "MATTER_COLLABORATION", row["id"], "COLLABORATOR_INVITED",
+            {"matter_id": str(mid), "matter_name": matter["name"],
+             "collaborator_user_id": str(invitee_id), "collaborator_name": invitee["display_name"],
+             "reason": reason},
+        )
+
+    actor_name = user.get("display_name") or "A colleague"
+    ref = matter["name"] + (f" ({matter['matter_number']})" if matter["matter_number"] else "")
+    await create_user_notification(
+        invitee_id, "matter_collaboration_invited",
+        f"{actor_name} invited you to collaborate — {matter['name']}",
+        f"{actor_name} invited you to collaborate on {ref}."
+        + (f"\n\nWhy: {reason}" if reason else "")
+        + "\n\nOpen it from your Home screen in Mutemo Desk.",
+        matter_id=mid,
+    )
+    out = _row_to_collaborator(row)
+    out["display_name"] = invitee["display_name"]
+    return out
+
+
+@app.get("/api/matters/{matter_id}/collaborators")
+async def list_matter_collaborators(matter_id: str, request: Request):
+    """The matter's active collaborators -- visible only to its participants
+    (the responsible lawyer and the collaborators themselves). Anyone else
+    gets an empty result, not an error and not a hint of who is involved."""
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    mid = _parse_uuid_or_400(matter_id, "matter_id")
+    caller_id = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
+    async with _db_pool.acquire() as conn:
+        matter = await conn.fetchrow(
+            "SELECT id, responsible_lawyer_id FROM matters WHERE id=$1 AND firm_id=$2", mid, FIRM_ID
+        )
+        if not matter:
+            raise HTTPException(status_code=404, detail="Matter not found")
+        rows = await conn.fetch(
+            "SELECT c.id, c.user_id, c.reason, c.created_at, c.expires_at, "
+            "u.display_name, ib.display_name AS invited_by_name "
+            "FROM matter_collaborators c JOIN users u ON u.id = c.user_id "
+            "LEFT JOIN users ib ON ib.id = c.invited_by "
+            "WHERE c.matter_id=$1 AND c.firm_id=$2 AND c.revoked_at IS NULL "
+            "AND (c.expires_at IS NULL OR c.expires_at > NOW()) ORDER BY c.created_at",
+            mid, FIRM_ID
+        )
+    can_manage = caller_id is not None and matter["responsible_lawyer_id"] == caller_id
+    mine = next((r for r in rows if caller_id is not None and r["user_id"] == caller_id), None)
+    if not (can_manage or mine):
+        return {"can_manage": False, "my_collaboration_id": None, "collaborators": []}
+    return {
+        "can_manage": can_manage,
+        "my_collaboration_id": str(mine["id"]) if mine else None,
+        "collaborators": [_row_to_collaborator(r) for r in rows],
+    }
+
+
+@app.delete("/api/matters/{matter_id}/collaborators/{collaboration_id}")
+async def revoke_collaborator(matter_id: str, collaboration_id: str, request: Request):
+    """The responsible lawyer revokes a collaborator, or a collaborator
+    leaves (revokes themselves). Takes effect immediately; the row is kept
+    with revoked_at/revoked_by as the record of when and by whom it ended."""
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    caller_id = _require_real_identity(user)
+    mid = _parse_uuid_or_400(matter_id, "matter_id")
+    cid = _parse_uuid_or_400(collaboration_id, "collaboration_id")
+    async with _db_pool.acquire() as conn:
+        matter = await conn.fetchrow(
+            "SELECT id, name, responsible_lawyer_id FROM matters WHERE id=$1 AND firm_id=$2", mid, FIRM_ID
+        )
+        if not matter:
+            raise HTTPException(status_code=404, detail="Matter not found")
+        collab = await conn.fetchrow(
+            "SELECT c.id, c.user_id, u.display_name FROM matter_collaborators c "
+            "JOIN users u ON u.id = c.user_id "
+            "WHERE c.id=$1 AND c.matter_id=$2 AND c.firm_id=$3 AND c.revoked_at IS NULL",
+            cid, mid, FIRM_ID
+        )
+        if not collab:
+            raise HTTPException(status_code=404, detail="Collaboration not found")
+        is_owner = matter["responsible_lawyer_id"] == caller_id
+        is_self = collab["user_id"] == caller_id
+        if not (is_owner or is_self):
+            raise HTTPException(status_code=403, detail="Only the responsible lawyer can revoke a collaborator.")
+        await conn.execute(
+            "UPDATE matter_collaborators SET revoked_at=NOW(), revoked_by=$1 WHERE id=$2 AND revoked_at IS NULL",
+            caller_id, cid
+        )
+        left = is_self and not is_owner
+        await _log_audit_event(
+            conn, user, "MATTER_COLLABORATION", cid,
+            "COLLABORATOR_LEFT" if left else "COLLABORATOR_REVOKED",
+            {"matter_id": str(mid), "matter_name": matter["name"],
+             "collaborator_user_id": str(collab["user_id"]), "collaborator_name": collab["display_name"]},
+        )
+    return {"revoked": True, "left": left}
 
 
 def _row_to_user_notification(row) -> dict:
