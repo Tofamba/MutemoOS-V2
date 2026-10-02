@@ -28,6 +28,7 @@ class FakeConnection:
         self.matters = matters if matters is not None else []
         self.users = users if users is not None else []
         self.org_roles = org_roles if org_roles is not None else []
+        self.executed = []
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -43,6 +44,20 @@ class FakeConnection:
             for u in self.users:
                 if u["id"] == args[0] and u["firm_id"] == args[1]:
                     return {"id": u["id"]}
+            return None
+
+        if q.startswith("SELECT m.name, m.matter_number, m.responsible_lawyer_id, u.role AS owner_role"):
+            # update_matter()'s reassignment authorization lookup.
+            for row in self.matters:
+                if row["id"] == args[0] and row["firm_id"] == args[1]:
+                    owner = next((u for u in self.users if u["id"] == row.get("responsible_lawyer_id")), None)
+                    return {
+                        "name": row["name"], "matter_number": row.get("matter_number"),
+                        "responsible_lawyer_id": row.get("responsible_lawyer_id"),
+                        "owner_role": owner.get("role") if owner else None,
+                        "owner_active": owner.get("is_active", True) if owner else None,
+                        "owner_name": owner["display_name"] if owner else None,
+                    }
             return None
 
         if q.startswith("SELECT display_name FROM users WHERE id=$1"):
@@ -84,6 +99,7 @@ class FakeConnection:
         raise NotImplementedError(f"FakeConnection.fetch: unhandled query: {q}")
 
     async def execute(self, query, *args):
+        self.executed.append((" ".join(query.split()), args))
         return "OK"
 
 
@@ -106,8 +122,8 @@ class FakePool:
         return _FakeAcquireCtx(self.conn)
 
 
-def _user_row(user_id, display_name, firm_id=FIRM_ID):
-    return {"id": user_id, "firm_id": firm_id, "display_name": display_name}
+def _user_row(user_id, display_name, firm_id=FIRM_ID, role="associate", is_active=True):
+    return {"id": user_id, "firm_id": firm_id, "display_name": display_name, "role": role, "is_active": is_active}
 
 
 def _matter_row(matter_id, firm_id=FIRM_ID, **overrides):
@@ -268,3 +284,158 @@ def test_list_matters_attaches_responsible_lawyer_name_to_each_row(monkeypatch):
     assert by_id[str(unassigned_id)]["responsible_lawyer_name"] is None
     assigned = [r for r in result if r["id"] != str(unassigned_id)][0]
     assert assigned["responsible_lawyer_name"] == "Farai Gumbo"
+
+
+# ── Reassignment authorization (2026-10-02) ─────────────────────────────────
+# Real concern: any role with matter:edit could change responsible_lawyer_id,
+# so anyone could self-assign onto a colleague's matter. Rule: the current
+# responsible lawyer may hand their matter on; a partner/admin may move a
+# NON-partner's matter but never another partner's; a deactivated owner's
+# matters are movable by a partner/admin; an unassigned matter may be
+# claimed by anyone for themselves.
+
+from backend.main import can_reassign_responsible_lawyer as _can
+
+A, B, C = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+
+@pytest.mark.parametrize("actor_id,actor_role,owner_id,owner_role,owner_active,new_id,expected", [
+    # the owner themselves, any role
+    (A, "associate", A, "associate", True, B, True),
+    (A, "secretary", A, "secretary", True, B, True),
+    (A, "partner", A, "partner", True, B, True),
+    # partner / admin over a non-partner's matter
+    (A, "partner", B, "associate", True, C, True),
+    (A, "partner", B, "secretary", True, C, True),
+    (A, "admin", B, "associate", True, C, True),
+    # never another partner's matter, even self-assigning
+    (A, "partner", B, "partner", True, C, False),
+    (A, "partner", B, "partner", True, A, False),
+    (A, "admin", B, "partner", True, C, False),
+    # non-owner associates / secretaries
+    (A, "associate", B, "associate", True, A, False),
+    (A, "secretary", B, "associate", True, C, False),
+    # deactivated owner: partner/admin may move it, others may not
+    (A, "partner", B, "partner", False, C, True),
+    (A, "admin", B, "partner", False, A, True),
+    (A, "associate", B, "partner", False, A, False),
+    # unassigned
+    (A, "partner", None, None, False, C, True),
+    (A, "admin", None, None, False, C, True),
+    (A, "associate", None, None, False, A, True),
+    (A, "associate", None, None, False, C, False),
+    (A, "secretary", None, None, False, C, False),
+    # synthetic dev user (no identity) is never "the owner"
+    (None, "partner", B, "partner", True, C, False),
+    (None, "partner", B, "associate", True, C, True),
+])
+def test_can_reassign_responsible_lawyer_matrix(actor_id, actor_role, owner_id, owner_role, owner_active, new_id, expected):
+    assert _can(actor_id, actor_role, owner_id, owner_role, owner_active, new_id) is expected
+
+
+class _Recorder:
+    """Captures what the reassignment flow would send, without any email."""
+    def __init__(self, monkeypatch, m):
+        self.emails = []
+
+        async def fake_send(user_id, subject, body, **kw):
+            self.emails.append((user_id, subject, body))
+            return True
+        monkeypatch.setattr(m, "send_user_notification", fake_send)
+
+
+def _setup(monkeypatch, owner_role="associate", actor_role="partner", owner_is_owner=False, owner_active=True):
+    import backend.main as m
+    matter_id, owner_id, actor_id, new_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    users = [
+        _user_row(owner_id, "Owner Person", role=owner_role, is_active=owner_active),
+        _user_row(actor_id, "Actor Person", role=actor_role),
+        _user_row(new_id, "New Person"),
+    ]
+    effective_owner = actor_id if owner_is_owner else owner_id
+    if owner_is_owner:
+        users[1]["role"] = owner_role  # actor == owner, so they share one role
+    pool = FakePool(matters=[_matter_row(matter_id, responsible_lawyer_id=effective_owner)], users=users)
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, {"id": actor_id, "firm_id": FIRM_ID, "role": actor_role, "display_name": "Actor Person"})
+    rec = _Recorder(monkeypatch, m)
+    return m, pool, rec, matter_id, effective_owner, actor_id, new_id
+
+
+def _inserted_notifications(pool):
+    return [args for q, args in getattr(pool.conn, "executed", []) if q.startswith("INSERT INTO user_notifications")]
+
+
+def test_associate_cannot_take_over_a_colleagues_matter(monkeypatch):
+    m, pool, rec, matter_id, owner_id, actor_id, new_id = _setup(monkeypatch, actor_role="associate")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(update_matter(str(matter_id), MatterUpdate(responsible_lawyer_id=str(actor_id)), _fake_request()))
+    assert exc.value.status_code == 403
+    assert pool.conn.matters[0]["responsible_lawyer_id"] == owner_id  # unchanged
+    assert rec.emails == [] and _inserted_notifications(pool) == []
+
+
+def test_partner_cannot_reassign_another_partners_matter(monkeypatch):
+    m, pool, rec, matter_id, owner_id, actor_id, new_id = _setup(monkeypatch, owner_role="partner", actor_role="partner")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(update_matter(str(matter_id), MatterUpdate(responsible_lawyer_id=str(new_id)), _fake_request()))
+    assert exc.value.status_code == 403
+    assert pool.conn.matters[0]["responsible_lawyer_id"] == owner_id
+
+
+def test_partner_reassigns_an_associates_matter_and_both_are_notified(monkeypatch):
+    m, pool, rec, matter_id, owner_id, actor_id, new_id = _setup(monkeypatch, owner_role="associate", actor_role="partner")
+    result = asyncio.run(update_matter(str(matter_id), MatterUpdate(responsible_lawyer_id=str(new_id)), _fake_request()))
+
+    assert result["responsible_lawyer_id"] == str(new_id)
+    # In-app (Home) notifications: new owner + previous owner, never the actor.
+    notified = {args[1]: args[2] for args in _inserted_notifications(pool)}
+    assert notified == {new_id: "matter_assigned", owner_id: "matter_reassigned_away"}
+    # Email goes to the same two people through send_user_notification.
+    assert {e[0] for e in rec.emails} == {new_id, owner_id}
+    assert all("Actor Person" in e[2] for e in rec.emails)
+    # Audit row: who moved it, from whom, to whom, under a non-compliance target.
+    audit = [a for q, a in pool.conn.executed if q.startswith("INSERT INTO audit_logs")]
+    assert len(audit) == 1
+    assert audit[0][4] == "RESPONSIBLE_LAWYER_CHANGED" and audit[0][5] == "MATTER_ASSIGNMENT"
+    assert str(owner_id) in audit[0][7] and str(new_id) in audit[0][7]
+
+
+def test_owner_handing_on_their_own_matter_notifies_only_the_new_owner(monkeypatch):
+    m, pool, rec, matter_id, owner_id, actor_id, new_id = _setup(
+        monkeypatch, owner_role="partner", actor_role="partner", owner_is_owner=True)
+    asyncio.run(update_matter(str(matter_id), MatterUpdate(responsible_lawyer_id=str(new_id)), _fake_request()))
+    assert [args[1] for args in _inserted_notifications(pool)] == [new_id]
+    assert [e[0] for e in rec.emails] == [new_id]
+
+
+def test_resaving_the_same_responsible_lawyer_is_a_silent_noop(monkeypatch):
+    m, pool, rec, matter_id, owner_id, actor_id, new_id = _setup(monkeypatch, actor_role="associate")
+    asyncio.run(update_matter(str(matter_id), MatterUpdate(responsible_lawyer_id=str(owner_id)), _fake_request()))
+    assert rec.emails == [] and _inserted_notifications(pool) == []
+    assert not [q for q, a in pool.conn.executed if q.startswith("INSERT INTO audit_logs")]
+
+
+def test_associate_may_claim_an_unassigned_matter_for_themselves(monkeypatch):
+    import backend.main as m
+    matter_id, actor_id = uuid.uuid4(), uuid.uuid4()
+    pool = FakePool(matters=[_matter_row(matter_id, responsible_lawyer_id=None)],
+                    users=[_user_row(actor_id, "Actor Person")])
+    monkeypatch.setattr(m, "_db_pool", pool)
+    _as_current_user(monkeypatch, m, {"id": actor_id, "firm_id": FIRM_ID, "role": "associate", "display_name": "Actor Person"})
+    rec = _Recorder(monkeypatch, m)
+    result = asyncio.run(update_matter(str(matter_id), MatterUpdate(responsible_lawyer_id=str(actor_id)), _fake_request()))
+    assert result["responsible_lawyer_id"] == str(actor_id)
+    assert rec.emails == []  # nobody to tell: they assigned it to themselves
+
+
+def test_notification_failure_never_fails_the_reassignment(monkeypatch):
+    m, pool, rec, matter_id, owner_id, actor_id, new_id = _setup(monkeypatch, actor_role="partner")
+
+    async def boom(*a, **k):
+        raise RuntimeError("resend down")
+    monkeypatch.setattr(m, "send_user_notification", boom)
+
+    result = asyncio.run(update_matter(str(matter_id), MatterUpdate(responsible_lawyer_id=str(new_id)), _fake_request()))
+    assert result["responsible_lawyer_id"] == str(new_id)
+    assert len(_inserted_notifications(pool)) == 2  # in-app records still written
