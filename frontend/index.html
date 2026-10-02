@@ -5874,6 +5874,71 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers) {
     </div>`;
 }
 
+// Collaborators (2026-10-02). Shown only to the matter's participants: the
+// responsible lawyer (who can invite/remove) and the collaborators
+// themselves (who can leave). A coordination record -- it does not change
+// anyone's access to the matter.
+function _matterCollaboratorsHtml(id, data, colleagues) {
+  if (!data || !(data.can_manage || data.my_collaboration_id)) return '';
+  const rows = (data.collaborators || []).map(c => {
+    const isMe = c.id === data.my_collaboration_id;
+    const action = data.can_manage
+      ? `<button class="btn btn-sm btn-outline" onclick="revokeCollaborator('${id}','${c.id}',false)">Remove</button>`
+      : (isMe ? `<button class="btn btn-sm btn-outline" onclick="revokeCollaborator('${id}','${c.id}',true)">Leave</button>` : '');
+    return `
+      <div class="dash-row">
+        <div class="dash-row-main">
+          <div class="dash-row-title">${escHtml(c.display_name || 'Unnamed')}${isMe ? ' (you)' : ''}</div>
+          <div class="dash-row-meta" style="white-space:normal">${c.reason ? escHtml(c.reason) + ' · ' : ''}invited ${escHtml((c.created_at || '').slice(0, 10))}${c.invited_by_name ? ' by ' + escHtml(c.invited_by_name) : ''}</div>
+        </div>
+        ${action}
+      </div>`;
+  }).join('');
+  const taken = new Set((data.collaborators || []).map(c => c.user_id));
+  const invite = data.can_manage ? `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <select id="collab-user-${id}" style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)">
+        <option value="">— Invite a colleague —</option>
+        ${(colleagues || []).filter(u => !taken.has(u.id)).map(u => `<option value="${u.id}">${escHtml(u.display_name || 'Unnamed')}</option>`).join('')}
+      </select>
+      <input type="text" id="collab-reason-${id}" maxlength="1000" placeholder="Why? e.g. labour law angle on the dismissal"
+        style="flex:1;min-width:200px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"/>
+      <button class="btn btn-sm btn-primary" style="width:auto" onclick="inviteCollaborator('${id}')">Invite</button>
+    </div>` : '';
+  return `
+    <div class="matter-section" style="background:var(--white)">
+      <div class="matter-section-title">🤝 Collaborators</div>
+      <div style="font-size:0.74rem;color:var(--ink3);margin-bottom:6px">Colleagues invited to confer on this matter. They are notified; this does not change anyone's access.</div>
+      ${rows || '<div class="dash-empty">No collaborators yet.</div>'}
+      ${invite}
+    </div>`;
+}
+
+async function inviteCollaborator(matterId) {
+  const sel = document.getElementById(`collab-user-${matterId}`);
+  const reasonEl = document.getElementById(`collab-reason-${matterId}`);
+  if (!sel || !sel.value) { alert('Choose a colleague first.'); return; }
+  const res = await fetch(`${API}/api/matters/${matterId}/collaborators`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ user_id: sel.value, reason: reasonEl && reasonEl.value.trim() ? reasonEl.value.trim() : null }),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) { alert((data && data.detail) || 'Could not send the invitation.'); return; }
+  await renderMatterPanel(matterId);
+}
+
+async function revokeCollaborator(matterId, collaborationId, isSelf) {
+  if (!confirm(isSelf ? 'Leave this collaboration?' : 'Remove this collaborator?')) return;
+  const res = await fetch(`${API}/api/matters/${matterId}/collaborators/${collaborationId}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    alert((data && data.detail) || 'Could not update the collaboration.');
+    return;
+  }
+  await renderMatterPanel(matterId);
+}
+
 // Jumps from a matter's Overview to that linked client's own detail view —
 // the reverse direction of goToMatter() (client -> matter). Needs a real
 // fetch (openClientDetail), not just a tab switch, since the Clients tab's
@@ -5916,12 +5981,21 @@ async function renderMatterPanel(id) {
     // never makes this call at all, matching list_matters()' own "only
     // matters actually flagged" batching stance server-side.
     const isTitleDeeds = matter.matter_type === 'title_deeds_validation';
-    const [docsRes, clientRes, usersRes, checklistRes] = await Promise.all([
+    // Collaborators (2026-10-02): who is conferring on this matter -- the
+    // list is only ever returned to its participants; the colleague picker
+    // is only fetched for the responsible lawyer, the only person who can
+    // invite.
+    const isResponsible = !!window._userId && matter.responsible_lawyer_id === window._userId;
+    const [docsRes, clientRes, usersRes, checklistRes, collabRes, colleaguesRes] = await Promise.all([
       fetch(`${API}/api/matters/${id}/documents`),
       matter.client_id ? fetch(`${API}/api/clients/${matter.client_id}`) : Promise.resolve(null),
       fetch(`${API}/api/users`),
       isTitleDeeds ? fetch(`${API}/api/matters/${id}/checklist`) : Promise.resolve(null),
+      fetch(`${API}/api/matters/${id}/collaborators`),
+      isResponsible ? fetch(`${API}/api/colleagues`) : Promise.resolve(null),
     ]);
+    const collabData = collabRes.ok ? await collabRes.json() : null;
+    const colleagues = (colleaguesRes && colleaguesRes.ok) ? await colleaguesRes.json() : [];
     const docs = await docsRes.json();
     // Cached so _matterNoteToggleExpand() can re-render just the notes
     // list on a Read-more click without a full renderMatterPanel()
@@ -5939,6 +6013,7 @@ async function renderMatterPanel(id) {
     const notes = matter.progress_notes || [];
     const html = `
       ${_matterOverviewHtml(matter, id, linkedClient, availableUsers)}
+      ${_matterCollaboratorsHtml(id, collabData, colleagues)}
       ${matterStageTrackerHtml(matter)}
 
       <!-- Matter metadata controls -->
