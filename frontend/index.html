@@ -1002,6 +1002,23 @@ select{cursor:pointer}
     </div>
   </div>
 
+  <!-- Scope (2026-10-02): My Matters by default for everyone, partners
+       included. Other Matters (partner/admin only) lets them pick ONE
+       colleague and view that person's matters -- an explicit choice, not
+       a firm-wide dump. A view default only; permissions are unchanged. -->
+  <div id="matters-scope-bar" style="display:flex;gap:8px;margin-bottom:0.75rem;flex-wrap:wrap;align-items:center">
+    <button id="matters-scope-mine" onclick="setMattersScope('mine')"
+      style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+      👤 My Matters <span id="matters-scope-mine-count" style="font-weight:400;opacity:0.8"></span>
+    </button>
+    <button id="matters-scope-other" onclick="setMattersScope('other')"
+      style="display:none;padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+      👥 Other Matters
+    </button>
+    <select id="matters-other-colleague" onchange="setMattersOtherColleague(this.value)"
+      style="display:none;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:0.8rem;background:var(--paper)"></select>
+  </div>
+
   <!-- Matters Search -- first thing under the header now that Bulk
        Import no longer sits between them. -->
   <div style="margin-bottom:1rem;display:flex;gap:8px;align-items:center">
@@ -3301,6 +3318,94 @@ async function loadMatters() {
   } catch(e) { console.error('Could not load matters:', e); }
 }
 
+// "Mine" for a matter (2026-10-02): its responsible lawyer, falling back to
+// whoever created it when none is set. Replaces the older created_by-only
+// convention for matters -- a reassigned matter now moves into its new
+// owner's My Matters/Home (matching the "assigned to you" notification).
+// My Clients and the backend My Portfolio counts still use created_by.
+function matterOwnerId(m) { return m.responsible_lawyer_id || m.created_by || null; }
+function isMyMatter(m) { return !!window._userId && matterOwnerId(m) === window._userId; }
+
+// Matters tab scope (2026-10-02). 'mine' is the default for everyone,
+// partners included. 'other' (partner/admin only -- the same role set that
+// already gets /api/users) shows ONE chosen colleague's matters, never a
+// firm-wide dump. This is a default-view choice, not access control:
+// GET /api/matters still returns the full list and permissions are
+// unchanged. With no real login identity (AUTH_ENABLED=False) the tab shows
+// every matter, as the Clients tab does.
+let _mattersScope = null;          // 'mine' | 'other' | null (unset -> 'mine')
+let _mattersOtherUserId = '';
+let _mattersColleagues = null;     // [{id, display_name, is_active}], loaded lazily
+
+function canViewOtherMatters() {
+  return !!window._userId && (window._userRole === 'partner' || window._userRole === 'admin');
+}
+
+function scopedMattersList() {
+  if (!window._userId) return matters;
+  if (_mattersScope === 'other' && canViewOtherMatters()) {
+    return _mattersOtherUserId ? matters.filter(m => matterOwnerId(m) === _mattersOtherUserId) : [];
+  }
+  return matters.filter(isMyMatter);
+}
+
+async function _loadMattersColleagues() {
+  if (_mattersColleagues !== null) return;
+  try {
+    const res = await fetch(`${API}/api/users`);
+    const users = res.ok ? await res.json() : [];
+    _mattersColleagues = users
+      .filter(u => u.id !== window._userId)
+      .sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''));
+  } catch (e) { _mattersColleagues = []; }
+}
+
+async function setMattersScope(scope) {
+  _mattersScope = scope;
+  const searchBox = document.getElementById('matters-search');
+  if (searchBox) searchBox.value = '';
+  if (scope === 'other') await _loadMattersColleagues();
+  renderMattersList();
+}
+
+function setMattersOtherColleague(userId) {
+  _mattersOtherUserId = userId || '';
+  const searchBox = document.getElementById('matters-search');
+  if (searchBox) searchBox.value = '';
+  renderMattersList();
+}
+
+function _renderMattersScopeBar() {
+  const bar = document.getElementById('matters-scope-bar');
+  if (!bar) return;
+  const hasIdentity = !!window._userId;
+  bar.style.display = hasIdentity ? 'flex' : 'none';
+  const otherBtn = document.getElementById('matters-scope-other');
+  if (otherBtn) otherBtn.style.display = canViewOtherMatters() ? '' : 'none';
+  [['matters-scope-mine', 'mine'], ['matters-scope-other', 'other']].forEach(([id, scope]) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    const active = _mattersScope === scope;
+    btn.style.background = active ? 'var(--green)' : 'var(--paper2)';
+    btn.style.color = active ? 'white' : 'var(--ink2)';
+    btn.style.borderColor = active ? 'var(--green)' : 'var(--border)';
+  });
+  const mineCountEl = document.getElementById('matters-scope-mine-count');
+  if (mineCountEl) mineCountEl.textContent = `(${matters.filter(isMyMatter).length})`;
+  const sel = document.getElementById('matters-other-colleague');
+  if (sel) {
+    const show = _mattersScope === 'other' && canViewOtherMatters();
+    sel.style.display = show ? '' : 'none';
+    if (show) {
+      sel.innerHTML = '<option value="">— Choose a colleague —</option>' + (_mattersColleagues || []).map(u => {
+        const n = matters.filter(m => matterOwnerId(m) === u.id).length;
+        return `<option value="${u.id}">${escHtml(u.display_name || 'Unnamed')}${u.is_active === false ? ' (inactive)' : ''} · ${n}</option>`;
+      }).join('');
+      sel.value = _mattersOtherUserId;
+    }
+  }
+}
+
 // Generic alphabetical-select-with-live-search machinery, shared by every
 // "pick one of these records" dropdown (matters, clients, ...). Each entity
 // supplies its own placeholder map, sort/filter text, and option label —
@@ -4930,8 +5035,8 @@ function _dashGreeting() {
 // already-computed value: review_status and compliance_actions both come
 // straight from GET /api/my-portfolio (the same self-scoped aggregation
 // rendered in full in the My Portfolio Details section below), and
-// "deadlines due soon" applies the same created_by ownership filter My
-// Clients/My Portfolio already use to the in-memory `matters` array's own
+// "deadlines due soon" applies the same ownership filter as the Matters tab's
+// My Matters (isMyMatter: responsible lawyer, else creator) to the in-memory `matters` array's own
 // next_deadline field (identical overdue/due-soon thresholds to
 // _dashStats' firm-wide split below, just scoped to this lawyer). Nothing
 // here is a new aggregation -- see the integrity rule this fix was built
@@ -4949,7 +5054,7 @@ async function _homeNeedsAttention(portfolioData) {
 
   const today = new Date(); today.setHours(0,0,0,0);
   const myDeadlines = matters
-    .filter(m => m.created_by === window._userId && m.next_deadline && (m.status || 'Active') !== 'Closed' && !m.is_sentinel)
+    .filter(m => isMyMatter(m) && m.next_deadline && (m.status || 'Active') !== 'Closed' && !m.is_sentinel)
     .map(m => ({ m, days: Math.round((new Date(m.next_deadline + 'T00:00:00') - today) / 86400000) }))
     .filter(({ days }) => days <= 7)
     .sort((a, b) => a.days - b.days);
@@ -5070,8 +5175,8 @@ function _dashDeadlines() {
 // "Your Recent Activity" (UX audit fix #4/#5) -- same merge/sort shape as
 // before (progress notes already attached per-matter on the in-memory
 // `matters` array, merged with GET /api/documents/recent), now filtered to
-// this lawyer's own matters (created_by, same ownership convention as My
-// Clients/My Portfolio) instead of the whole firm's. The document-recent
+// this lawyer's own matters (isMyMatter: responsible lawyer, else creator,
+// same as the Matters tab's My Matters) instead of the whole firm's. The document-recent
 // limit is raised from 8 to 20 since it's now filtered client-side down to
 // one lawyer's own matters -- the firm-wide top 8 could otherwise miss
 // this lawyer's own activity entirely.
@@ -5079,7 +5184,7 @@ async function _dashActivity() {
   const el = document.getElementById('dash-activity');
   if (!window._userId) { el.innerHTML = '<div class="dash-empty">No real login session to scope this to yet.</div>'; return; }
 
-  const myMatterIds = new Set(matters.filter(m => m.created_by === window._userId).map(m => m.id));
+  const myMatterIds = new Set(matters.filter(isMyMatter).map(m => m.id));
 
   let docs = [];
   try {
@@ -5397,8 +5502,13 @@ function renderMattersList(filtered = null) {
   const countEl = document.getElementById('matters-count');
   if (!el) return;
 
+  if (_mattersScope === null) _mattersScope = 'mine';
+  if (_mattersScope === 'other' && !canViewOtherMatters()) _mattersScope = 'mine';
+  _renderMattersScopeBar();
+  const scoped = scopedMattersList();
+
   // Sort by last_activity descending (most recent first)
-  const sorted = [...matters].sort((a, b) => {
+  const sorted = [...scoped].sort((a, b) => {
     const aDate = a.last_activity || a.created_at || '';
     const bDate = b.last_activity || b.created_at || '';
     return bDate.localeCompare(aDate);
@@ -5407,7 +5517,7 @@ function renderMattersList(filtered = null) {
   // Use filtered list if searching, otherwise show top 10
   const isSearching = filtered !== null;
   const displayList = isSearching ? filtered : sorted.slice(0, 10);
-  const total = matters.length;
+  const total = scoped.length;
   const showing = displayList.length;
 
   // Update count display
@@ -5420,9 +5530,19 @@ function renderMattersList(filtered = null) {
   }
 
   if (!displayList.length) {
-    el.innerHTML = isSearching
-      ? '<div class="empty-state"><p>No matters match your search.</p></div>'
-      : '<div class="empty-state"><div class="icon">📂</div><p>No matters yet. Upload documents or use Bulk Import to get started.</p></div>';
+    let msg;
+    if (isSearching) {
+      msg = '<div class="empty-state"><p>No matters match your search.</p></div>';
+    } else if (window._userId && _mattersScope === 'other' && !_mattersOtherUserId) {
+      msg = '<div class="empty-state"><div class="icon">👥</div><p>Choose a colleague above to see their matters.</p></div>';
+    } else if (window._userId && _mattersScope === 'other') {
+      msg = '<div class="empty-state"><div class="icon">📂</div><p>This colleague has no matters.</p></div>';
+    } else if (window._userId && matters.length) {
+      msg = `<div class="empty-state"><div class="icon">📂</div><p>No matters are assigned to you yet.${canViewOtherMatters() ? ' Use Other Matters to look at a colleague\'s.' : ''}</p></div>`;
+    } else {
+      msg = '<div class="empty-state"><div class="icon">📂</div><p>No matters yet. Upload documents or use Bulk Import to get started.</p></div>';
+    }
+    el.innerHTML = msg;
     return;
   }
 
@@ -5479,7 +5599,7 @@ function filterMatters(query) {
     return;
   }
   const q = query.toLowerCase();
-  const filtered = matters.filter(m =>
+  const filtered = scopedMattersList().filter(m =>
     (m.name || '').toLowerCase().includes(q) ||
     (m.internal_ref || '').toLowerCase().includes(q) ||
     (m.external_ref || '').toLowerCase().includes(q) ||
@@ -7585,13 +7705,13 @@ let calEvents = [];
 // isSynthetic check) so these can never be mistaken for a deletable/
 // inviteable/rescheduleable real row.
 // ownerId (optional, UX audit fix #4/#5 -- Home's "My Next Matters") scopes
-// this to one lawyer's own matters via the same created_by convention as
-// the My Clients toggle/My Portfolio; Calendar's own call above passes no
+// this to one lawyer's own matters via matterOwnerId (responsible lawyer,
+// else creator -- same as My Matters); Calendar's own call above passes no
 // argument and stays firm-wide, unchanged.
 function _matterDeadlineSyntheticEvents(ownerId) {
   return matters
     .filter(m => m.next_deadline && (m.status || 'Active') !== 'Closed' && !m.is_sentinel)
-    .filter(m => !ownerId || m.created_by === ownerId)
+    .filter(m => !ownerId || matterOwnerId(m) === ownerId)
     .map(m => ({
       _matterId: m.id,
       event_type: 'deadline',
