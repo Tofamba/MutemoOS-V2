@@ -1990,7 +1990,8 @@ def _send_email_otp(email: str, code: str) -> bool:
     )
     text_body = f"Your Mutemo Desk login code is {code}. It expires in 5 minutes."
     try:
-        _send_via_resend_sync(email, subject, html_body, text_body)
+        message_id = _send_via_resend_sync(email, subject, html_body, text_body)
+        print(f"[otp] Resend accepted OTP email: resend_id={message_id or '-'}")
         return True
     except Exception as e:
         print(f"[otp] Email send failed: {e}")
@@ -2065,7 +2066,11 @@ def _send_otp_code(
             channels_sent.append("email")
         else:
             print(f"[otp] Email send failed for {phone}")
+    else:
+        print(f"[otp] Email not attempted for {phone}: "
+              f"email_on_file={bool(email)} email_configured={_EMAIL_OTP_CONFIGURED}")
 
+    print(f"[otp] Delivery summary for {phone}: channels_sent={'+'.join(channels_sent) or 'none'}")
     if not channels_sent:
         print(f"[otp] No delivery channel succeeded for {phone} "
               f"(no email on file or email send failed, and SMS unconfigured or failed)")
@@ -17559,6 +17564,10 @@ def _send_via_resend_sync(to: str, subject: str, html_body: str, text_body: str,
         )
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Resend API error {resp.status_code}: {resp.text}")
+        try:
+            return resp.json().get("id")
+        except Exception:
+            return None
 
 # ── Shared notification primitive (2026-09-13) ──────────────────────────────
 # Extracted from the deadline reminder engine's own inline sending logic

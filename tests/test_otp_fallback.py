@@ -172,6 +172,40 @@ def test_returns_none_when_email_configured_but_no_email_on_file(monkeypatch):
 # slow SMS network should have a working email already on the way, not
 # have to wait and hope, then manually request a fallback.
 
+# ── Delivery observability (2026-10-02) ─────────────────────────────────────
+# Real incident: an OTP "never arrived" and the logs couldn't say whether the
+# email was attempted at all -- success was never logged, and a skipped email
+# (no address on file) was indistinguishable from an accepted one.
+
+def test_email_skipped_is_logged_with_reason_when_no_email_on_file(monkeypatch, capsys):
+    import backend.main as m
+    _configure(monkeypatch, africastalking=True, email=True)
+    monkeypatch.setattr(m, "_send_sms_via_africastalking", lambda phone, code, result_detail=None: True)
+
+    _send_otp_code("+263771234567", None, "123456")
+
+    out = capsys.readouterr().out
+    assert "Email not attempted for +263771234567: email_on_file=False email_configured=True" in out
+    assert "Delivery summary for +263771234567: channels_sent=sms" in out
+
+
+def test_email_success_logs_resend_message_id(monkeypatch, capsys):
+    import backend.main as m
+    monkeypatch.setattr(m, "_send_via_resend_sync", lambda *a, **k: "re_abc123")
+
+    assert m._send_email_otp("user@example.com", "123456") is True
+
+    assert "Resend accepted OTP email: resend_id=re_abc123" in capsys.readouterr().out
+
+
+def test_summary_logged_when_nothing_sent(monkeypatch, capsys):
+    _configure(monkeypatch)
+
+    assert _send_otp_code("+263771234567", None, "123456") is None
+
+    assert "channels_sent=none" in capsys.readouterr().out
+
+
 def test_sms_and_email_both_sent_when_both_configured_and_succeed(monkeypatch):
     import backend.main as m
     _configure(monkeypatch, whatsapp=False, africastalking=True, twilio=False, email=True)
