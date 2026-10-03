@@ -336,6 +336,40 @@ select{cursor:pointer}
 .matter-section:last-child{border-bottom:none}
 .matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
 
+/* ── Matter Workspace Phase 2A (2026-10-03): persistent header, tabs, cards ── */
+.mw-header{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.9rem 1.1rem;margin-bottom:0.9rem}
+.mw-header-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.mw-title{font-size:1.2rem;margin:0 0 4px;line-height:1.25;word-break:break-word}
+.mw-meta{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:0.8rem;color:var(--ink2)}
+.mw-sub{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:6px;font-size:0.76rem;color:var(--ink3)}
+.mw-actions{display:flex;gap:8px;align-items:center;position:relative;flex-shrink:0}
+.mw-more-menu{display:none;position:absolute;right:0;top:100%;margin-top:4px;background:var(--white);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.14);min-width:200px;z-index:30;overflow:hidden}
+.mw-more-menu.open{display:block}
+.mw-more-menu button{display:block;width:100%;text-align:left;padding:9px 14px;border:0;background:none;cursor:pointer;font-size:0.82rem;font-family:var(--font-sans);color:var(--ink)}
+.mw-more-menu button:hover{background:var(--paper2)}
+.mw-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:1rem;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+.mw-tab{padding:9px 14px;border:0;background:none;cursor:pointer;font-size:0.84rem;font-weight:600;font-family:var(--font-sans);color:var(--ink3);border-bottom:2px solid transparent;margin-bottom:-1px;flex-shrink:0}
+.mw-tab:hover{color:var(--ink)}
+.mw-tab.active{color:var(--green);border-bottom-color:var(--green)}
+.mw-panel{display:none}
+.mw-panel.active{display:block}
+.mw-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:12px}
+.mw-card{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.85rem 1rem;min-width:0}
+.mw-card-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.6rem}
+.mw-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;font-size:0.8rem;color:var(--ink2)}
+.mw-lbl{font-size:0.68rem;color:var(--ink3);font-weight:600;text-transform:uppercase;letter-spacing:0.4px;min-width:76px}
+.mw-collapsible{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.75rem 1rem;margin-bottom:10px}
+.mw-collapsible-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.mw-collapsible .mw-summary{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:0.8rem;color:var(--ink2)}
+.mw-collapsible .mw-edit{margin-top:10px}
+.mw-edit .matter-section{border:none;padding:0}
+.mw-fees-panel{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.75rem 1rem;margin-bottom:12px}
+.mw-doc-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.mw-doc-filters input,.mw-doc-filters select{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper);font-family:var(--font-sans);width:auto}
+.mw-doc-filters input{flex:1 1 200px;min-width:180px}
+.mw-info{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid var(--ink3);color:var(--ink3);font-size:0.62rem;font-weight:700;cursor:help;margin-left:4px;text-transform:none;letter-spacing:0}
+@media (max-width:760px){.mw-cards{grid-template-columns:1fr}.mw-title{font-size:1.05rem}}
+
 /* ── Matter Progress Tracker (visual stepper) ── */
 .stage-tracker{display:flex;align-items:flex-start;overflow-x:auto;padding:4px 2px 6px}
 .stage-node{flex:1;min-width:88px;display:flex;flex-direction:column;align-items:center;position:relative;text-align:center}
@@ -1053,11 +1087,10 @@ select{cursor:pointer}
           style="font-size:0.9rem;font-weight:700;padding:0.65rem 1.3rem;margin-bottom:1.1rem">
     ← Back to Matters
   </button>
-  <div class="section-head" style="margin-bottom:1rem">
-    <h2 id="matter-workspace-title" style="margin-bottom:2px"></h2>
-    <p id="matter-workspace-subtitle" style="margin-bottom:2px;color:var(--ink3)"></p>
-    <p id="matter-workspace-client" style="color:var(--ink3);font-size:0.85rem"></p>
-  </div>
+  <!-- Phase 2A (2026-10-03): persistent header above every tab; rendered by
+       _renderMatterHeader() -- instantly from the loaded matter, then again
+       once the linked client (compliance chip) has loaded. -->
+  <div id="matter-workspace-header"></div>
   <div id="matter-workspace-body"></div>
 </div>
 
@@ -3994,8 +4027,8 @@ function backToClientsList() {
 // Matters tab, filter the list down to just this one, and expand it
 // inline; now just opens the workspace directly (2026-09-24 conversion,
 // see openMatterWorkspace()).
-function goToMatter(matterId) {
-  openMatterWorkspace(matterId, null);
+function goToMatter(matterId, tab) {
+  openMatterWorkspace(matterId, null, tab);
 }
 
 // Same as goToMatter(), but remembers which client this matter was opened
@@ -5065,7 +5098,7 @@ async function _homeNotifications() {
   if (!unread.length) { section.style.display = 'none'; el.innerHTML = ''; return; }
   section.style.display = '';
   el.innerHTML = unread.map(n => `
-    <div class="dash-row" style="cursor:pointer" onclick="openNotification('${n.id}', ${n.matter_id ? `'${n.matter_id}'` : 'null'})">
+    <div class="dash-row" style="cursor:pointer" onclick="openNotification('${n.id}', ${n.matter_id ? `'${n.matter_id}'` : 'null'}, '${escHtml(n.kind || '')}')">
       <div class="dash-row-main">
         <div class="dash-row-title" style="white-space:normal">${escHtml(n.title)}</div>
         <div class="dash-row-meta" style="white-space:pre-line">${escHtml(n.body || '')}</div>
@@ -5073,9 +5106,12 @@ async function _homeNotifications() {
     </div>`).join('');
 }
 
-async function openNotification(notificationId, matterId) {
+async function openNotification(notificationId, matterId, kind) {
   try { await fetch(`${API}/api/notifications/${notificationId}/read`, { method: 'POST' }); } catch (e) {}
-  if (matterId && matters.some(m => m.id === matterId)) { goToMatter(matterId); return; }
+  // Collaboration notifications land on the Collaboration tab (where the
+  // discussion now lives); everything else opens the matter on Overview.
+  const tab = (kind === 'collaboration_message' || kind === 'matter_collaboration_invited') ? 'collaboration' : undefined;
+  if (matterId && matters.some(m => m.id === matterId)) { goToMatter(matterId, tab); return; }
   _homeNotifications();
 }
 
@@ -5695,20 +5731,131 @@ let _workspaceMatterId = null;
 // workspace so the original origin survives the round trip.
 let _matterWorkspaceOrigin = null;
 
-function openMatterWorkspace(id, origin) {
+// Phase 2A (2026-10-03): tabbed workspace. All tab panels are rendered into
+// the DOM at once and shown/hidden (never destroyed per tab), so every fixed
+// element id and inline handler keeps working; the active tab, expanded
+// edit sections and the Fees panel are remembered per matter across the
+// full re-renders that follow every save, note, invite, revoke or message.
+const MW_TABS = [
+  ['overview', 'Overview'], ['documents', 'Documents'], ['activity', 'Activity'],
+  ['deadlines', 'Deadlines'], ['research', 'Research'], ['drafting', 'Drafting'],
+  ['collaboration', 'Collaboration'],
+];
+let _matterActiveTabs = {};
+let _mwEditOpen = {};        // `${matterId}:${section}` -> true while its edit controls are revealed
+let _mwFeesOpen = {};
+let _mwCollabManageOpen = {};
+
+function mwSetTab(id, tab) {
+  _matterActiveTabs[id] = tab;
+  const root = document.getElementById(`docs-content-${id}`);
+  if (!root) return;
+  root.querySelectorAll('.mw-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  root.querySelectorAll('.mw-panel').forEach(p => p.classList.toggle('active', p.dataset.tab === tab));
+}
+
+function mwToggleEdit(id, section) {
+  const key = `${id}:${section}`;
+  _mwEditOpen[key] = !_mwEditOpen[key];
+  const root = document.getElementById(`mw-${section}-${id}`);
+  if (!root) return;
+  const open = !!_mwEditOpen[key];
+  root.querySelector('.mw-summary').style.display = open ? 'none' : '';
+  root.querySelector('.mw-edit').style.display = open ? '' : 'none';
+  root.querySelector('.mw-edit-btn').textContent = open ? 'Done' : root.dataset.editLabel;
+}
+
+// One collapsed-by-default section: compact read-only summary, with the
+// section's EXISTING controls (unchanged markup, ids and handlers) revealed
+// inline by its Edit button -- never a modal, so nothing is moved or rebuilt.
+function mwCollapsible(id, section, title, editLabel, summaryHtml, editHtml) {
+  const open = !!_mwEditOpen[`${id}:${section}`];
+  return `
+    <div class="mw-collapsible" id="mw-${section}-${id}" data-edit-label="${escHtml(editLabel)}">
+      <div class="mw-collapsible-head">
+        <div class="matter-section-title" style="margin:0">${title}</div>
+        <button class="btn btn-sm btn-outline mw-edit-btn" style="width:auto" onclick="mwToggleEdit('${id}','${section}')">${open ? 'Done' : escHtml(editLabel)}</button>
+      </div>
+      <div class="mw-summary" style="${open ? 'display:none' : ''}">${summaryHtml}</div>
+      <div class="mw-edit" style="${open ? '' : 'display:none'}">${editHtml}</div>
+    </div>`;
+}
+
+function mwToggleMore(ev) {
+  if (ev) ev.stopPropagation();
+  const menu = document.getElementById('mw-more-menu');
+  if (menu) menu.classList.toggle('open');
+}
+document.addEventListener('click', () => {
+  const menu = document.getElementById('mw-more-menu');
+  if (menu) menu.classList.remove('open');
+});
+
+function mwOpenFees(id) {
+  _mwFeesOpen[id] = true;
+  const panel = document.getElementById(`mw-fees-${id}`);
+  if (panel) { panel.style.display = 'block'; panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+}
+function mwCloseFees(id) {
+  _mwFeesOpen[id] = false;
+  const panel = document.getElementById(`mw-fees-${id}`);
+  if (panel) panel.style.display = 'none';
+}
+
+// Persistent header (2026-10-03): everything here is already on the loaded
+// matter (name, practice area, status, client name, responsible lawyer,
+// next action, last activity); only the client's compliance chip needs the
+// linked-client fetch, so it is added when that arrives. No new endpoint.
+function _renderMatterHeader(matter, linkedClient) {
+  const el = document.getElementById('matter-workspace-header');
+  if (!el) return;
+  const id = matter.id;
+  const status = matter.status || 'Active';
+  const ref = matter.internal_ref || matter.number || '';
+  const refLine = [ref, matter.external_ref || ''].filter(Boolean).join(' · ');
+  const clientName = linkedClient ? linkedClient.full_name : matter.client_name;
+  const lastActivity = matter.last_activity ? matter.last_activity.slice(0, 10) : '';
+  const sep = '<span style="color:var(--ink3)">·</span>';
+  const bits = [
+    matter.practice_area ? escHtml(matter.practice_area) : '',
+    `<span class="chip ${STATUS_COLORS[status] || 'chip-gray'}">${escHtml(status)}</span>`,
+    clientName ? `${escHtml(clientName)}${linkedClient ? ' ' + complianceStatusChipHtml(linkedClient.compliance_status) : ''}` : '',
+    matter.responsible_lawyer_name ? `Responsible: ${escHtml(matter.responsible_lawyer_name)}` : 'Responsible: not assigned',
+  ].filter(Boolean);
+  el.innerHTML = `
+    <div class="mw-header">
+      <div class="mw-header-top">
+        <div style="min-width:0;flex:1">
+          <h2 class="mw-title">${escHtml(matter.name)}</h2>
+          <div class="mw-meta">${bits.join(` ${sep} `)}</div>
+        </div>
+        <div class="mw-actions">
+          ${matter.client_id ? `<button class="btn btn-outline btn-sm" style="width:auto" onclick="goToClientFromMatter('${matter.client_id}','${id}')">View Client →</button>` : ''}
+          <button class="btn btn-outline btn-sm" style="width:auto" onclick="mwToggleMore(event)">More ▾</button>
+          <div class="mw-more-menu" id="mw-more-menu" onclick="event.stopPropagation()">
+            <button onclick="mwToggleMore();mwOpenFees('${id}')">💰 Fees billed / received</button>
+            <button onclick="mwToggleMore();uploadToMatter('${id}')">⬆ Upload document</button>
+            <button onclick="mwToggleMore();openNoteModal('${id}')">+ Add note</button>
+          </div>
+        </div>
+      </div>
+      <div class="mw-sub">
+        ${matter.next_action ? `<span><strong>Next:</strong> ${escHtml(matter.next_action)}</span>` : ''}
+        ${lastActivity ? `<span>Last activity: ${escHtml(lastActivity)}</span>` : ''}
+        ${refLine ? `<span>${escHtml(refLine)}</span>` : ''}
+      </div>
+    </div>`;
+}
+
+function openMatterWorkspace(id, origin, tab) {
   const matter = matters.find(m => m.id === id);
   if (!matter) return;
   if (origin !== undefined) _matterWorkspaceOrigin = origin;
   _workspaceMatterId = id;
-
-  const ref = matter.internal_ref || matter.number || '';
-  const extRef = matter.external_ref || '';
-  const refLine = [ref, extRef].filter(Boolean).join(' · ');
-  document.getElementById('matter-workspace-title').textContent = matter.name;
-  document.getElementById('matter-workspace-subtitle').textContent =
-    [refLine, matter.practice_area].filter(Boolean).join(' · ');
-  document.getElementById('matter-workspace-client').textContent =
-    matter.client_name ? `Client: ${matter.client_name}` : '';
+  // Opening a matter always starts on Overview unless a caller asks for a
+  // specific tab (e.g. a collaboration notification lands on Collaboration).
+  _matterActiveTabs[id] = tab || 'overview';
+  _renderMatterHeader(matter, null);
 
   // renderMatterPanel() targets docs-content-${id} directly -- give it
   // somewhere to render into, same id convention as before so none of its
@@ -5760,13 +5907,102 @@ let _matterChecklistCache = {};
 let _matterDocsCache = {};
 let _matterAvailableUsersCache = {};
 
+// Phase 2A (2026-10-03): the Activity tab is the event log -- notes in full
+// (with their existing actions) plus a one-line event for each document,
+// linking into the Documents tab. File management (view, download, extract
+// dates, delete) lives only in Documents now. Collaboration discussion is
+// deliberately NOT part of this feed: it stays confined to the
+// participants-only Collaboration tab.
+function _matterDocEventHtml(id, d) {
+  const verb = d.source === 'auto_provisioned' ? 'Template draft added' : 'Document uploaded';
+  return `
+    <div class="note-item" style="cursor:pointer" onclick="mwSetTab('${id}','documents')">
+      <div class="note-text">📄 ${verb}: <strong>${escHtml(d.filename)}</strong></div>
+      <div class="note-footer"><span>${escHtml((d.uploaded_at || '').slice(0, 10))}</span>
+        <a href="#" onclick="event.preventDefault();event.stopPropagation();mwSetTab('${id}','documents')" style="font-size:0.75rem;color:var(--blue);text-decoration:none">Open in Documents →</a>
+      </div>
+    </div>`;
+}
+
 function _matterActivityHtml(id, notes, docs) {
   const items = [];
   (notes || []).forEach(n => items.push({ type: 'note', ts: n.created_at, data: n }));
   (docs || []).forEach(d => items.push({ type: 'document', ts: d.uploaded_at, data: d }));
   if (!items.length) return '<p style="color:var(--ink3);font-size:0.78rem;padding:0.25rem 0">No notes or documents yet.</p>';
   items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
-  return items.map(it => it.type === 'note' ? _matterNoteItemHtml(id, it.data) : _matterDocItemHtml(id, it.data)).join('');
+  return items.map(it => it.type === 'note' ? _matterNoteItemHtml(id, it.data) : _matterDocEventHtml(id, it.data)).join('');
+}
+
+// Documents tab (2026-10-03): a plain chronological list. Deliberately NOT
+// grouped into Contract/Correspondence/Pleading -- the Vault upload screen
+// never sends a category, so that metadata is empty for real uploads. Only
+// filters that existing, reliable data supports: file name, file type (from
+// the extension), real upload vs template draft (documents.source), and sort.
+let _matterDocFilters = {};
+
+function _docFileType(d) {
+  const ext = (d.filename || '').toLowerCase().split('.').pop();
+  if (ext === 'pdf') return 'pdf';
+  if (ext === 'doc' || ext === 'docx') return 'word';
+  return 'other';
+}
+
+function _matterDocListHtml(id) {
+  const f = _matterDocFilters[id] || {};
+  const q = (f.q || '').trim().toLowerCase();
+  let list = [...(_matterDocsCache[id] || [])].filter(d =>
+    (!q || (d.filename || '').toLowerCase().includes(q)) &&
+    (!f.type || _docFileType(d) === f.type) &&
+    (!f.source || (f.source === 'template' ? d.source === 'auto_provisioned' : d.source !== 'auto_provisioned')));
+  const sort = f.sort || 'newest';
+  list.sort((a, b) => sort === 'name' ? (a.filename || '').localeCompare(b.filename || '')
+    : sort === 'oldest' ? (a.uploaded_at || '').localeCompare(b.uploaded_at || '')
+    : (b.uploaded_at || '').localeCompare(a.uploaded_at || ''));
+  if (!(_matterDocsCache[id] || []).length) return '<p style="color:var(--ink3);font-size:0.78rem;padding:0.25rem 0">No documents yet. Use Upload to add one.</p>';
+  if (!list.length) return '<p style="color:var(--ink3);font-size:0.78rem;padding:0.25rem 0">No documents match these filters.</p>';
+  return list.map(d => _matterDocItemHtml(id, d)).join('');
+}
+
+function mwDocFilter(id) {
+  _matterDocFilters[id] = {
+    q: document.getElementById(`mw-doc-q-${id}`)?.value || '',
+    type: document.getElementById(`mw-doc-type-${id}`)?.value || '',
+    source: document.getElementById(`mw-doc-source-${id}`)?.value || '',
+    sort: document.getElementById(`mw-doc-sort-${id}`)?.value || 'newest',
+  };
+  const el = document.getElementById(`mw-doc-list-${id}`);
+  if (el) el.innerHTML = _matterDocListHtml(id);
+}
+
+function _matterDocumentsTabHtml(id) {
+  const f = _matterDocFilters[id] || {};
+  const sel = (cur, v) => (cur || '') === v ? 'selected' : '';
+  return `
+    <div class="matter-section" style="background:var(--white)">
+      <div class="matter-section-title">📄 Documents
+        <span style="margin-left:auto"><button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')" style="font-size:0.7rem;padding:3px 10px;width:auto">⬆ Upload</button></span>
+      </div>
+      <div class="mw-doc-filters">
+        <input type="text" id="mw-doc-q-${id}" placeholder="🔍 Filter by file name…" value="${escHtml(f.q || '')}" oninput="mwDocFilter('${id}')"/>
+        <select id="mw-doc-type-${id}" onchange="mwDocFilter('${id}')">
+          <option value="" ${sel(f.type, '')}>All file types</option>
+          <option value="pdf" ${sel(f.type, 'pdf')}>PDF</option>
+          <option value="word" ${sel(f.type, 'word')}>Word</option>
+          <option value="other" ${sel(f.type, 'other')}>Other</option>
+        </select>
+        <select id="mw-doc-source-${id}" onchange="mwDocFilter('${id}')">
+          <option value="" ${sel(f.source, '')}>Uploads and template drafts</option>
+          <option value="uploaded" ${sel(f.source, 'uploaded')}>Uploaded files only</option>
+          <option value="template" ${sel(f.source, 'template')}>Template drafts only</option>
+        </select>
+        <select id="mw-doc-sort-${id}" onchange="mwDocFilter('${id}')">
+          <option value="newest" ${sel(f.sort || 'newest', 'newest')}>Newest first</option>
+          <option value="oldest" ${sel(f.sort, 'oldest')}>Oldest first</option>
+          <option value="name" ${sel(f.sort, 'name')}>Name A–Z</option>
+        </select>
+      </div>
+      <div id="mw-doc-list-${id}">${_matterDocListHtml(id)}</div>
+    </div>`;
 }
 
 // Progress Notes Phase 1 (2026-09-24) -- a note WITH a heading gets the
@@ -5826,6 +6062,7 @@ function _matterDocItemHtml(id, d) {
           ${d.provenance_document_type ? `<span class="chip chip-blue">${escHtml(d.provenance_document_type)}</span>` : ''}
           ${d.document_type ? `<span class="chip chip-gray">${d.document_type.replace(/_/g,' ')}</span>` : ''}
           ${d.doc_date ? `<span class="chip chip-blue">${d.doc_date}</span>` : ''}
+          ${d.source === 'auto_provisioned' ? `<span class="chip chip-gray" title="Created automatically with the matter (Case Binder) — not an uploaded file">Template draft</span>` : ''}
           ${d.ocr_used ? `<span class="chip chip-gold">OCR</span>` : ''}
           ${d.needs_review ? `<span class="chip chip-red" title="OCR confidence ${d.ocr_confidence}% — verify against the original document">⚠ Low OCR confidence</span>` : ''}
           <span class="chip ${d.status==='complete'?'chip-green':d.status==='error'?'chip-red':'chip-gold'}">${d.status}</span>
@@ -5864,7 +6101,7 @@ function _matterDocItemHtml(id, d) {
 // Person selector (admin/partner only — an associate/secretary opening
 // this sees the current name but an empty reassignment dropdown, same
 // existing limitation as that modal, not a new one introduced here).
-function _matterOverviewHtml(matter, id, linkedClient, availableUsers) {
+function _matterOverviewHtml(matter, id, linkedClient, availableUsers, collabData) {
   const status = matter.status || 'Active';
   const statusColor = STATUS_COLORS[status] || 'chip-gray';
   const stage = matter.stage_info?.current_stage;
@@ -5872,50 +6109,77 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers) {
   const userOptions = (availableUsers || []).map(u =>
     `<option value="${u.id}">${escHtml(u.display_name || u.phone || 'Unnamed user')}</option>`).join('');
 
-  const clientLineHtml = linkedClient ? `
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border)">
-      <span style="font-size:0.72rem;color:var(--ink3);font-weight:600">CLIENT</span>
-      <span style="font-size:0.85rem">${escHtml(linkedClient.full_name)}</span>
-      ${complianceStatusChipHtml(linkedClient.compliance_status)}
-      <a href="#" onclick="event.preventDefault();goToClientFromMatter('${linkedClient.id}', '${id}')" style="font-size:0.78rem;color:var(--blue);text-decoration:none">View Client →</a>
-    </div>` : (matter.client_name ? `
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid var(--border)">
-      <span style="font-size:0.72rem;color:var(--ink3);font-weight:600">CLIENT</span>
-      <span style="font-size:0.85rem">${escHtml(matter.client_name)}</span>
-      <span style="font-size:0.72rem;color:var(--ink3)">(not linked to a client record — see CLIENT field below)</span>
-    </div>` : '');
+  // Phase 2A (2026-10-03): the Overview is four cards -- Matter, Client,
+  // Next, People -- presentation only, over data the panel already loads.
+  // Every control below (next action, review date, reassign) is the same
+  // control with the same handler as before, just housed in a card.
+  const matterCard = `
+    <div class="mw-card">
+      <div class="mw-card-title">Matter</div>
+      <div class="mw-line"><span class="mw-lbl">Status</span><span class="chip ${statusColor}">${escHtml(status)}</span>${stage ? `<span class="chip chip-blue">${escHtml(stage)}</span>` : ''}</div>
+      <div class="mw-line"><span class="mw-lbl">Practice area</span>${matter.practice_area ? `<span class="chip chip-gold">${escHtml(matter.practice_area)}</span>` : '<span style="color:var(--ink3)">—</span>'}</div>
+      <div class="mw-line"><span class="mw-lbl">Health</span>${matterHealthChipHtml(matter) || '<span style="color:var(--ink3)">—</span>'}</div>
+      <div class="mw-line"><span class="mw-lbl">Last activity</span><span>${lastActivity || '—'}</span></div>
+    </div>`;
 
-  return `
-    <div class="matter-section" style="background:var(--white)">
-      <div class="matter-section-title">🎯 Overview</div>
-      <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;margin-bottom:10px">
-        <div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">STATUS</label>
-          <span class="chip ${statusColor}">${escHtml(status)}</span></div>
-        ${stage ? `<div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">STAGE</label>
-          <span class="chip chip-blue">${escHtml(stage)}</span></div>` : ''}
-        <div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">DUE DATE</label>
-          ${matter.next_deadline ? deadlineChipHtml(matter) : '<span style="font-size:0.78rem;color:var(--ink3)">—</span>'}</div>
-        <div><label style="font-size:0.7rem;color:var(--ink3);font-weight:600;display:block;margin-bottom:2px">LAST ACTIVITY</label>
-          <span style="font-size:0.78rem;color:var(--ink2)">${lastActivity || '—'}</span></div>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:wrap">
-        <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:120px">RESPONSIBLE LAWYER</label>
-        ${matter.responsible_lawyer_name ? `<span class="chip chip-gray">${escHtml(matter.responsible_lawyer_name)}</span>` : '<span style="font-size:0.78rem;color:var(--ink3)">Not assigned</span>'}
+  const clientCard = `
+    <div class="mw-card">
+      <div class="mw-card-title">Client</div>
+      ${linkedClient ? `
+        <div class="mw-line"><span style="font-size:0.9rem;font-weight:600">${escHtml(linkedClient.full_name)}</span></div>
+        <div class="mw-line">${complianceStatusChipHtml(linkedClient.compliance_status)}</div>
+        <div class="mw-line"><a href="#" onclick="event.preventDefault();goToClientFromMatter('${linkedClient.id}', '${id}')" style="color:var(--blue);text-decoration:none">View Client →</a></div>`
+      : (matter.client_name ? `
+        <div class="mw-line"><span style="font-size:0.9rem;font-weight:600">${escHtml(matter.client_name)}</span></div>
+        <div class="mw-line" style="color:var(--ink3);font-size:0.74rem">Not linked to a client record — choose one under Edit details.</div>`
+      : '<div class="mw-line" style="color:var(--ink3)">No client linked.</div>')}
+    </div>`;
+
+  const reviewChip = (() => {
+    if (!matter.next_review_date) return '';
+    const days = Math.round((new Date(matter.next_review_date + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
+    if (days < 0) return `<span class="chip chip-gold">Overdue by ${Math.abs(days)}d</span>`;
+    if (days === 0) return `<span class="chip chip-gold">Due today</span>`;
+    return `<span class="chip chip-gray">Due in ${days}d</span>`;
+  })();
+  const nextCard = `
+    <div class="mw-card">
+      <div class="mw-card-title">Next</div>
+      <div class="mw-line"><span class="mw-lbl">Next action</span>
+        <input type="text" value="${escHtml(matter.next_action || '')}"
+          style="flex:1;min-width:150px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+          onchange="updateMatterField('${id}','next_action',this.value)"
+          placeholder="e.g. File Heads of Argument by Friday"/></div>
+      <div class="mw-line"><span class="mw-lbl">Deadline</span>${matter.next_deadline ? deadlineChipHtml(matter) : '<span style="color:var(--ink3)">—</span>'}</div>
+      <div class="mw-line"><span class="mw-lbl" title="A soft reminder to check in on this matter — not a court deadline. Defaults to 30 days after any update or note; set a date here to override.">Review due</span>
+        <input type="date" value="${matter.next_review_date || ''}"
+          style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+          onchange="if(this.value) updateMatterField('${id}','next_review_date',this.value)"/>
+        ${reviewChip}</div>
+      <div class="mw-line" style="font-size:0.72rem;color:var(--ink3)"><span class="mw-lbl">Last reviewed</span>${matter.last_reviewed_date || '—'}</div>
+    </div>`;
+
+  // People: the responsible lawyer for everyone; collaborators only when the
+  // server returned them (i.e. the viewer is a participant -- non-participants
+  // are never told a collaboration exists).
+  const collabs = (collabData && (collabData.can_manage || collabData.my_collaboration_id)) ? (collabData.collaborators || []) : null;
+  const peopleCard = `
+    <div class="mw-card">
+      <div class="mw-card-title">People</div>
+      <div class="mw-line"><span class="mw-lbl">Responsible</span>
+        ${matter.responsible_lawyer_name ? `<span class="chip chip-gray">${escHtml(matter.responsible_lawyer_name)}</span>` : '<span style="color:var(--ink3)">Not assigned</span>'}
         <select style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
                 onchange="if(this.value) updateMatterField('${id}','responsible_lawyer_id',this.value)">
           <option value="">${availableUsers && availableUsers.length ? '— Reassign —' : '— (none available) —'}</option>
           ${userOptions}
-        </select>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
-        <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:120px">NEXT ACTION</label>
-        <input type="text" value="${escHtml(matter.next_action || '')}"
-          style="flex:1;min-width:220px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
-          onchange="updateMatterField('${id}','next_action',this.value)"
-          placeholder="e.g. File Heads of Argument by Friday"/>
-      </div>
-      ${clientLineHtml}
+        </select></div>
+      ${collabs ? `
+        <div class="mw-line"><span class="mw-lbl">Collaborators</span>
+          <span>${collabs.length ? escHtml(collabs.map(c => c.display_name || 'Unnamed').join(', ')) : 'None yet'}</span>
+          <a href="#" onclick="event.preventDefault();mwSetTab('${id}','collaboration')" style="color:var(--blue);text-decoration:none">Manage →</a></div>` : ''}
     </div>`;
+
+  return `<div class="mw-cards">${matterCard}${clientCard}${nextCard}${peopleCard}</div>`;
 }
 
 // Collaborators (2026-10-02). Shown only to the matter's participants: the
@@ -5958,15 +6222,42 @@ function _matterCollaboratorsHtml(id, data, colleagues, messages) {
         style="flex:1;min-width:200px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"/>
       <button class="btn btn-sm btn-primary" style="width:auto" onclick="inviteCollaborator('${id}')">Invite</button>
     </div>` : '';
+  // Phase 2A (2026-10-03), visual only: once a collaboration exists the
+  // section shows a compact summary instead of permanently visible invite
+  // controls (the manager opens them with "Manage collaborators"), and the
+  // onboarding sentences shrink to a short label with an info tooltip. The
+  // two sentences are the approved wording, unchanged -- shown in full while
+  // there is nothing else on the screen, and in the tooltip afterwards.
+  // Every id and handler (collab-user-/collab-reason-/collab-msg-/
+  // collab-thread-, invite/revoke/leave/post) is the same as before.
+  const COLLAB_NOTE = "Colleagues invited to confer on this matter. Collaboration does not change matter responsibility or their wider firm permissions.";
+  const DISCUSSION_NOTE = "Private to the responsible lawyer and active collaborators on this matter. Messages can't be edited or deleted.";
+  const list = data.collaborators || [];
+  const hasCollabs = list.length > 0;
+  const info = t => `<span class="mw-info" title="${escHtml(t)}" aria-label="${escHtml(t)}">i</span>`;
+  const manageOpen = !!data.can_manage && (!hasCollabs || !!_mwCollabManageOpen[id]);
+  const names = list.map(c => escHtml(c.display_name || 'Unnamed') + (c.id === data.my_collaboration_id ? ' (you)' : '')).join(', ');
+  const summary = hasCollabs ? `
+      <div class="mw-line" style="margin-bottom:8px">
+        <span>👥 <strong>${list.length} collaborator${list.length !== 1 ? 's' : ''}</strong> · ${names}</span>
+        ${data.can_manage
+          ? `<button class="btn btn-sm btn-outline" style="width:auto" id="mw-collab-manage-btn-${id}" onclick="mwToggleCollabManage('${id}')">${manageOpen ? 'Hide' : 'Manage collaborators'}</button>`
+          : (data.my_collaboration_id ? `<button class="btn btn-sm btn-outline" style="width:auto" onclick="revokeCollaborator('${id}','${data.my_collaboration_id}',true)">Leave</button>` : '')}
+      </div>` : '';
   return `
     <div class="matter-section" style="background:var(--white)">
-      <div class="matter-section-title">🤝 Collaborators</div>
-      <div style="font-size:0.74rem;color:var(--ink3);margin-bottom:6px">Colleagues invited to confer on this matter. Collaboration does not change matter responsibility or their wider firm permissions.</div>
-      ${rows || '<div class="dash-empty">No collaborators yet.</div>'}
-      ${invite}
+      <div class="matter-section-title">🤝 Collaboration</div>
+      ${hasCollabs
+        ? `<div style="font-size:0.74rem;color:var(--ink3);margin-bottom:6px">Colleagues invited to confer on this matter.${info(COLLAB_NOTE)}</div>`
+        : `<div style="font-size:0.74rem;color:var(--ink3);margin-bottom:6px">${COLLAB_NOTE}</div>`}
+      ${summary}
+      <div id="mw-collab-manage-${id}" style="display:${manageOpen ? 'block' : 'none'}">
+        ${data.can_manage ? (rows || '<div class="dash-empty">No collaborators yet.</div>') : ''}
+        ${invite}
+      </div>
       <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--paper2)">
-        <div style="font-size:0.78rem;font-weight:700;color:var(--ink2);margin-bottom:2px">💬 Discussion</div>
-        <div style="font-size:0.72rem;color:var(--ink3);margin-bottom:6px">Private to the responsible lawyer and active collaborators on this matter. Messages can't be edited or deleted.</div>
+        <div style="font-size:0.78rem;font-weight:700;color:var(--ink2);margin-bottom:2px">💬 Discussion${hasCollabs ? info(DISCUSSION_NOTE) : ''}</div>
+        ${hasCollabs ? '' : `<div style="font-size:0.72rem;color:var(--ink3);margin-bottom:6px">${DISCUSSION_NOTE}</div>`}
         <div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:8px">
           <textarea id="collab-msg-${id}" rows="2" maxlength="5000" placeholder="Write a message…"
             style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.8rem;font-family:var(--font-sans);background:var(--paper)"></textarea>
@@ -5975,6 +6266,15 @@ function _matterCollaboratorsHtml(id, data, colleagues, messages) {
         <div id="collab-thread-${id}">${_collabMessagesHtml(messages)}</div>
       </div>
     </div>`;
+}
+
+function mwToggleCollabManage(id) {
+  _mwCollabManageOpen[id] = !_mwCollabManageOpen[id];
+  const open = !!_mwCollabManageOpen[id];
+  const panel = document.getElementById(`mw-collab-manage-${id}`);
+  if (panel) panel.style.display = open ? 'block' : 'none';
+  const btn = document.getElementById(`mw-collab-manage-btn-${id}`);
+  if (btn) btn.textContent = open ? 'Hide' : 'Manage collaborators';
 }
 
 async function postCollaborationMessage(matterId) {
@@ -6058,6 +6358,16 @@ async function renderMatterPanel(id) {
   // matter that isn't the one currently open (or isn't open at all) has
   // nothing to render into, same as this matter no longer existing.
   if (!content) return;
+  // Phase 2A: every save/note/invite/revoke/message re-renders this whole
+  // panel, so remember what the user was in the middle of (a half-typed
+  // discussion message or invite) and where they were scrolled, and put it
+  // back afterwards. The active tab itself is kept in _matterActiveTabs.
+  const _draft = {
+    msg: document.getElementById(`collab-msg-${id}`)?.value || '',
+    reason: document.getElementById(`collab-reason-${id}`)?.value || '',
+    user: document.getElementById(`collab-user-${id}`)?.value || '',
+  };
+  const _scrollY = window.scrollY;
   content.innerHTML = '<div style="padding:0.5rem 0;color:var(--ink3)">Loading…</div>';
 
   try {
@@ -6079,14 +6389,28 @@ async function renderMatterPanel(id) {
     // is only fetched for the responsible lawyer, the only person who can
     // invite.
     const isResponsible = !!window._userId && matter.responsible_lawyer_id === window._userId;
-    const [docsRes, clientRes, usersRes, checklistRes, collabRes, colleaguesRes] = await Promise.all([
+    const [docsRes, clientRes, usersRes, checklistRes, collabRes, colleaguesRes, calRes] = await Promise.all([
       fetch(`${API}/api/matters/${id}/documents`),
       matter.client_id ? fetch(`${API}/api/clients/${matter.client_id}`) : Promise.resolve(null),
       fetch(`${API}/api/users`),
       isTitleDeeds ? fetch(`${API}/api/matters/${id}/checklist`) : Promise.resolve(null),
       fetch(`${API}/api/matters/${id}/collaborators`),
       isResponsible ? fetch(`${API}/api/colleagues`) : Promise.resolve(null),
+      fetch(`${API}/api/calendar`),   // existing endpoint; filtered to this matter for the Deadlines tab
     ]);
+    // Upcoming calendar events for this matter (only the ones this user may
+    // already see -- GET /api/calendar's own visibility rule applies).
+    let matterEvents = [];
+    try {
+      if (calRes && calRes.ok) {
+        const t0 = new Date();
+        const today0 = `${t0.getFullYear()}-${String(t0.getMonth() + 1).padStart(2, '0')}-${String(t0.getDate()).padStart(2, '0')}`;
+        matterEvents = (await calRes.json())
+          .filter(e => e.matter_id === id && (e.date || '') >= today0)
+          .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
+          .slice(0, 8);
+      }
+    } catch (e) { matterEvents = []; }
     const collabData = collabRes.ok ? await collabRes.json() : null;
     const colleagues = (colleaguesRes && colleaguesRes.ok) ? await colleaguesRes.json() : [];
     // The discussion thread is only ever fetched for participants (the
@@ -6113,14 +6437,37 @@ async function renderMatterPanel(id) {
     _matterChecklistCache[id] = (checklistRes && checklistRes.ok) ? await checklistRes.json() : null;
     const status = matter.status || 'Active';
     const notes = matter.progress_notes || [];
-    const html = `
-      ${_matterOverviewHtml(matter, id, linkedClient, availableUsers)}
-      ${_matterCollaboratorsHtml(id, collabData, colleagues, collabMessages)}
-      ${matterStageTrackerHtml(matter)}
+    // ── Phase 2A (2026-10-03): tabbed workspace ──────────────────────────────
+    // Existing sections' controls are reused verbatim (same ids, same
+    // handlers); they are only re-housed: Matter Details / AML / Conveyancing
+    // / Title-Deeds become collapsed-by-default sections on Overview with an
+    // inline Edit; Fees sits behind the header's More menu; the Rules of Court
+    // Calculator moves under Deadlines; documents get their own tab.
+    const typeLabel = ((typeof MATTER_TYPE_OPTIONS !== 'undefined' && MATTER_TYPE_OPTIONS.find(([v]) => v === matter.matter_type)) || [null, ''])[1];
+    const detailsSummary = `
+      <span><strong>Int ref</strong> ${escHtml(matter.internal_ref || matter.number || '—')}</span>
+      <span><strong>Ext ref</strong> ${escHtml(matter.external_ref || '—')}</span>
+      <span><strong>Status</strong> ${escHtml(status)}${matter.custom_status ? ' (' + escHtml(matter.custom_status) + ')' : ''}</span>
+      <span><strong>Type</strong> ${escHtml(typeLabel || '—')}</span>
+      <span><strong>Client</strong> ${escHtml((linkedClient && linkedClient.full_name) || matter.client_name || '—')}</span>
+      ${matter.title_deeds_checklist ? `<span><strong>Checklist</strong> ${_tdcCompletionChipHtml(matter.title_deeds_checklist.completion)}</span>` : ''}`;
+    const amlScopeLabel = { NotAssessed: 'Not Assessed', InScope: 'In Scope', OutOfScope: 'Out of Scope' }[matter.aml_scope || 'NotAssessed'] || 'Not Assessed';
+    const amlSummary = `
+      <span><strong>AML scope</strong> ${escHtml(amlScopeLabel)}</span>
+      <span><strong>Matter risk</strong> <span class="chip ${CCS_RISK_CHIP[matter.matter_risk || 'NotAssessed'] || 'chip-gray'}">${escHtml(_ccsLabel(matter.matter_risk || 'NotAssessed'))}</span></span>
+      ${matter.aml_scope_reason ? `<span style="flex-basis:100%"><strong>Scope reason</strong> ${escHtml(matter.aml_scope_reason)}</span>` : ''}
+      ${matter.matter_risk_reason ? `<span style="flex-basis:100%"><strong>Risk reason</strong> ${escHtml(matter.matter_risk_reason)}</span>` : ''}`;
+    const convSummary = `
+      <span><strong>Property</strong> ${escHtml(matter.conveyancing_property_address || '—')}</span>
+      <span><strong>Title deed</strong> ${escHtml(matter.conveyancing_title_deed_number || '—')}</span>
+      <span><strong>Transfer date</strong> ${escHtml(matter.conveyancing_transfer_date || '—')}</span>`;
+    const tdcCompletion = (_matterChecklistCache[id] && _matterChecklistCache[id].overall_completion)
+      || (matter.title_deeds_checklist && matter.title_deeds_checklist.completion);
 
-      <!-- Matter metadata controls -->
-      <div class="matter-section" style="background:var(--white)">
-        <div class="matter-section-title">📋 Matter Details</div>
+    const overviewPanel = `
+      ${_matterOverviewHtml(matter, id, linkedClient, availableUsers, collabData)}
+      ${matterStageTrackerHtml(matter)}
+      ${mwCollapsible(id, 'details', '📋 Matter Details', '✎ Edit details', detailsSummary, `
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:50px">INT REF</label>
@@ -6174,77 +6521,8 @@ async function renderMatterPanel(id) {
             </select>
           </div>
         </div>
-      </div>
-
-      <!-- Fees billed / received — the firm's own professional fees only,
-           never client funds held in trust (see the schema comment in
-           run_migrations() for why this matters). -->
-      <div class="matter-section" style="background:var(--white)">
-        <div class="matter-section-title">💰 Fees billed / received</div>
-        <p style="font-size:0.72rem;color:var(--ink3);margin:-4px 0 8px">The firm's own professional fees — not client funds held in trust.</p>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-          <div style="display:flex;align-items:center;gap:6px">
-            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:60px">BILLED</label>
-            <input type="number" step="0.01" min="0" value="${matter.amount_billed ?? ''}"
-              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
-              onchange="if(this.value !== '') updateMatterFieldAndRefresh('${id}','amount_billed',this.value)" placeholder="0.00"/>
-          </div>
-          <div style="display:flex;align-items:center;gap:6px">
-            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:60px">RECEIVED</label>
-            <input type="number" step="0.01" min="0" value="${matter.amount_received ?? ''}"
-              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
-              onchange="if(this.value !== '') updateMatterFieldAndRefresh('${id}','amount_received',this.value)" placeholder="0.00"/>
-          </div>
-          ${(matter.fee_balance !== null && matter.fee_balance !== undefined) ? `<span class="chip ${matter.fee_balance > 0 ? 'chip-gold' : 'chip-green'}">Balance (billed − received): ${matter.fee_balance.toFixed(2)}</span>` : ''}
-        </div>
-      </div>
-
-      <!-- Matter review safety net — a soft "please look at this" nudge
-           date, distinct from next_deadline (a hard court/filing
-           deadline). Every create/update/note-add sets next_review_date
-           automatically to today + 30 days and stamps last_reviewed_date
-           to today, unless a real next_review_date is entered here —
-           entering one explicitly overrides the default and restarts
-           that clock. last_reviewed_date is a real, honest record of
-           when someone last touched this matter — not derived by
-           subtracting 30 days from next_review_date, since that breaks
-           the moment next_review_date is overridden further out (e.g. a
-           matter awaiting a court date, reviewed today but not due
-           again for months) — so it's shown here read-only, stamped by
-           the server, not editable. -->
-      <div class="matter-section" style="background:var(--white)">
-        <div class="matter-section-title">🗂 Review</div>
-        <p style="font-size:0.72rem;color:var(--ink3);margin:-4px 0 8px">A soft reminder to check in on this matter — not a court deadline. Defaults to 30 days after any update or note; set a date here to override.</p>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-          <div style="display:flex;align-items:center;gap:6px">
-            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:80px">NEXT REVIEW</label>
-            <input type="date" value="${matter.next_review_date || ''}"
-              style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
-              onchange="if(this.value) updateMatterField('${id}','next_review_date',this.value)"/>
-          </div>
-          ${(() => {
-            if (!matter.next_review_date) return '';
-            const days = Math.round((new Date(matter.next_review_date + 'T00:00:00') - new Date(new Date().toDateString())) / 86400000);
-            if (days < 0) return `<span class="chip chip-gold">Overdue by ${Math.abs(days)}d</span>`;
-            if (days === 0) return `<span class="chip chip-gold">Due today</span>`;
-            return `<span class="chip chip-gray">Due in ${days}d</span>`;
-          })()}
-          <div style="display:flex;align-items:center;gap:6px">
-            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:90px">LAST REVIEWED</label>
-            <span style="font-size:0.78rem;color:var(--ink2)">${matter.last_reviewed_date || '—'}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Matter-level AML (2026-09-03, Individual Client AML/CDD Report
-           Part B) — same honest "manual, pending firm policy" framing as
-           the client-level AML Scope field: not auto-derived from matter
-           type, no confirmed mapping to the Act's specified activities
-           exists yet. The same client can have differently-scoped
-           matters (a property acquisition vs. a divorce), which is why
-           this lives here rather than only on the client. -->
-      <div class="matter-section" style="background:var(--white)">
-        <div class="matter-section-title">🛡 AML (this matter)</div>
+      `)}
+      ${mwCollapsible(id, 'aml', '🛡 AML (this matter)', '✎ Edit AML', amlSummary, `
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:6px">
           <div style="display:flex;align-items:center;gap:6px">
             <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:130px">AML SCOPE (manual, pending firm policy)</label>
@@ -6281,12 +6559,8 @@ async function renderMatterPanel(id) {
             onchange="updateMatterField('${id}','matter_risk_reason',this.value)"
             placeholder="Required when Matter Risk is Low, Medium, or High -- e.g. Cash-intensive business."/>
         </div>
-      </div>
-
-      ${matter.practice_area === 'Conveyancing/Property' ? `
-      <!-- Conveyancing — only shown for practice_area = 'Conveyancing/Property' -->
-      <div class="matter-section" style="background:var(--white)">
-        <div class="matter-section-title">🏠 Conveyancing</div>
+      `)}
+      ${matter.practice_area === 'Conveyancing/Property' ? mwCollapsible(id, 'conveyancing', '🏠 Conveyancing', '✎ Edit conveyancing', convSummary, `
         <!-- Milestone is now set via the Progress Tracker stepper at the
              top of this panel (matterStageTrackerHtml) rather than a
              separate dropdown here — one control for one field. -->
@@ -6340,30 +6614,43 @@ async function renderMatterPanel(id) {
               onchange="if(this.value !== '') updateMatterField('${id}','conveyancing_bond_registration_deadline',this.value)"/>
           </div>
         </div>
-      </div>
-      ` : ''}
+      `) : ''}
+      ${isTitleDeeds ? mwCollapsible(id, 'checklist', '🗂 Title/Deeds Checklist', 'Open checklist',
+          `<span>${_tdcCompletionChipHtml(tdcCompletion)}</span>`,
+          `<div id="checklist-content-${id}">${_matterChecklistHtml(id)}</div>`) : ''}`;
 
-      ${isTitleDeeds ? `<div id="checklist-content-${id}">${_matterChecklistHtml(id)}</div>` : ''}
-
-      <!-- Activity — merged notes + documents, most recent first (UX audit
-           fix #2: same merge/sort pattern as Client Detail's own
-           _clientRecentActivityHtml(), reusing the matter panel's OWN
-           richer per-item markup below, not Client Detail's simplified
-           read-only cards -- that version has no document actions
-           (view/download/extract dates/delete), which would be a real
-           regression here, not just a style difference. -->
-      <div class="matter-section">
+    const activityPanel = `
+      <div class="matter-section" style="background:var(--white)">
         <div class="matter-section-title">🕐 Activity
           <span style="margin-left:auto;display:flex;gap:6px">
-            <button class="btn btn-sm btn-outline" onclick="uploadToMatter('${id}')" style="font-size:0.7rem;padding:3px 10px">⬆ Upload</button>
-            <button class="btn btn-primary btn-sm" onclick="openNoteModal('${id}')" style="font-size:0.7rem;padding:3px 10px">+ Add Note</button>
+            <button class="btn btn-primary btn-sm" onclick="openNoteModal('${id}')" style="font-size:0.7rem;padding:3px 10px;width:auto">+ Add Note</button>
           </span>
         </div>
         <div id="note-date-prompt-${id}" style="display:none"></div>
         <div id="notes-list-${id}">${_matterActivityHtml(id, notes, docs)}</div>
-      </div>
+      </div>`;
 
-      <!-- Rules of Court Calculator -->
+    const keyDates = matter.practice_area === 'Conveyancing/Property' ? [
+      ['Transfer date', matter.conveyancing_transfer_date],
+      ['Rates clearance expiry', matter.conveyancing_rates_clearance_expiry],
+      ['Bond registration deadline', matter.conveyancing_bond_registration_deadline],
+    ].filter(([, d]) => d) : [];
+    const deadlinesPanel = `
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">⏰ Deadlines</div>
+        <div class="mw-line"><span class="mw-lbl" style="min-width:120px">Matter deadline</span>${matter.next_deadline
+          ? `${deadlineChipHtml(matter)}${matter.next_deadline_note ? `<span>${escHtml(matter.next_deadline_note)}</span>` : ''}`
+          : '<span style="color:var(--ink3)">None set</span>'}</div>
+        ${keyDates.map(([label, d]) => `<div class="mw-line"><span class="mw-lbl" style="min-width:120px">${escHtml(label)}</span><span class="chip chip-blue">${escHtml(d)}</span></div>`).join('')}
+        <div style="margin-top:10px">
+          <div class="mw-card-title" style="margin-bottom:4px">Upcoming calendar events</div>
+          ${matterEvents.length ? matterEvents.map(e => `
+            <div class="mw-line"><span class="chip chip-blue">${escHtml(e.date)}</span><span>${escHtml(e.title || '')}</span>${e.court ? `<span style="color:var(--ink3)">${escHtml(e.court)}</span>` : ''}</div>`).join('')
+            : '<div style="font-size:0.78rem;color:var(--ink3)">No upcoming events on your calendar for this matter.</div>'}
+          <a href="#" onclick="event.preventDefault();showTab('calendar')" style="font-size:0.78rem;color:var(--blue);text-decoration:none">Open Calendar →</a>
+        </div>
+      </div>
+      <!-- Rules of Court Calculator (moved here from the bottom of the page) -->
       <div class="matter-section" style="background:var(--white)">
         <div class="matter-section-title">⚖ Rules of Court Calculator</div>
         <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-bottom:0.5rem">
@@ -6397,7 +6684,62 @@ async function renderMatterPanel(id) {
         </div>
         <button class="btn btn-primary btn-sm" onclick="calculateProcedure('${id}','${escHtml(matter.name || '')}')">⚖ Calculate Deadlines</button>
         <div id="proc-result-${id}" style="margin-top:0.6rem"></div>
+      </div>`;
+
+    const researchPanel = `
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">🔎 Research</div>
+        <p style="font-size:0.82rem;color:var(--ink2);margin-bottom:8px">Matter-aware research is coming later. For now, the firm-wide Search Vault is the place to research.</p>
+        <button class="btn btn-outline btn-sm" style="width:auto" onclick="showTab('search')">Open Search Vault →</button>
+      </div>`;
+    const draftingPanel = `
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">✍ Drafting</div>
+        <p style="font-size:0.82rem;color:var(--ink2);margin-bottom:8px">Matter-aware drafting is coming later. For now, Draft Document is the place to draft.</p>
+        <button class="btn btn-outline btn-sm" style="width:auto" onclick="showTab('draft')">Open Draft Document →</button>
+      </div>`;
+
+    // Collaboration is shown to participants only: for anyone else the
+    // section renders nothing and the tab is not offered at all.
+    const collabHtml = _matterCollaboratorsHtml(id, collabData, colleagues, collabMessages);
+    const tabs = MW_TABS.filter(([k]) => k !== 'collaboration' || collabHtml);
+    const activeTab = tabs.some(([k]) => k === _matterActiveTabs[id]) ? _matterActiveTabs[id] : 'overview';
+    _matterActiveTabs[id] = activeTab;
+    const panel = (key, inner) => `<div class="mw-panel ${key === activeTab ? 'active' : ''}" data-tab="${key}">${inner}</div>`;
+
+    const html = `
+      <div class="mw-fees-panel" id="mw-fees-${id}" style="display:${_mwFeesOpen[id] ? 'block' : 'none'}">
+        <div style="display:flex;justify-content:flex-end;margin-bottom:-6px"><button class="btn btn-sm btn-outline" style="width:auto" onclick="mwCloseFees('${id}')">Close</button></div>
+      <div class="matter-section" style="background:var(--white)">
+        <div class="matter-section-title">💰 Fees billed / received</div>
+        <p style="font-size:0.72rem;color:var(--ink3);margin:-4px 0 8px">The firm's own professional fees — not client funds held in trust.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:60px">BILLED</label>
+            <input type="number" step="0.01" min="0" value="${matter.amount_billed ?? ''}"
+              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterFieldAndRefresh('${id}','amount_billed',this.value)" placeholder="0.00"/>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <label style="font-size:0.72rem;color:var(--ink3);font-weight:600;min-width:60px">RECEIVED</label>
+            <input type="number" step="0.01" min="0" value="${matter.amount_received ?? ''}"
+              style="width:110px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+              onchange="if(this.value !== '') updateMatterFieldAndRefresh('${id}','amount_received',this.value)" placeholder="0.00"/>
+          </div>
+          ${(matter.fee_balance !== null && matter.fee_balance !== undefined) ? `<span class="chip ${matter.fee_balance > 0 ? 'chip-gold' : 'chip-green'}">Balance (billed − received): ${matter.fee_balance.toFixed(2)}</span>` : ''}
+        </div>
       </div>
+      </div>
+      <div class="mw-tabs" role="tablist">
+        ${tabs.map(([k, label]) => `<button class="mw-tab ${k === activeTab ? 'active' : ''}" data-tab="${k}" role="tab" onclick="mwSetTab('${id}','${k}')">${label}${k === 'documents' ? ` (${(docs || []).length})` : ''}</button>`).join('')}
+      </div>
+      ${panel('overview', overviewPanel)}
+      ${panel('documents', _matterDocumentsTabHtml(id))}
+      ${panel('activity', activityPanel)}
+      ${panel('deadlines', deadlinesPanel)}
+      ${panel('research', researchPanel)}
+      ${panel('drafting', draftingPanel)}
+      ${collabHtml ? panel('collaboration', collabHtml) : ''}
     `;
     content.innerHTML = html;
 
@@ -6410,6 +6752,17 @@ async function renderMatterPanel(id) {
     });
 
     populateMatterClientSelect(id);
+
+    // Phase 2A: header now has the linked client (compliance chip); put back
+    // anything the user was typing and where they were scrolled.
+    _renderMatterHeader(matter, linkedClient);
+    const _msgBox = document.getElementById(`collab-msg-${id}`);
+    if (_msgBox && _draft.msg) _msgBox.value = _draft.msg;
+    const _reasonBox = document.getElementById(`collab-reason-${id}`);
+    if (_reasonBox && _draft.reason) _reasonBox.value = _draft.reason;
+    const _userSel = document.getElementById(`collab-user-${id}`);
+    if (_userSel && _draft.user && [..._userSel.options].some(o => o.value === _draft.user)) _userSel.value = _draft.user;
+    window.scrollTo(0, _scrollY);
 
   } catch(e) {
     content.innerHTML = '<p style="color:var(--ink3)">Could not load matter details.</p>';
