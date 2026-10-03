@@ -5942,12 +5942,12 @@ function _matterCollaboratorsHtml(id, data, colleagues, messages) {
   return `
     <div class="matter-section" style="background:var(--white)">
       <div class="matter-section-title">🤝 Collaborators</div>
-      <div style="font-size:0.74rem;color:var(--ink3);margin-bottom:6px">Colleagues invited to confer on this matter. They are notified; this does not change anyone's access.</div>
+      <div style="font-size:0.74rem;color:var(--ink3);margin-bottom:6px">Colleagues invited to confer on this matter. Collaboration does not change matter responsibility or their wider firm permissions.</div>
       ${rows || '<div class="dash-empty">No collaborators yet.</div>'}
       ${invite}
       <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--paper2)">
         <div style="font-size:0.78rem;font-weight:700;color:var(--ink2);margin-bottom:2px">💬 Discussion</div>
-        <div style="font-size:0.72rem;color:var(--ink3);margin-bottom:6px">Private to you and the collaborators on this matter. Messages can't be edited or deleted.</div>
+        <div style="font-size:0.72rem;color:var(--ink3);margin-bottom:6px">Private to the responsible lawyer and active collaborators on this matter. Messages can't be edited or deleted.</div>
         <div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:8px">
           <textarea id="collab-msg-${id}" rows="2" maxlength="5000" placeholder="Write a message…"
             style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.8rem;font-family:var(--font-sans);background:var(--paper)"></textarea>
