@@ -337,7 +337,7 @@ select{cursor:pointer}
 .matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
 
 /* ── Matter Workspace Phase 2A (2026-10-03): persistent header, tabs, cards ── */
-.mw-header{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.9rem 1.1rem;margin-bottom:0.9rem}
+.mw-header{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.65rem 1rem;margin-bottom:0.6rem}
 .mw-header-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
 .mw-title{font-size:1.2rem;margin:0 0 4px;line-height:1.25;word-break:break-word}
 .mw-meta{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:0.8rem;color:var(--ink2)}
@@ -347,20 +347,20 @@ select{cursor:pointer}
 .mw-more-menu.open{display:block}
 .mw-more-menu button{display:block;width:100%;text-align:left;padding:9px 14px;border:0;background:none;cursor:pointer;font-size:0.82rem;font-family:var(--font-sans);color:var(--ink)}
 .mw-more-menu button:hover{background:var(--paper2)}
-.mw-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:1rem;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+.mw-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:0.7rem;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
 .mw-tab{padding:9px 14px;border:0;background:none;cursor:pointer;font-size:0.84rem;font-weight:600;font-family:var(--font-sans);color:var(--ink3);border-bottom:2px solid transparent;margin-bottom:-1px;flex-shrink:0}
 .mw-tab:hover{color:var(--ink)}
 .mw-tab.active{color:var(--green);border-bottom-color:var(--green)}
 .mw-panel{display:none}
 .mw-panel.active{display:block}
-.mw-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:12px}
-.mw-card{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.85rem 1rem;min-width:0}
-.mw-card-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.6rem}
-.mw-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px;font-size:0.8rem;color:var(--ink2)}
-.mw-lbl{font-size:0.68rem;color:var(--ink3);font-weight:600;text-transform:uppercase;letter-spacing:0.4px;min-width:76px}
-.mw-collapsible{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.75rem 1rem;margin-bottom:10px}
-.mw-collapsible-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
-.mw-collapsible .mw-summary{margin-top:8px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:0.8rem;color:var(--ink2)}
+.mw-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:10px}
+.mw-card{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.6rem 0.85rem;min-width:0}
+.mw-card-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.4rem}
+.mw-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;font-size:0.8rem;color:var(--ink2)}
+.mw-lbl{font-size:0.68rem;color:var(--ink3);font-weight:600;text-transform:uppercase;letter-spacing:0.4px}
+.mw-collapsible{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.5rem 0.85rem;margin-bottom:8px}
+.mw-collapsible-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mw-collapsible .mw-summary{flex:1 1 260px;display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;font-size:0.78rem;color:var(--ink2)}
 .mw-collapsible .mw-edit{margin-top:10px}
 .mw-edit .matter-section{border:none;padding:0}
 .mw-fees-panel{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.75rem 1rem;margin-bottom:12px}
@@ -368,6 +368,7 @@ select{cursor:pointer}
 .mw-doc-filters input,.mw-doc-filters select{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper);font-family:var(--font-sans);width:auto}
 .mw-doc-filters input{flex:1 1 200px;min-width:180px}
 .mw-info{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid var(--ink3);color:var(--ink3);font-size:0.62rem;font-weight:700;cursor:help;margin-left:4px;text-transform:none;letter-spacing:0}
+@media (min-width:1100px){.mw-cards{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media (max-width:760px){.mw-cards{grid-template-columns:1fr}.mw-title{font-size:1.05rem}}
 
 /* ── Matter Progress Tracker (visual stepper) ── */
@@ -1084,7 +1085,7 @@ select{cursor:pointer}
      per-row one inside the matters list. -->
 <div id="tab-matter-workspace" style="display:none">
   <button class="btn btn-outline" onclick="closeMatterWorkspace()"
-          style="font-size:0.9rem;font-weight:700;padding:0.65rem 1.3rem;margin-bottom:1.1rem">
+          style="font-size:0.85rem;font-weight:700;padding:0.4rem 1rem;margin-bottom:0.6rem">
     ← Back to Matters
   </button>
   <!-- Phase 2A (2026-10-03): persistent header above every tab; rendered by
@@ -5765,6 +5766,37 @@ function mwToggleEdit(id, section) {
   root.querySelector('.mw-edit-btn').textContent = open ? 'Done' : root.dataset.editLabel;
 }
 
+// Opens a collapsed section's edit controls (no-op if already open) and
+// brings it into view -- used by empty-state links such as "Link a client".
+function mwOpenEdit(id, section) {
+  if (!_mwEditOpen[`${id}:${section}`]) mwToggleEdit(id, section);
+  const root = document.getElementById(`mw-${section}-${id}`);
+  if (root) root.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+// Reveals the inputs behind a Next-card empty-state link and focuses the first.
+function mwReveal(id, which) {
+  const show = el => { if (el) el.style.display = ''; };
+  const hide = el => { if (el) el.style.display = 'none'; };
+  let target;
+  if (which === 'both') {
+    hide(document.getElementById(`mw-next-empty-${id}`));
+    target = document.getElementById(`mw-next-both-${id}`);
+  } else {
+    hide(document.getElementById(`mw-next-${which}-link-${id}`)?.closest('.mw-line'));
+    target = document.getElementById(`mw-next-${which}-${id}`);
+  }
+  show(target);
+  target?.querySelector('input')?.focus();
+}
+
+// "Add next action or deadline" from the Deadlines tab: go to Overview and
+// open the right input.
+function mwAddNext(id) {
+  mwSetTab(id, 'overview');
+  mwReveal(id, document.getElementById(`mw-next-empty-${id}`) ? 'both' : 'deadline');
+}
+
 // One collapsed-by-default section: compact read-only summary, with the
 // section's EXISTING controls (unchanged markup, ids and handlers) revealed
 // inline by its Edit button -- never a modal, so nothing is moved or rebuilt.
@@ -5773,10 +5805,10 @@ function mwCollapsible(id, section, title, editLabel, summaryHtml, editHtml) {
   return `
     <div class="mw-collapsible" id="mw-${section}-${id}" data-edit-label="${escHtml(editLabel)}">
       <div class="mw-collapsible-head">
-        <div class="matter-section-title" style="margin:0">${title}</div>
-        <button class="btn btn-sm btn-outline mw-edit-btn" style="width:auto" onclick="mwToggleEdit('${id}','${section}')">${open ? 'Done' : escHtml(editLabel)}</button>
+        <div class="matter-section-title" style="margin:0;white-space:nowrap">${title}</div>
+        <div class="mw-summary" style="${open ? 'display:none' : ''}">${summaryHtml}</div>
+        <button class="btn btn-sm btn-outline mw-edit-btn" style="width:auto;margin-left:auto" onclick="mwToggleEdit('${id}','${section}')">${open ? 'Done' : escHtml(editLabel)}</button>
       </div>
-      <div class="mw-summary" style="${open ? 'display:none' : ''}">${summaryHtml}</div>
       <div class="mw-edit" style="${open ? '' : 'display:none'}">${editHtml}</div>
     </div>`;
 }
@@ -5811,8 +5843,6 @@ function _renderMatterHeader(matter, linkedClient) {
   if (!el) return;
   const id = matter.id;
   const status = matter.status || 'Active';
-  const ref = matter.internal_ref || matter.number || '';
-  const refLine = [ref, matter.external_ref || ''].filter(Boolean).join(' · ');
   const clientName = linkedClient ? linkedClient.full_name : matter.client_name;
   const lastActivity = matter.last_activity ? matter.last_activity.slice(0, 10) : '';
   const sep = '<span style="color:var(--ink3)">·</span>';
@@ -5839,11 +5869,10 @@ function _renderMatterHeader(matter, linkedClient) {
           </div>
         </div>
       </div>
-      <div class="mw-sub">
+      ${(matter.next_action || lastActivity) ? `<div class="mw-sub">
         ${matter.next_action ? `<span><strong>Next:</strong> ${escHtml(matter.next_action)}</span>` : ''}
         ${lastActivity ? `<span>Last activity: ${escHtml(lastActivity)}</span>` : ''}
-        ${refLine ? `<span>${escHtml(refLine)}</span>` : ''}
-      </div>
+      </div>` : ''}
     </div>`;
 }
 
@@ -6116,10 +6145,9 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers, collabDat
   const matterCard = `
     <div class="mw-card">
       <div class="mw-card-title">Matter</div>
-      <div class="mw-line"><span class="mw-lbl">Status</span><span class="chip ${statusColor}">${escHtml(status)}</span>${stage ? `<span class="chip chip-blue">${escHtml(stage)}</span>` : ''}</div>
-      <div class="mw-line"><span class="mw-lbl">Practice area</span>${matter.practice_area ? `<span class="chip chip-gold">${escHtml(matter.practice_area)}</span>` : '<span style="color:var(--ink3)">—</span>'}</div>
-      <div class="mw-line"><span class="mw-lbl">Health</span>${matterHealthChipHtml(matter) || '<span style="color:var(--ink3)">—</span>'}</div>
-      <div class="mw-line"><span class="mw-lbl">Last activity</span><span>${lastActivity || '—'}</span></div>
+      <div class="mw-line"><span class="mw-lbl">Status</span><span class="chip ${statusColor}">${escHtml(status)}</span>${stage ? `<span class="chip chip-blue">${escHtml(stage)}</span>` : ''}${matterHealthChipHtml(matter)}</div>
+      ${matter.practice_area ? `<div class="mw-line"><span class="mw-lbl">Practice area</span><span class="chip chip-gold">${escHtml(matter.practice_area)}</span></div>` : ''}
+      ${lastActivity ? `<div class="mw-line"><span class="mw-lbl">Last activity</span><span>${lastActivity}</span></div>` : ''}
     </div>`;
 
   const clientCard = `
@@ -6132,7 +6160,8 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers, collabDat
       : (matter.client_name ? `
         <div class="mw-line"><span style="font-size:0.9rem;font-weight:600">${escHtml(matter.client_name)}</span></div>
         <div class="mw-line" style="color:var(--ink3);font-size:0.74rem">Not linked to a client record — choose one under Edit details.</div>`
-      : '<div class="mw-line" style="color:var(--ink3)">No client linked.</div>')}
+      : `<div class="mw-line" style="color:var(--ink3)">No client linked yet.</div>
+         <div class="mw-line"><a href="#" onclick="event.preventDefault();mwOpenEdit('${id}','details')" style="color:var(--blue);text-decoration:none">Link a client →</a></div>`)}
     </div>`;
 
   const reviewChip = (() => {
@@ -6142,21 +6171,43 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers, collabDat
     if (days === 0) return `<span class="chip chip-gold">Due today</span>`;
     return `<span class="chip chip-gray">Due in ${days}d</span>`;
   })();
+  // Empty states are actions, not blank fields (2026-10-03): with nothing
+  // scheduled the card says so and offers one link that reveals the inputs;
+  // a missing next action or deadline alone is a small "add" link. The
+  // deadline has no other edit surface after creation, so its date input
+  // saves through the same matter PATCH the New Matter form already uses.
+  const inputStyle = 'padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)';
+  const actionInput = `<input type="text" value="${escHtml(matter.next_action || '')}" style="flex:1;min-width:150px;${inputStyle}"
+          onchange="updateMatterField('${id}','next_action',this.value)" placeholder="e.g. File Heads of Argument by Friday"/>`;
+  const deadlineInput = `<input type="date" value="${matter.next_deadline || ''}" style="${inputStyle}"
+          onchange="if(this.value) updateMatterField('${id}','next_deadline',this.value)"/>`;
+  const addLink = (which, label) => `<a href="#" id="mw-next-${which}-link-${id}" onclick="event.preventDefault();mwReveal('${id}','${which}')" style="color:var(--blue);text-decoration:none">${label}</a>`;
+  const hasAction = !!matter.next_action, hasDeadline = !!matter.next_deadline;
+  const nextBody = (!hasAction && !hasDeadline) ? `
+      <div id="mw-next-empty-${id}">
+        <div class="mw-line" style="color:var(--ink3)">Nothing scheduled</div>
+        <div class="mw-line">${addLink('both', 'Add next action or deadline →')}</div>
+      </div>
+      <div id="mw-next-both-${id}" style="display:none">
+        <div class="mw-line"><span class="mw-lbl">Next action</span>${actionInput}</div>
+        <div class="mw-line"><span class="mw-lbl">Deadline</span>${deadlineInput}</div>
+      </div>` : `
+      ${hasAction
+        ? `<div class="mw-line"><span class="mw-lbl">Next action</span>${actionInput}</div>`
+        : `<div class="mw-line">${addLink('action', '+ Add next action')}</div>
+           <div class="mw-line" id="mw-next-action-${id}" style="display:none"><span class="mw-lbl">Next action</span>${actionInput}</div>`}
+      ${hasDeadline
+        ? `<div class="mw-line"><span class="mw-lbl">Deadline</span>${deadlineChipHtml(matter)}</div>`
+        : `<div class="mw-line">${addLink('deadline', '+ Add deadline')}</div>
+           <div class="mw-line" id="mw-next-deadline-${id}" style="display:none"><span class="mw-lbl">Deadline</span>${deadlineInput}</div>`}`;
   const nextCard = `
     <div class="mw-card">
       <div class="mw-card-title">Next</div>
-      <div class="mw-line"><span class="mw-lbl">Next action</span>
-        <input type="text" value="${escHtml(matter.next_action || '')}"
-          style="flex:1;min-width:150px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
-          onchange="updateMatterField('${id}','next_action',this.value)"
-          placeholder="e.g. File Heads of Argument by Friday"/></div>
-      <div class="mw-line"><span class="mw-lbl">Deadline</span>${matter.next_deadline ? deadlineChipHtml(matter) : '<span style="color:var(--ink3)">—</span>'}</div>
+      ${nextBody}
       <div class="mw-line"><span class="mw-lbl" title="A soft reminder to check in on this matter — not a court deadline. Defaults to 30 days after any update or note; set a date here to override.">Review due</span>
-        <input type="date" value="${matter.next_review_date || ''}"
-          style="padding:4px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper)"
+        <input type="date" value="${matter.next_review_date || ''}" style="${inputStyle}"
           onchange="if(this.value) updateMatterField('${id}','next_review_date',this.value)"/>
-        ${reviewChip}</div>
-      <div class="mw-line" style="font-size:0.72rem;color:var(--ink3)"><span class="mw-lbl">Last reviewed</span>${matter.last_reviewed_date || '—'}</div>
+        ${reviewChip}${matter.last_reviewed_date ? `<span style="font-size:0.72rem;color:var(--ink3)">reviewed ${escHtml(matter.last_reviewed_date)}</span>` : ''}</div>
     </div>`;
 
   // People: the responsible lawyer for everyone; collaborators only when the
@@ -6444,23 +6495,29 @@ async function renderMatterPanel(id) {
     // inline Edit; Fees sits behind the header's More menu; the Rules of Court
     // Calculator moves under Deadlines; documents get their own tab.
     const typeLabel = ((typeof MATTER_TYPE_OPTIONS !== 'undefined' && MATTER_TYPE_OPTIONS.find(([v]) => v === matter.matter_type)) || [null, ''])[1];
-    const detailsSummary = `
-      <span><strong>Int ref</strong> ${escHtml(matter.internal_ref || matter.number || '—')}</span>
-      <span><strong>Ext ref</strong> ${escHtml(matter.external_ref || '—')}</span>
-      <span><strong>Status</strong> ${escHtml(status)}${matter.custom_status ? ' (' + escHtml(matter.custom_status) + ')' : ''}</span>
-      <span><strong>Type</strong> ${escHtml(typeLabel || '—')}</span>
-      <span><strong>Client</strong> ${escHtml((linkedClient && linkedClient.full_name) || matter.client_name || '—')}</span>
-      ${matter.title_deeds_checklist ? `<span><strong>Checklist</strong> ${_tdcCompletionChipHtml(matter.title_deeds_checklist.completion)}</span>` : ''}`;
+    // Summaries list only what is actually set -- never a bare dash for an
+    // empty field. Reference numbers live here (not in the header).
+    const intRef = matter.internal_ref || matter.number || '';
+    const clientNameForSummary = (linkedClient && linkedClient.full_name) || matter.client_name || '';
+    const detailsBits = [
+      intRef ? `<span><strong>Int ref</strong> ${escHtml(intRef)}</span>` : '',
+      matter.external_ref ? `<span><strong>Ext ref</strong> ${escHtml(matter.external_ref)}</span>` : '',
+      `<span><strong>Status</strong> ${escHtml(status)}${matter.custom_status ? ' (' + escHtml(matter.custom_status) + ')' : ''}</span>`,
+      typeLabel ? `<span><strong>Type</strong> ${escHtml(typeLabel)}</span>` : '',
+      clientNameForSummary ? `<span><strong>Client</strong> ${escHtml(clientNameForSummary)}</span>` : '',
+      matter.title_deeds_checklist ? `<span><strong>Checklist</strong> ${_tdcCompletionChipHtml(matter.title_deeds_checklist.completion)}</span>` : '',
+    ].filter(Boolean);
+    const detailsSummary = detailsBits.join('');
     const amlScopeLabel = { NotAssessed: 'Not Assessed', InScope: 'In Scope', OutOfScope: 'Out of Scope' }[matter.aml_scope || 'NotAssessed'] || 'Not Assessed';
     const amlSummary = `
       <span><strong>AML scope</strong> ${escHtml(amlScopeLabel)}</span>
       <span><strong>Matter risk</strong> <span class="chip ${CCS_RISK_CHIP[matter.matter_risk || 'NotAssessed'] || 'chip-gray'}">${escHtml(_ccsLabel(matter.matter_risk || 'NotAssessed'))}</span></span>
-      ${matter.aml_scope_reason ? `<span style="flex-basis:100%"><strong>Scope reason</strong> ${escHtml(matter.aml_scope_reason)}</span>` : ''}
-      ${matter.matter_risk_reason ? `<span style="flex-basis:100%"><strong>Risk reason</strong> ${escHtml(matter.matter_risk_reason)}</span>` : ''}`;
-    const convSummary = `
-      <span><strong>Property</strong> ${escHtml(matter.conveyancing_property_address || '—')}</span>
-      <span><strong>Title deed</strong> ${escHtml(matter.conveyancing_title_deed_number || '—')}</span>
-      <span><strong>Transfer date</strong> ${escHtml(matter.conveyancing_transfer_date || '—')}</span>`;
+      ${(matter.aml_scope_reason || matter.matter_risk_reason) ? `<span style="color:var(--ink3)" title="${escHtml([matter.aml_scope_reason, matter.matter_risk_reason].filter(Boolean).join(' — '))}">reasons recorded</span>` : ''}`;
+    const convSummary = [
+      matter.conveyancing_property_address ? `<span><strong>Property</strong> ${escHtml(matter.conveyancing_property_address)}</span>` : '',
+      matter.conveyancing_title_deed_number ? `<span><strong>Title deed</strong> ${escHtml(matter.conveyancing_title_deed_number)}</span>` : '',
+      matter.conveyancing_transfer_date ? `<span><strong>Transfer date</strong> ${escHtml(matter.conveyancing_transfer_date)}</span>` : '',
+    ].filter(Boolean).join('') || '<span style="color:var(--ink3)">No conveyancing details recorded yet.</span>';
     const tdcCompletion = (_matterChecklistCache[id] && _matterChecklistCache[id].overall_completion)
       || (matter.title_deeds_checklist && matter.title_deeds_checklist.completion);
 
@@ -6640,7 +6697,7 @@ async function renderMatterPanel(id) {
         <div class="matter-section-title">⏰ Deadlines</div>
         <div class="mw-line"><span class="mw-lbl" style="min-width:120px">Matter deadline</span>${matter.next_deadline
           ? `${deadlineChipHtml(matter)}${matter.next_deadline_note ? `<span>${escHtml(matter.next_deadline_note)}</span>` : ''}`
-          : '<span style="color:var(--ink3)">None set</span>'}</div>
+          : `<a href="#" onclick="event.preventDefault();mwAddNext('${id}')" style="color:var(--blue);text-decoration:none">Add next action or deadline →</a>`}</div>
         ${keyDates.map(([label, d]) => `<div class="mw-line"><span class="mw-lbl" style="min-width:120px">${escHtml(label)}</span><span class="chip chip-blue">${escHtml(d)}</span></div>`).join('')}
         <div style="margin-top:10px">
           <div class="mw-card-title" style="margin-bottom:4px">Upcoming calendar events</div>
