@@ -8468,6 +8468,37 @@ async def revoke_collaborator(matter_id: str, collaboration_id: str, request: Re
     return {"revoked": True, "left": left}
 
 
+# "Shared with me" (2026-10-03, stage 4): matters the caller can reach because
+# they are an ACTIVE collaborator -- same active definition as everywhere else
+# in collaboration (not revoked, not expired, same firm) -- and NOT the
+# matter's owner. Owner is defined exactly as the Matters tab's My Matters
+# defines it (responsible lawyer, else creator), so a matter is in one scope
+# or the other, never both. Returns ids only: the frontend scopes its
+# already-loaded matter list by this set, so the chip count and the list are
+# derived from this one server answer. Navigation only -- not authorization;
+# the stage 2/3 endpoints remain the security boundary.
+SHARED_WITH_ME_SQL = (
+    "SELECT DISTINCT m.id FROM matters m "
+    "JOIN matter_collaborators c ON c.matter_id = m.id "
+    "WHERE m.firm_id=$1 AND c.firm_id=$1 AND c.user_id=$2 "
+    "AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > NOW()) "
+    "AND NOT m.is_sentinel "
+    "AND COALESCE(m.responsible_lawyer_id, m.created_by) IS DISTINCT FROM $2"
+)
+
+
+@app.get("/api/matters/shared-with-me")
+async def list_matters_shared_with_me(request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    if not user.get("id"):
+        return {"matter_ids": [], "count": 0}
+    async with _db_pool.acquire() as conn:
+        rows = await conn.fetch(SHARED_WITH_ME_SQL, FIRM_ID, _uuid_mod.UUID(str(user["id"])))
+    ids = [str(r["id"]) for r in rows]
+    return {"matter_ids": ids, "count": len(ids)}
+
+
 # ── Collaboration discussion thread (2026-10-02) ─────────────────────────────
 # The real security boundary of the feature: every read and write checks, at
 # request time against the database, that the caller is the matter's CURRENT
