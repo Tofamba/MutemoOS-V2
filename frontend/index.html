@@ -1011,6 +1011,10 @@ select{cursor:pointer}
       style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
       👤 My Matters <span id="matters-scope-mine-count" style="font-weight:400;opacity:0.8"></span>
     </button>
+    <button id="matters-scope-shared" onclick="setMattersScope('shared')"
+      style="padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
+      🤝 Shared with me <span id="matters-scope-shared-count" style="font-weight:400;opacity:0.8"></span>
+    </button>
     <button id="matters-scope-other" onclick="setMattersScope('other')"
       style="display:none;padding:6px 14px;border-radius:20px;border:1px solid var(--border);cursor:pointer;font-size:0.8rem;font-weight:600;transition:all .15s">
       👥 Other Matters
@@ -3309,13 +3313,14 @@ async function submitNewMatter() {
   }
 }
 
-async function loadMatters() {
+async function loadMatters(opts) {
   try {
     const res = await fetch(`${API}/api/matters`);
     matters = await res.json();
     populateMatterSelects();
     renderMattersList();
   } catch(e) { console.error('Could not load matters:', e); }
+  if (!(opts && opts.skipShared)) refreshSharedMatters();
 }
 
 // "Mine" for a matter (2026-10-02): its responsible lawyer, falling back to
@@ -3333,9 +3338,40 @@ function isMyMatter(m) { return !!window._userId && matterOwnerId(m) === window.
 // GET /api/matters still returns the full list and permissions are
 // unchanged. With no real login identity (AUTH_ENABLED=False) the tab shows
 // every matter, as the Clients tab does.
-let _mattersScope = null;          // 'mine' | 'other' | null (unset -> 'mine')
+let _mattersScope = null;          // 'mine' | 'other' | 'shared' | null (unset -> 'mine')
 let _mattersOtherUserId = '';
 let _mattersColleagues = null;     // [{id, display_name, is_active}], loaded lazily
+
+// "Shared with me" (2026-10-03, stage 4): matters where I'm an ACTIVE
+// collaborator and not the owner. The SERVER decides which matters qualify
+// (GET /api/matters/shared-with-me -- the one definition of "active" used by
+// every collaboration endpoint); this only holds its answer and scopes the
+// already-loaded `matters` list by it. Open to every authenticated user, not
+// just partners/admins. Navigation only: revoking removes a matter on the
+// next refresh, and the stage 2/3 endpoints stay the security boundary.
+let _sharedMatterIds = null;       // Set of matter ids from the server; null until first answer
+
+function sharedMattersList() {
+  // !isMyMatter keeps the two scopes disjoint even between refreshes (e.g. a
+  // matter just reassigned to me); the server applies the same owner rule.
+  return _sharedMatterIds ? matters.filter(m => _sharedMatterIds.has(m.id) && !isMyMatter(m)) : [];
+}
+
+async function refreshSharedMatters() {
+  if (!window._userId) return;
+  try {
+    const res = await fetch(`${API}/api/matters/shared-with-me`);
+    if (!res.ok) return;           // keep the last known set; a failure never widens the scope
+    _sharedMatterIds = new Set((await res.json()).matter_ids || []);
+  } catch (e) { return; }
+  // The server can know of a shared matter the loaded list lacks (just
+  // shared): reload the list once rather than show a count with no card.
+  if ([..._sharedMatterIds].some(id => !matters.some(m => m.id === id))) {
+    await loadMatters({ skipShared: true });
+    return;
+  }
+  renderMattersList();
+}
 
 function canViewOtherMatters() {
   return !!window._userId && (window._userRole === 'partner' || window._userRole === 'admin');
@@ -3343,6 +3379,7 @@ function canViewOtherMatters() {
 
 function scopedMattersList() {
   if (!window._userId) return matters;
+  if (_mattersScope === 'shared') return sharedMattersList();
   if (_mattersScope === 'other' && canViewOtherMatters()) {
     return _mattersOtherUserId ? matters.filter(m => matterOwnerId(m) === _mattersOtherUserId) : [];
   }
@@ -3366,6 +3403,9 @@ async function setMattersScope(scope) {
   if (searchBox) searchBox.value = '';
   if (scope === 'other') await _loadMattersColleagues();
   renderMattersList();
+  // Choosing Shared with me always asks the server again, so a revoked or
+  // newly granted collaboration is reflected immediately.
+  if (scope === 'shared') await refreshSharedMatters();
 }
 
 function setMattersOtherColleague(userId) {
@@ -3382,7 +3422,7 @@ function _renderMattersScopeBar() {
   bar.style.display = hasIdentity ? 'flex' : 'none';
   const otherBtn = document.getElementById('matters-scope-other');
   if (otherBtn) otherBtn.style.display = canViewOtherMatters() ? '' : 'none';
-  [['matters-scope-mine', 'mine'], ['matters-scope-other', 'other']].forEach(([id, scope]) => {
+  [['matters-scope-mine', 'mine'], ['matters-scope-other', 'other'], ['matters-scope-shared', 'shared']].forEach(([id, scope]) => {
     const btn = document.getElementById(id);
     if (!btn) return;
     const active = _mattersScope === scope;
@@ -3392,6 +3432,8 @@ function _renderMattersScopeBar() {
   });
   const mineCountEl = document.getElementById('matters-scope-mine-count');
   if (mineCountEl) mineCountEl.textContent = `(${matters.filter(isMyMatter).length})`;
+  const sharedCountEl = document.getElementById('matters-scope-shared-count');
+  if (sharedCountEl) sharedCountEl.textContent = `(${sharedMattersList().length})`;
   const sel = document.getElementById('matters-other-colleague');
   if (sel) {
     const show = _mattersScope === 'other' && canViewOtherMatters();
@@ -4910,7 +4952,7 @@ function showTab(tab) {
   if (parent) document.getElementById(`nav-${parent}`).classList.add('active');
   if (tab === 'dashboard') renderDashboard();
   if (tab === 'capture') renderCaptureTab();
-  if (tab === 'matters') renderMattersList();
+  if (tab === 'matters') { renderMattersList(); refreshSharedMatters(); }
   if (tab === 'clients') renderClientsList();
   if (tab === 'calendar') { renderCalendar(); loadReminderSettings(); loadDigestSettings(); }
   if (tab === 'users') { loadUsers(); loadInvites(); }
@@ -5533,6 +5575,8 @@ function renderMattersList(filtered = null) {
     let msg;
     if (isSearching) {
       msg = '<div class="empty-state"><p>No matters match your search.</p></div>';
+    } else if (window._userId && _mattersScope === 'shared') {
+      msg = '<div class="empty-state"><div class="icon">🤝</div><p>Nothing has been shared with you yet. When a colleague invites you to collaborate on a matter, it appears here.</p></div>';
     } else if (window._userId && _mattersScope === 'other' && !_mattersOtherUserId) {
       msg = '<div class="empty-state"><div class="icon">👥</div><p>Choose a colleague above to see their matters.</p></div>';
     } else if (window._userId && _mattersScope === 'other') {
@@ -5965,6 +6009,7 @@ async function revokeCollaborator(matterId, collaborationId, isSelf) {
     alert((data && data.detail) || 'Could not update the collaboration.');
     return;
   }
+  refreshSharedMatters();  // a matter I just left drops out of Shared with me
   await renderMatterPanel(matterId);
 }
 
