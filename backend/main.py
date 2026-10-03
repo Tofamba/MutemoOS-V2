@@ -1294,6 +1294,26 @@ async def run_migrations(pool: asyncpg.Pool = None):
         CREATE INDEX IF NOT EXISTS idx_matter_collaborators_firm
             ON matter_collaborators(firm_id, matter_id);
 
+        -- Matter Collaboration discussion thread (2026-10-02): one thread per
+        -- matter, readable and writable ONLY by its participants (the current
+        -- responsible lawyer and active collaborators -- enforced on every
+        -- request, see _collaboration_participant_role). Deliberately NOT
+        -- progress_notes: those are the lawyer's file record, visible to
+        -- every role, and adding one resets the matter's review dates.
+        -- Messages are immutable in v1 (no edit/delete), so the row itself
+        -- is the record; author is SET NULL (not cascaded) so history
+        -- survives if a user record is ever removed.
+        CREATE TABLE IF NOT EXISTS matter_collaboration_messages (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            firm_id     UUID NOT NULL REFERENCES firms(id) ON DELETE CASCADE,
+            matter_id   UUID NOT NULL REFERENCES matters(id) ON DELETE CASCADE,
+            author_id   UUID REFERENCES users(id) ON DELETE SET NULL,
+            content     TEXT NOT NULL,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_collab_messages_matter
+            ON matter_collaboration_messages(matter_id, created_at DESC);
+
         -- RBZ compliance export audit trail — a dedicated table rather than
         -- another audit_logs row: report_history needs structured
         -- client_count/matter_count columns for the history table the
@@ -8278,6 +8298,148 @@ async def revoke_collaborator(matter_id: str, collaboration_id: str, request: Re
              "collaborator_user_id": str(collab["user_id"]), "collaborator_name": collab["display_name"]},
         )
     return {"revoked": True, "left": left}
+
+
+# ── Collaboration discussion thread (2026-10-02) ─────────────────────────────
+# The real security boundary of the feature: every read and write checks, at
+# request time against the database, that the caller is the matter's CURRENT
+# responsible lawyer or holds an active (not revoked, not expired)
+# matter_collaborators row. Nothing is cached, so a revoked collaborator
+# loses read access on their very next request. Broad role permissions
+# (partner/admin) deliberately do not grant access to the thread.
+#
+# Notification throttle: a participant who already has an unread
+# collaboration_message notification for this matter is not notified again
+# (no Home pile-up, no email per message in a fast back-and-forth); opening
+# the thread marks them read, so the next message after that notifies again.
+#
+# Not audited per message: messages are immutable and are themselves the
+# record of who said what and when; participation changes (invite, revoke,
+# leave) are already audited.
+
+COLLABORATION_MESSAGE_MAX_LENGTH = 5000
+COLLABORATION_MESSAGE_LIST_LIMIT = 200
+
+
+class CollaborationMessageBody(BaseModel):
+    content: str
+
+
+async def _collaboration_participant_role(conn, matter, user_id) -> Optional[str]:
+    if matter["responsible_lawyer_id"] == user_id:
+        return "responsible"
+    row = await conn.fetchrow(
+        "SELECT 1 AS ok FROM matter_collaborators WHERE matter_id=$1 AND firm_id=$2 AND user_id=$3 "
+        "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
+        matter["id"], FIRM_ID, user_id
+    )
+    return "collaborator" if row else None
+
+
+async def _require_collaboration_participant(conn, matter_id: "_uuid_mod.UUID", user_id) -> dict:
+    matter = await conn.fetchrow(
+        "SELECT id, name, matter_number, responsible_lawyer_id FROM matters WHERE id=$1 AND firm_id=$2",
+        matter_id, FIRM_ID
+    )
+    if not matter:
+        raise HTTPException(status_code=404, detail="Matter not found")
+    if not await _collaboration_participant_role(conn, matter, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the responsible lawyer and active collaborators can use this discussion.",
+        )
+    return matter
+
+
+def _row_to_collaboration_message(row, caller_id) -> dict:
+    return {
+        "id": str(row["id"]),
+        "author_id": str(row["author_id"]) if row["author_id"] else None,
+        "author_name": row["author_name"],
+        "content": row["content"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "mine": bool(caller_id and row["author_id"] == caller_id),
+    }
+
+
+@app.get("/api/matters/{matter_id}/collaboration/messages")
+async def list_collaboration_messages(matter_id: str, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    caller_id = _require_real_identity(user)
+    mid = _parse_uuid_or_400(matter_id, "matter_id")
+    async with _db_pool.acquire() as conn:
+        await _require_collaboration_participant(conn, mid, caller_id)
+        rows = await conn.fetch(
+            "SELECT msg.id, msg.author_id, msg.content, msg.created_at, u.display_name AS author_name "
+            "FROM matter_collaboration_messages msg LEFT JOIN users u ON u.id = msg.author_id "
+            "WHERE msg.matter_id=$1 AND msg.firm_id=$2 ORDER BY msg.created_at DESC LIMIT $3",
+            mid, FIRM_ID, COLLABORATION_MESSAGE_LIST_LIMIT
+        )
+        # Opening the thread is reading it: clear this person's pending
+        # collaboration pointers for the matter so Home doesn't keep nagging.
+        await conn.execute(
+            "UPDATE user_notifications SET read_at=NOW() WHERE user_id=$1 AND firm_id=$2 AND matter_id=$3 "
+            "AND kind IN ('collaboration_message', 'matter_collaboration_invited') AND read_at IS NULL",
+            caller_id, FIRM_ID, mid
+        )
+    return {"messages": [_row_to_collaboration_message(r, caller_id) for r in rows]}
+
+
+@app.post("/api/matters/{matter_id}/collaboration/messages", status_code=201)
+async def post_collaboration_message(matter_id: str, body: CollaborationMessageBody, request: Request):
+    user = await get_current_user(request)
+    _check_permission(user, "matter:read")
+    caller_id = _require_real_identity(user)
+    mid = _parse_uuid_or_400(matter_id, "matter_id")
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+    if len(content) > COLLABORATION_MESSAGE_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message exceeds the maximum length of {COLLABORATION_MESSAGE_MAX_LENGTH} characters",
+        )
+
+    async with _db_pool.acquire() as conn:
+        matter = await _require_collaboration_participant(conn, mid, caller_id)
+        row = await conn.fetchrow(
+            "INSERT INTO matter_collaboration_messages (firm_id, matter_id, author_id, content) "
+            "VALUES ($1, $2, $3, $4) RETURNING id, author_id, content, created_at",
+            FIRM_ID, mid, caller_id, content
+        )
+        collab_rows = await conn.fetch(
+            "SELECT user_id FROM matter_collaborators WHERE matter_id=$1 AND firm_id=$2 "
+            "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())",
+            mid, FIRM_ID
+        )
+        candidates = {r["user_id"] for r in collab_rows}
+        if matter["responsible_lawyer_id"]:
+            candidates.add(matter["responsible_lawyer_id"])
+        candidates.discard(caller_id)
+        recipients, pending = set(), set()
+        if candidates:
+            active = await conn.fetch(
+                "SELECT id FROM users WHERE firm_id=$1 AND is_active=TRUE AND id = ANY($2::uuid[])",
+                FIRM_ID, list(candidates)
+            )
+            recipients = {r["id"] for r in active}
+            pending_rows = await conn.fetch(
+                "SELECT DISTINCT user_id FROM user_notifications WHERE firm_id=$1 AND matter_id=$2 "
+                "AND kind='collaboration_message' AND read_at IS NULL AND user_id = ANY($3::uuid[])",
+                FIRM_ID, mid, list(recipients)
+            )
+            pending = {r["user_id"] for r in pending_rows}
+
+    author_name = user.get("display_name") or "A colleague"
+    preview = content if len(content) <= 200 else content[:200] + "…"
+    for rid in recipients - pending:
+        await create_user_notification(
+            rid, "collaboration_message", f"New message — {matter['name']}",
+            f"{author_name}: {preview}\n\nOpen the matter from your Home screen in Mutemo Desk to read and reply.",
+            matter_id=mid,
+        )
+    return _row_to_collaboration_message({**dict(row), "author_name": author_name}, caller_id)
 
 
 def _row_to_user_notification(row) -> dict:

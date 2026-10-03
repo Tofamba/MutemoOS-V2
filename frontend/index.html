@@ -5859,7 +5859,16 @@ function _matterOverviewHtml(matter, id, linkedClient, availableUsers) {
 // responsible lawyer (who can invite/remove) and the collaborators
 // themselves (who can leave). A coordination record -- it does not change
 // anyone's access to the matter.
-function _matterCollaboratorsHtml(id, data, colleagues) {
+function _collabMessagesHtml(messages) {
+  if (!messages || !messages.length) return '<div class="dash-empty">No messages yet.</div>';
+  return messages.map(m => `
+    <div class="note-item">
+      <div class="note-text" style="white-space:pre-wrap">${escHtml(m.content)}</div>
+      <div class="note-footer"><span>🖊 ${escHtml(m.author_name || 'Former colleague')}${m.mine ? ' (you)' : ''} · ${escHtml(m.created_at ? new Date(m.created_at).toLocaleString() : '')}</span></div>
+    </div>`).join('');
+}
+
+function _matterCollaboratorsHtml(id, data, colleagues, messages) {
   if (!data || !(data.can_manage || data.my_collaboration_id)) return '';
   const rows = (data.collaborators || []).map(c => {
     const isMe = c.id === data.my_collaboration_id;
@@ -5892,7 +5901,46 @@ function _matterCollaboratorsHtml(id, data, colleagues) {
       <div style="font-size:0.74rem;color:var(--ink3);margin-bottom:6px">Colleagues invited to confer on this matter. They are notified; this does not change anyone's access.</div>
       ${rows || '<div class="dash-empty">No collaborators yet.</div>'}
       ${invite}
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--paper2)">
+        <div style="font-size:0.78rem;font-weight:700;color:var(--ink2);margin-bottom:2px">💬 Discussion</div>
+        <div style="font-size:0.72rem;color:var(--ink3);margin-bottom:6px">Private to you and the collaborators on this matter. Messages can't be edited or deleted.</div>
+        <div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:8px">
+          <textarea id="collab-msg-${id}" rows="2" maxlength="5000" placeholder="Write a message…"
+            style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:0.8rem;font-family:var(--font-sans);background:var(--paper)"></textarea>
+          <button class="btn btn-sm btn-primary" style="width:auto" onclick="postCollaborationMessage('${id}')">Send</button>
+        </div>
+        <div id="collab-thread-${id}">${_collabMessagesHtml(messages)}</div>
+      </div>
     </div>`;
+}
+
+async function postCollaborationMessage(matterId) {
+  const box = document.getElementById(`collab-msg-${matterId}`);
+  const text = box ? box.value.trim() : '';
+  if (!text) return;
+  const res = await fetch(`${API}/api/matters/${matterId}/collaboration/messages`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ content: text }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    alert((data && data.detail) || 'Could not send the message.');
+    // Lost access (e.g. just revoked): re-render so the section disappears.
+    if (res.status === 403) await renderMatterPanel(matterId);
+    return;
+  }
+  if (box) box.value = '';
+  await _refreshCollaborationThread(matterId);
+}
+
+async function _refreshCollaborationThread(matterId) {
+  const el = document.getElementById(`collab-thread-${matterId}`);
+  if (!el) return;
+  const res = await fetch(`${API}/api/matters/${matterId}/collaboration/messages`);
+  if (res.status === 403) { await renderMatterPanel(matterId); return; }
+  if (!res.ok) return;
+  el.innerHTML = _collabMessagesHtml((await res.json()).messages || []);
 }
 
 async function inviteCollaborator(matterId) {
@@ -5977,6 +6025,15 @@ async function renderMatterPanel(id) {
     ]);
     const collabData = collabRes.ok ? await collabRes.json() : null;
     const colleagues = (colleaguesRes && colleaguesRes.ok) ? await colleaguesRes.json() : [];
+    // The discussion thread is only ever fetched for participants (the
+    // server re-checks on every request; this just avoids a pointless 403).
+    let collabMessages = [];
+    if (collabData && (collabData.can_manage || collabData.my_collaboration_id)) {
+      try {
+        const msgRes = await fetch(`${API}/api/matters/${id}/collaboration/messages`);
+        if (msgRes.ok) collabMessages = (await msgRes.json()).messages || [];
+      } catch (e) { collabMessages = []; }
+    }
     const docs = await docsRes.json();
     // Cached so _matterNoteToggleExpand() can re-render just the notes
     // list on a Read-more click without a full renderMatterPanel()
@@ -5994,7 +6051,7 @@ async function renderMatterPanel(id) {
     const notes = matter.progress_notes || [];
     const html = `
       ${_matterOverviewHtml(matter, id, linkedClient, availableUsers)}
-      ${_matterCollaboratorsHtml(id, collabData, colleagues)}
+      ${_matterCollaboratorsHtml(id, collabData, colleagues, collabMessages)}
       ${matterStageTrackerHtml(matter)}
 
       <!-- Matter metadata controls -->
