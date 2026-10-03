@@ -337,18 +337,20 @@ select{cursor:pointer}
 .matter-section-title{font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--ink3);margin-bottom:0.65rem;display:flex;align-items:center;gap:6px}
 
 /* ── Matter Workspace Phase 2A (2026-10-03): persistent header, tabs, cards ── */
-.mw-header{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.65rem 1rem;margin-bottom:0.6rem}
-.mw-header-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
-.mw-title{font-size:1.2rem;margin:0 0 4px;line-height:1.25;word-break:break-word}
-.mw-meta{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:0.8rem;color:var(--ink2)}
-.mw-sub{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:6px;font-size:0.76rem;color:var(--ink3)}
+.mw-header{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:0.55rem 1rem;margin-bottom:0.45rem}
+.mw-header-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:nowrap}
+.mw-title{font-size:1.2rem;margin:0 0 3px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mw-meta{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:0.8rem;color:var(--ink2)}
+.mw-meta .mw-dot{margin:0 8px;color:var(--ink3)}
+.mw-sub{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px;font-size:0.76rem;color:var(--ink3)}
+.mw-sub span{margin-right:18px}
 .mw-actions{display:flex;gap:8px;align-items:center;position:relative;flex-shrink:0}
 .mw-more-menu{display:none;position:absolute;right:0;top:100%;margin-top:4px;background:var(--white);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.14);min-width:200px;z-index:30;overflow:hidden}
 .mw-more-menu.open{display:block}
 .mw-more-menu button{display:block;width:100%;text-align:left;padding:9px 14px;border:0;background:none;cursor:pointer;font-size:0.82rem;font-family:var(--font-sans);color:var(--ink)}
 .mw-more-menu button:hover{background:var(--paper2)}
-.mw-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:0.7rem;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
-.mw-tab{padding:9px 14px;border:0;background:none;cursor:pointer;font-size:0.84rem;font-weight:600;font-family:var(--font-sans);color:var(--ink3);border-bottom:2px solid transparent;margin-bottom:-1px;flex-shrink:0}
+.mw-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:0.5rem;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+.mw-tab{padding:7px 14px;border:0;background:none;cursor:pointer;font-size:0.84rem;font-weight:600;font-family:var(--font-sans);color:var(--ink3);border-bottom:2px solid transparent;margin-bottom:-1px;flex-shrink:0}
 .mw-tab:hover{color:var(--ink)}
 .mw-tab.active{color:var(--green);border-bottom-color:var(--green)}
 .mw-panel{display:none}
@@ -368,8 +370,20 @@ select{cursor:pointer}
 .mw-doc-filters input,.mw-doc-filters select{padding:5px 9px;border:1px solid var(--border);border-radius:6px;font-size:0.78rem;background:var(--paper);font-family:var(--font-sans);width:auto}
 .mw-doc-filters input{flex:1 1 200px;min-width:180px}
 .mw-info{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;border:1px solid var(--ink3);color:var(--ink3);font-size:0.62rem;font-weight:700;cursor:help;margin-left:4px;text-transform:none;letter-spacing:0}
-@media (min-width:1100px){.mw-cards{grid-template-columns:repeat(4,minmax(0,1fr))}}
-@media (max-width:760px){.mw-cards{grid-template-columns:1fr}.mw-title{font-size:1.05rem}}
+@media (min-width:900px){.mw-cards{grid-template-columns:repeat(4,minmax(0,1fr))}}
+/* Short windows (under 700px tall): the workspace header's sub line (next action / last activity -- both already
+   on the Overview cards) is hidden, the app brand bar becomes one compact line, and the page padding above the
+   workspace shrinks, so a real matter's Overview fits without scrolling. Visual only. */
+@media (max-height:700px){
+  .mw-sub{display:none}
+  #main-app .header{height:40px}
+  #main-app .header-seal{width:26px;height:26px}
+  #main-app .header-seal img{width:18px!important;height:18px!important}
+  #main-app .header-subtitle{display:none}
+  #main-app .header-title{font-size:1rem}
+  #main-app .main{padding-top:0.6rem}
+}
+@media (max-width:760px){.mw-cards{grid-template-columns:1fr}.mw-title{font-size:1.05rem}.mw-header-top{flex-wrap:wrap}}
 
 /* ── Matter Progress Tracker (visual stepper) ── */
 .stage-tracker{display:flex;align-items:flex-start;overflow-x:auto;padding:4px 2px 6px}
@@ -1084,10 +1098,6 @@ select{cursor:pointer}
      into this container's own docs-content-${id} div instead of a
      per-row one inside the matters list. -->
 <div id="tab-matter-workspace" style="display:none">
-  <button class="btn btn-outline" onclick="closeMatterWorkspace()"
-          style="font-size:0.85rem;font-weight:700;padding:0.4rem 1rem;margin-bottom:0.6rem">
-    ← Back to Matters
-  </button>
   <!-- Phase 2A (2026-10-03): persistent header above every tab; rendered by
        _renderMatterHeader() -- instantly from the loaded matter, then again
        once the linked client (compliance chip) has loaded. -->
@@ -5845,21 +5855,27 @@ function _renderMatterHeader(matter, linkedClient) {
   const status = matter.status || 'Active';
   const clientName = linkedClient ? linkedClient.full_name : matter.client_name;
   const lastActivity = matter.last_activity ? matter.last_activity.slice(0, 10) : '';
-  const sep = '<span style="color:var(--ink3)">·</span>';
+  const sep = '<span class="mw-dot">·</span>';
   const bits = [
     matter.practice_area ? escHtml(matter.practice_area) : '',
     `<span class="chip ${STATUS_COLORS[status] || 'chip-gray'}">${escHtml(status)}</span>`,
     clientName ? `${escHtml(clientName)}${linkedClient ? ' ' + complianceStatusChipHtml(linkedClient.compliance_status) : ''}` : '',
     matter.responsible_lawyer_name ? `Responsible: ${escHtml(matter.responsible_lawyer_name)}` : 'Responsible: not assigned',
   ].filter(Boolean);
+  // Each header row is a single line that truncates with an ellipsis (a long
+  // title or client name can no longer make the header taller); the full
+  // text is available on hover.
+  const metaPlain = [matter.practice_area, status, clientName, matter.responsible_lawyer_name ? `Responsible: ${matter.responsible_lawyer_name}` : 'Responsible: not assigned'].filter(Boolean).join(' · ');
+  const subPlain = [matter.next_action ? `Next: ${matter.next_action}` : '', lastActivity ? `Last activity: ${lastActivity}` : ''].filter(Boolean).join('   ');
   el.innerHTML = `
     <div class="mw-header">
       <div class="mw-header-top">
         <div style="min-width:0;flex:1">
-          <h2 class="mw-title">${escHtml(matter.name)}</h2>
-          <div class="mw-meta">${bits.join(` ${sep} `)}</div>
+          <h2 class="mw-title" title="${escHtml(matter.name)}">${escHtml(matter.name)}</h2>
+          <div class="mw-meta" title="${escHtml(metaPlain)}">${bits.join(sep)}</div>
         </div>
         <div class="mw-actions">
+          <button class="btn btn-outline btn-sm" style="width:auto" onclick="closeMatterWorkspace()">← Back to Matters</button>
           ${matter.client_id ? `<button class="btn btn-outline btn-sm" style="width:auto" onclick="goToClientFromMatter('${matter.client_id}','${id}')">View Client →</button>` : ''}
           <button class="btn btn-outline btn-sm" style="width:auto" onclick="mwToggleMore(event)">More ▾</button>
           <div class="mw-more-menu" id="mw-more-menu" onclick="event.stopPropagation()">
@@ -5869,7 +5885,7 @@ function _renderMatterHeader(matter, linkedClient) {
           </div>
         </div>
       </div>
-      ${(matter.next_action || lastActivity) ? `<div class="mw-sub">
+      ${(matter.next_action || lastActivity) ? `<div class="mw-sub" title="${escHtml(subPlain)}">
         ${matter.next_action ? `<span><strong>Next:</strong> ${escHtml(matter.next_action)}</span>` : ''}
         ${lastActivity ? `<span>Last activity: ${escHtml(lastActivity)}</span>` : ''}
       </div>` : ''}
