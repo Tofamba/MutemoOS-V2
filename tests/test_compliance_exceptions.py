@@ -23,6 +23,7 @@ import json
 import re
 import uuid
 from datetime import date, datetime, timezone
+from backend.timeutil import firm_today
 
 import pytest
 from fastapi import HTTPException
@@ -771,7 +772,7 @@ def test_pep_review_due_does_not_fire_before_the_due_date(monkeypatch):
     client = _client_row(client_id, client_type="Individual")
     compliance = _compliance(
         client_id, is_pep=True, senior_management_approved_by=uuid.uuid4(), risk_rating="High",
-        pep_ceased_date=date.today(), pep_review_due=date(2099, 1, 1),
+        pep_ceased_date=firm_today(), pep_review_due=date(2099, 1, 1),
     )
     pool = FakePool(clients=[client], compliance={client_id: compliance})
     monkeypatch.setattr(m, "_db_pool", pool)

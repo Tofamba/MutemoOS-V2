@@ -41,6 +41,7 @@ from backend.numbering import (
 from backend.case_binder import provision_case_binder
 from backend.practice_areas import PRACTICE_AREAS, classify_practice_area, extract_classification_text, INTAKE_MATTER_TYPE_TO_PRACTICE_AREA
 from backend.matter_health import compute_matter_health
+from backend.timeutil import firm_today, to_firm_date
 from backend.conveyancing import CONVEYANCING_MILESTONES
 from backend.title_deeds_checklist import (
     CLIENT_TYPE_TO_CHECKLIST_CATEGORY, SPA_CATEGORIES, category_display_label,
@@ -4636,7 +4637,7 @@ def _resolve_review_dates(explicit_next_review_date: Optional[str]) -> tuple:
     verbatim, restarting the clock from today); otherwise
     today + DEFAULT_REVIEW_INTERVAL_DAYS.
     """
-    today = date.today()
+    today = firm_today()
     if explicit_next_review_date:
         try:
             next_review = date.fromisoformat(explicit_next_review_date)
@@ -4713,9 +4714,9 @@ async def _create_matter_row(
         if numbering_client_number else None
     )
     if next_review_date is None:
-        next_review_date = date.today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
+        next_review_date = firm_today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
     if last_reviewed_date is None:
-        last_reviewed_date = date.today()
+        last_reviewed_date = firm_today()
     if responsible_lawyer_id is None:
         responsible_lawyer_id = created_by
     return await conn.fetchrow("""
@@ -4811,7 +4812,7 @@ async def _sync_client_relationship_ended(conn, client_id) -> None:
         client_id, FIRM_ID
     )
     all_closed = bool(matter_rows) and all(m["status"] == "Closed" for m in matter_rows)
-    ended_date = date.today() if all_closed else None
+    ended_date = firm_today() if all_closed else None
 
     existing = await conn.fetchrow(
         "SELECT id, relationship_ended_date FROM client_compliance WHERE client_id=$1 AND firm_id=$2",
@@ -5194,7 +5195,7 @@ def _row_to_compliance_event(row) -> dict:
     else:
         result = "—"
     return {
-        "date": d["created_at"].date().isoformat() if d.get("created_at") else None,
+        "date": to_firm_date(d["created_at"]).isoformat() if d.get("created_at") else None,
         "event": _COMPLIANCE_EVENT_LABELS.get(action, action),
         "user": d.get("actor_name") or "Unknown",
         "result": result,
@@ -5326,7 +5327,7 @@ def _pep_review_due_issue(compliance: dict) -> Optional[tuple]:
         return None
     if isinstance(review_due, str):
         review_due = date.fromisoformat(review_due)
-    if review_due > date.today():
+    if review_due > firm_today():
         return None
     label = "PEP status review due"
     if compliance.get("pep_ceased_date"):
@@ -6505,7 +6506,7 @@ async def update_beneficial_owner(client_id: str, owner_id: str, update: Benefic
                 raise HTTPException(status_code=400, detail=f"{k} must be in YYYY-MM-DD format")
     if fields.get("verification_status") == "Verified":
         fields["verified_by"] = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
-        fields.setdefault("verified_date", datetime.utcnow().date())
+        fields.setdefault("verified_date", firm_today())
     set_clauses = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields.keys()))
     values = list(fields.values())
     async with _db_pool.acquire() as conn:
@@ -6723,7 +6724,7 @@ async def update_client_compliance(client_id: str, update: ClientComplianceUpdat
     # beneficial_owners.verified_by/verified_date.
     if fields.get("conflict_check_reviewed") is True:
         fields["conflict_check_reviewed_by"] = _uuid_mod.UUID(str(user["id"])) if user.get("id") else None
-        fields["conflict_check_reviewed_date"] = datetime.utcnow().date()
+        fields["conflict_check_reviewed_date"] = firm_today()
     elif fields.get("conflict_check_reviewed") is False:
         fields["conflict_check_reviewed_by"] = None
         fields["conflict_check_reviewed_date"] = None
@@ -6908,7 +6909,7 @@ async def create_cdd_review(client_id: str, review: CDDReviewCreate, request: Re
         except ValueError:
             raise HTTPException(status_code=400, detail="review_date must be in YYYY-MM-DD format")
     else:
-        review_date = date.today()
+        review_date = firm_today()
 
     changes_identified = (review.changes_identified or "").strip() or None
     further_action = (review.further_action or "").strip() or None
@@ -7202,7 +7203,7 @@ def _ai_action_anchor_date(exception_row: dict) -> date:
     if due:
         return due if not isinstance(due, str) else date.fromisoformat(due)
     created = exception_row["created_at"]
-    return created.date() if hasattr(created, "date") else date.fromisoformat(created)
+    return to_firm_date(created) if hasattr(created, "date") else date.fromisoformat(created)
 
 
 def _recommended_action_and_draft_text(issue_code: str, issue_label: str, action_type: str, client_name: str):
@@ -7311,7 +7312,7 @@ async def _run_ai_action_queue_scan(today: Optional[date] = None) -> list:
     """
     if not _db_pool:
         return []
-    today = today or datetime.utcnow().date()
+    today = today or firm_today()
     created = []
     async with _db_pool.acquire() as conn:
         firm_row = await conn.fetchrow("SELECT escalation_config FROM firms WHERE id=$1", FIRM_ID)
@@ -7422,6 +7423,9 @@ async def _maybe_run_ai_action_queue_scheduler():
     """
     if not _db_pool:
         return
+    # utc-ok: once-a-day gate for the hourly UTC scheduler loop (same cadence as
+    # the reminder/digest checks, which are keyed to send_hour_utc). The scan it
+    # triggers computes its own calendar dates with firm_today().
     today = datetime.utcnow().date()
     async with _db_pool.acquire() as conn:
         firm_row = await conn.fetchrow(
@@ -7429,7 +7433,7 @@ async def _maybe_run_ai_action_queue_scheduler():
         )
         if firm_row and firm_row["ai_action_queue_last_run_date"] == today:
             return
-    created = await _run_ai_action_queue_scan(today)
+    created = await _run_ai_action_queue_scan(firm_today())
     async with _db_pool.acquire() as conn:
         await conn.execute(
             "UPDATE firms SET ai_action_queue_last_run_date=$1 WHERE id=$2", today, FIRM_ID
@@ -10883,7 +10887,7 @@ async def _fetch_aml_exceptions_rows(conn, include_resolved: bool = False) -> li
             # resolved/closed row below, kept present on every row regardless
             # (rather than an optional key) so callers never need a
             # conditional key check.
-            "resolved_on": resolved_on.date().isoformat() if resolved_on else "",
+            "resolved_on": to_firm_date(resolved_on).isoformat() if resolved_on else "",
             "closed_reason": e.get("closed_reason") or "" if e["status"] == "ClosedNoFurtherAction" else "",
         }
 
@@ -11325,8 +11329,8 @@ async def _compute_my_portfolio(conn, user_id: "_uuid_mod.UUID", lawyer_name: Op
         FIRM_ID, user_id
     )
 
-    today_iso = date.today().isoformat()
-    due_soon_cutoff = (date.today() + timedelta(days=REVIEW_DIGEST_LOOKAHEAD_DAYS)).isoformat()
+    today_iso = firm_today().isoformat()
+    due_soon_cutoff = (firm_today() + timedelta(days=REVIEW_DIGEST_LOOKAHEAD_DAYS)).isoformat()
     overdue_count = sum(1 for r in review_rows if r["next_review_date"] and r["next_review_date"] < today_iso)
     due_soon_count = sum(
         1 for r in review_rows
@@ -12056,14 +12060,14 @@ async def _fetch_client_general_activity(conn, matter_ids: list) -> list:
     events = []
     for n in notes:
         events.append({
-            "date": n["created_at"].date().isoformat() if n["created_at"] else None,
+            "date": to_firm_date(n["created_at"]).isoformat() if n["created_at"] else None,
             "event": "Progress note added",
             "user": n["author"] or "Unknown",
             "result": _truncate_preview(n["text"]),
         })
     for d in docs:
         events.append({
-            "date": d["uploaded_at"].date().isoformat() if d["uploaded_at"] else None,
+            "date": to_firm_date(d["uploaded_at"]).isoformat() if d["uploaded_at"] else None,
             "event": "Document uploaded",
             "user": names_by_user.get(d["uploaded_by"], "Unknown"),
             "result": d["filename"] or "",
@@ -12167,7 +12171,7 @@ async def client_activity_report_export_pdf(request: Request):
 #     happened) isn't "upcoming or overdue" the way a missed deadline is.
 
 async def _fetch_deadline_calendar_rows(conn, user, user_id) -> list:
-    today_iso = date.today().isoformat()
+    today_iso = firm_today().isoformat()
     deadline_rows = await conn.fetch(
         "SELECT name, matter_number, number, client_name, next_deadline, next_deadline_note "
         "FROM matters WHERE firm_id=$1 AND created_by=$2 AND NOT is_sentinel AND next_deadline IS NOT NULL "
@@ -12630,7 +12634,7 @@ async def update_checklist_item(matter_id: str, item_id: str, update: ChecklistI
         except ValueError:
             raise HTTPException(status_code=400, detail="collected_date must be in YYYY-MM-DD format")
     if fields.get("status") == "Collected" and "collected_date" not in fields:
-        fields["collected_date"] = date.today()
+        fields["collected_date"] = firm_today()
 
     fields["updated_at"] = datetime.utcnow()
     set_clauses = ", ".join(f"{k}=${i+4}" for i, k in enumerate(fields.keys()))
@@ -17054,7 +17058,7 @@ def _extract_dates_from_text(text: str) -> dict:
     — document_summary is genuinely optional (a short progress note has no
     real "summary" of its own; callers that don't use it just ignore it).
     """
-    today = datetime.utcnow().date().isoformat()
+    today = firm_today().isoformat()
     msg = client.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=1500,
@@ -17964,6 +17968,7 @@ async def test_reminder(request: Request):
     if not recipient:
         raise HTTPException(status_code=400, detail="No recipient email configured.")
     # Send a test with a dummy upcoming event so the HTML template renders
+    # utc-ok: mirrors the real reminder scheduler, which is keyed to UTC (send_hour_utc).
     today = datetime.utcnow().date()
     async with _db_pool.acquire() as conn:
         rows = await conn.fetch("""

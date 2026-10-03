@@ -19,6 +19,7 @@ tests/test_client_compliance.py.
 import asyncio
 import uuid
 from datetime import date, datetime, timezone
+from backend.timeutil import firm_today
 
 import pytest
 from fastapi import HTTPException
@@ -260,7 +261,7 @@ def test_review_date_defaults_to_today_when_omitted(monkeypatch):
     review = CDDReviewCreate(info_current=True, bo_current=True, matter_activity_consistent=True, risk_rating="Low")
     result = asyncio.run(create_cdd_review(str(client_id), review, _fake_request()))
 
-    assert result["review_date"] == date.today().isoformat()
+    assert result["review_date"] == firm_today().isoformat()
 
 
 def test_blank_changes_identified_string_is_treated_as_none(monkeypatch):

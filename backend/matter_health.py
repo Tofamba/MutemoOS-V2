@@ -63,6 +63,8 @@ the Medium risk too, so "why is this Red" never hides half the answer.
 from datetime import date, datetime
 from typing import Optional
 
+from backend.timeutil import firm_today, to_firm_date
+
 # Matches deadlineChipHtml()'s existing red/amber/blue split for
 # next_deadline exactly (frontend/index.html) -- the health badge and the
 # deadline chip a lawyer already sees on the same matter must agree.
@@ -105,7 +107,7 @@ def _parse_date_like(value) -> Optional[date]:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.date()
+        return to_firm_date(value)
     if isinstance(value, date):
         return value
     if isinstance(value, str):
@@ -236,7 +238,7 @@ def compute_matter_health(matter: dict, today: Optional[date] = None) -> dict:
     closely enough to this for the relevant keys to be present when they
     mean something.
     """
-    today = today or datetime.utcnow().date()
+    today = today or firm_today()
 
     status = matter.get("status")
     if status in GREY_STATUSES:

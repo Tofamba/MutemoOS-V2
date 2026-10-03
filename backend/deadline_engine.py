@@ -10,6 +10,8 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+from backend.timeutil import firm_today
+
 
 def extract_event_date(query: str) -> Optional[date]:
     patterns = [
@@ -52,7 +54,7 @@ def extract_notice_period_days(source_text: str) -> Optional[int]:
 
 
 def calculate_deadline(event_date: date, notice_days: int, today: Optional[date] = None) -> dict:
-    today = today or datetime.utcnow().date()
+    today = today or firm_today()
     deadline = event_date - timedelta(days=notice_days)
     days_remaining = (deadline - today).days
 

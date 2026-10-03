@@ -13,6 +13,7 @@ import asyncio
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from backend.timeutil import firm_today
 
 import pytest
 from fastapi import HTTPException
@@ -113,7 +114,7 @@ def _fake_request():
 def test_new_matter_gets_default_review_date():
     conn = FakeConnection()
     row = asyncio.run(_create_matter_row(conn, FIRM_ID, "New Estate Matter"))
-    assert row["next_review_date"] == date.today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
+    assert row["next_review_date"] == firm_today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
 
 
 def test_new_matter_gets_last_reviewed_date_stamped_to_today():
@@ -121,7 +122,7 @@ def test_new_matter_gets_last_reviewed_date_stamped_to_today():
     its own creation."""
     conn = FakeConnection()
     row = asyncio.run(_create_matter_row(conn, FIRM_ID, "New Estate Matter"))
-    assert row["last_reviewed_date"] == date.today()
+    assert row["last_reviewed_date"] == firm_today()
 
 
 def test_create_matter_row_respects_explicit_next_review_date():
@@ -146,7 +147,7 @@ def test_explicit_review_date_overrides_default_and_restarts_clock(monkeypatch):
     # Even an explicit far-future override still stamps last_reviewed_date
     # to today -- this touch IS the review happening now, regardless of
     # when the matter should next be looked at.
-    assert result["last_reviewed_date"] == date.today().isoformat()
+    assert result["last_reviewed_date"] == firm_today().isoformat()
 
 
 def test_every_update_stamps_last_reviewed_date_to_today(monkeypatch):
@@ -156,7 +157,7 @@ def test_every_update_stamps_last_reviewed_date_to_today(monkeypatch):
     monkeypatch.setattr(m, "_db_pool", pool)
 
     result = asyncio.run(update_matter(str(matter_id), MatterUpdate(status="On Hold"), _fake_request()))
-    assert result["last_reviewed_date"] == date.today().isoformat()
+    assert result["last_reviewed_date"] == firm_today().isoformat()
 
 
 def test_matter_updated_without_review_date_gets_redefaulted(monkeypatch):
@@ -167,14 +168,14 @@ def test_matter_updated_without_review_date_gets_redefaulted(monkeypatch):
     import backend.main as m
     matter_id = uuid.uuid4()
     # Start with a stale/overdue date to make the re-default unambiguous.
-    stale = date.today() - timedelta(days=5)
+    stale = firm_today() - timedelta(days=5)
     pool = FakePool(matters=[_matter_row(matter_id, next_review_date=stale)])
     monkeypatch.setattr(m, "_db_pool", pool)
 
     result = asyncio.run(update_matter(str(matter_id), MatterUpdate(status="Active"), _fake_request()))
 
     # _row_to_matter() serializes dates to ISO strings for the API response.
-    assert result["next_review_date"] == (date.today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)).isoformat()
+    assert result["next_review_date"] == (firm_today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)).isoformat()
 
 
 def test_invalid_next_review_date_format_400s(monkeypatch):
@@ -204,7 +205,7 @@ def test_update_matter_404s_for_unknown_matter_still_works(monkeypatch):
 
 def test_digest_query_includes_overdue_and_approaching_excludes_future(monkeypatch):
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     overdue_row = {
         "id": uuid.uuid4(), "name": "Overdue Matter", "next_review_date": today - timedelta(days=3),
         "last_reviewed_date": today - timedelta(days=33),
@@ -238,7 +239,7 @@ def test_digest_query_returns_empty_when_no_review_matters(monkeypatch):
     pool = FakePool(review_rows=[])
     monkeypatch.setattr(m, "_db_pool", pool)
 
-    result = asyncio.run(_get_review_matters_for_digest(date.today()))
+    result = asyncio.run(_get_review_matters_for_digest(firm_today()))
     assert result == []
 
 
@@ -247,14 +248,14 @@ def test_digest_query_returns_empty_when_no_review_matters(monkeypatch):
 def test_review_section_appears_labeled_separately_from_deadlines():
     events = [{
         "event_type": "deadline", "title": "Matter deadline: Court Filing",
-        "date": (date.today() + timedelta(days=2)).isoformat(), "time": None,
+        "date": (firm_today() + timedelta(days=2)).isoformat(), "time": None,
         "court": None, "matter_name": "Court Filing", "days_until": 2,
         "matter_number": None, "case_number": None, "resolved_client_name": None,
     }]
     review_matters = [{
         "name": "Quiet Matter", "matter_number": "NGM-003", "case_number": None,
         "resolved_client_name": "Client C",
-        "next_review_date": (date.today() - timedelta(days=1)).isoformat(),
+        "next_review_date": (firm_today() - timedelta(days=1)).isoformat(),
         "days_until": -1,
     }]
     text, html = build_reminder_email_body(events, review_matters)
@@ -274,8 +275,8 @@ def test_review_section_shows_last_reviewed_when_available():
     review_matters = [{
         "name": "Quiet Matter", "matter_number": "NGM-003", "case_number": None,
         "resolved_client_name": "Client C",
-        "next_review_date": (date.today() - timedelta(days=1)).isoformat(),
-        "last_reviewed_date": (date.today() - timedelta(days=31)).isoformat(),
+        "next_review_date": (firm_today() - timedelta(days=1)).isoformat(),
+        "last_reviewed_date": (firm_today() - timedelta(days=31)).isoformat(),
         "days_until": -1,
     }]
     text, html = build_reminder_email_body([], review_matters)
@@ -285,7 +286,7 @@ def test_review_section_shows_last_reviewed_when_available():
 
 def test_review_section_absent_when_no_review_matters():
     events = [{
-        "event_type": "deadline", "title": "Something", "date": date.today().isoformat(),
+        "event_type": "deadline", "title": "Something", "date": firm_today().isoformat(),
         "time": None, "court": None, "matter_name": "Something", "days_until": 0,
         "matter_number": None, "case_number": None, "resolved_client_name": None,
     }]
@@ -308,7 +309,7 @@ def test_review_matters_alone_with_no_deadline_events_still_renders():
     review_matters = [{
         "name": "Only Thing Going On", "matter_number": None, "case_number": None,
         "resolved_client_name": None,
-        "next_review_date": date.today().isoformat(), "days_until": 0,
+        "next_review_date": firm_today().isoformat(), "days_until": 0,
     }]
     text, html = build_reminder_email_body([], review_matters=review_matters)
     assert "no court dates, deadlines, or filings" not in text
@@ -357,14 +358,14 @@ def test_add_progress_note_defaults_review_dates_when_none_given(monkeypatch):
 
     result = asyncio.run(add_progress_note(str(matter_id), ProgressNote(text="Called the client."), _fake_request()))
 
-    assert result["next_review_date"] == (date.today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)).isoformat()
-    assert result["last_reviewed_date"] == date.today().isoformat()
+    assert result["next_review_date"] == (firm_today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)).isoformat()
+    assert result["last_reviewed_date"] == firm_today().isoformat()
     # And the actual UPDATE that would hit the real DB carries real date
     # objects, not strings — confirms the SQL call itself, not just the
     # JSON response, got the right values.
     _now, next_review, last_reviewed, _matter_id = conn.last_update_args
-    assert next_review == date.today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
-    assert last_reviewed == date.today()
+    assert next_review == firm_today() + timedelta(days=DEFAULT_REVIEW_INTERVAL_DAYS)
+    assert last_reviewed == firm_today()
 
 
 def test_add_progress_note_respects_explicit_review_date(monkeypatch):
@@ -380,7 +381,7 @@ def test_add_progress_note_respects_explicit_review_date(monkeypatch):
     ))
 
     assert result["next_review_date"] == "2026-12-25"
-    assert result["last_reviewed_date"] == date.today().isoformat()
+    assert result["last_reviewed_date"] == firm_today().isoformat()
 
 
 def test_add_progress_note_invalid_review_date_400s(monkeypatch):

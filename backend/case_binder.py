@@ -17,6 +17,8 @@ import os
 from datetime import date
 from functools import lru_cache
 
+from backend.timeutil import firm_today
+
 import yaml
 
 _CONFIG_PATH = os.path.normpath(
@@ -70,9 +72,9 @@ def provision_case_binder(matter: dict, matter_type: str, client: dict, today: s
 
     matter: {"matter_number": str}
     client: {"full_name": str}
-    today: ISO date string to merge in; defaults to date.today() if not
+    today: ISO date string to merge in; defaults to firm_today() if not
         given — accepted as a parameter (rather than always calling
-        date.today() internally) so callers/tests can pin a specific date
+        firm_today() internally) so callers/tests can pin a specific date
         deterministically without monkeypatching the datetime module.
 
     provenance_document_type comes straight from the YAML (one of
@@ -92,7 +94,7 @@ def provision_case_binder(matter: dict, matter_type: str, client: dict, today: s
     templates = _load_templates()
     items = templates.get(matter_type) or []
 
-    today_str = today or date.today().isoformat()
+    today_str = today or firm_today().isoformat()
     client_full_name = (client or {}).get("full_name") or ""
     matter_number = (matter or {}).get("matter_number") or ""
 
