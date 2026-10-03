@@ -27,6 +27,7 @@ import json
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from backend.timeutil import firm_today, to_firm_date
 
 import pytest
 from fastapi import HTTPException
@@ -261,7 +262,7 @@ def test_anchor_date_prefers_due_date_when_set():
 
 def test_anchor_date_falls_back_to_created_at_when_due_date_is_null():
     exc = _exception_row(uuid.uuid4(), "CDD_REVIEW_OUTSTANDING", created_days_ago=5, due_date=None)
-    assert _ai_action_anchor_date(exc) == exc["created_at"].date()
+    assert _ai_action_anchor_date(exc) == to_firm_date(exc["created_at"])
 
 
 # ── Firm-level escalation_config override ───────────────────────────────
@@ -343,7 +344,7 @@ def test_future_due_date_produces_no_action(monkeypatch):
     import backend.main as m
     client = _client_row()
     exc = _exception_row(client["id"], "CDD_REVIEW_OUTSTANDING",
-                          due_date=date.today() + timedelta(days=30))
+                          due_date=firm_today() + timedelta(days=30))
     monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance_exceptions=[exc]))
 
     created = asyncio.run(_run_ai_action_queue_scan())
@@ -404,10 +405,10 @@ def test_superseded_row_allows_a_fresh_one_for_the_same_stage(monkeypatch):
     assert len(pool.conn.ai_action_queue) == 2
 
 
-def test_grounding_payload_preserves_due_date_and_calendar_day_age(monkeypatch):
+def test_grounding_payload_preserves_due_date_and_calendar_day_age(monkeypatch, near_midnight_clock):
     import backend.main as m
     client = _client_row(full_name="Anchorflow Holdings")
-    due = date.today() - timedelta(days=10)
+    due = firm_today() - timedelta(days=10)
     exc = _exception_row(client["id"], "CDD_REVIEW_OUTSTANDING", due_date=due)
     monkeypatch.setattr(m, "_db_pool", FakePool(clients=[client], compliance_exceptions=[exc]))
 
@@ -438,7 +439,7 @@ def test_scheduler_never_mutates_compliance_exceptions(monkeypatch):
     pool = FakePool(clients=[client], compliance_exceptions=[exc])
     monkeypatch.setattr(m, "_db_pool", pool)
 
-    anchor = exc["created_at"].date()
+    anchor = to_firm_date(exc["created_at"])
     snapshot_before_any_scan = copy.deepcopy(pool.conn.compliance_exceptions)
 
     # One simulated day per crossing: day 3 (flag), day 7 (draft), day 14

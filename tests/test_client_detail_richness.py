@@ -13,6 +13,7 @@ tests/test_clients_api.py.
 import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from backend.timeutil import firm_today
 
 from backend.main import FIRM_ID, get_client
 
@@ -55,7 +56,7 @@ class FakeConnection:
 
         if q.startswith("SELECT * FROM calendar_events WHERE matter_id = ANY($1) AND date >= CURRENT_DATE"):
             matter_ids = set(args[0])
-            today = date.today()
+            today = firm_today()
             return [dict(e) for e in self.calendar_events if e["matter_id"] in matter_ids and e["date"] >= today]
 
         if q.startswith("SELECT verification_status FROM beneficial_owners WHERE client_id=$1 AND firm_id=$2"):
@@ -200,7 +201,7 @@ def test_get_client_calendar_events_scoped_to_this_clients_matters_only(monkeypa
     other_client_id = uuid.uuid4()
     matter_id = uuid.uuid4()
     other_matter_id = uuid.uuid4()
-    tomorrow = date.today() + timedelta(days=1)
+    tomorrow = firm_today() + timedelta(days=1)
     pool = FakePool(
         clients=[_client_row(client_id)],
         matters=[_matter_row(matter_id, client_id), _matter_row(other_matter_id, other_client_id)],

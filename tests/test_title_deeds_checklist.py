@@ -22,6 +22,7 @@ import asyncio
 import re
 import uuid
 from datetime import date, datetime, timedelta
+from backend.timeutil import firm_today
 
 import pytest
 from fastapi import HTTPException
@@ -443,7 +444,7 @@ def test_patch_marks_item_collected_and_defaults_collected_date_to_today(monkeyp
     ))
 
     assert result["status"] == "Collected"
-    assert result["collected_date"] == date.today().isoformat()
+    assert result["collected_date"] == firm_today().isoformat()
 
 
 def test_patch_respects_an_explicit_collected_date(monkeypatch):
@@ -454,7 +455,7 @@ def test_patch_respects_an_explicit_collected_date(monkeypatch):
     _as_current_user(monkeypatch, m, _partner_user())
     asyncio.run(seed_matter_checklist(str(matter["id"]), ChecklistSeedBody(category="individual"), FakeRequest()))
     item = pool.conn.checklist_items[0]
-    backdated = (date.today() - timedelta(days=10)).isoformat()
+    backdated = (firm_today() - timedelta(days=10)).isoformat()
 
     result = asyncio.run(update_checklist_item(
         str(matter["id"]), str(item["id"]),

@@ -32,6 +32,7 @@ and tests/test_compliance_exceptions.py.
 import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from backend.timeutil import firm_today
 
 import pytest
 
@@ -299,7 +300,7 @@ def test_send_failure_is_caught_and_returns_false(monkeypatch):
 
 def _sample_event(**overrides):
     e = {
-        "event_type": "hearing", "title": "Application hearing", "date": date.today().isoformat(),
+        "event_type": "hearing", "title": "Application hearing", "date": firm_today().isoformat(),
         "time": "10:00", "court": "Harare High Court", "matter_name": None, "matter_number": "NGM-001-01",
         "case_number": None, "resolved_client_name": "Test Client", "days_until": 2,
     }

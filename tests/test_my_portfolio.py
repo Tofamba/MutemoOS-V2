@@ -20,6 +20,7 @@ _as_current_user this file's shape mirrors).
 import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from backend.timeutil import firm_today
 
 import pytest
 from fastapi import HTTPException
@@ -358,7 +359,7 @@ def test_review_status_scoped_by_lawyer_id(monkeypatch):
 def test_review_status_tallies_overdue_due_soon_never_reviewed(monkeypatch):
     import backend.main as m
     me = uuid.uuid4()
-    today = date.today()
+    today = firm_today()
     rows = [
         {"matter_id": "1", "next_review_date": (today - timedelta(days=5)).isoformat()},   # overdue
         {"matter_id": "2", "next_review_date": (today + timedelta(days=3)).isoformat()},    # due soon

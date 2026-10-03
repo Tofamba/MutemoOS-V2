@@ -4,6 +4,7 @@ directly against config/case_binder_templates.yml, no database needed
 (see the module's own docstring for why it's built this way).
 """
 from backend.case_binder import known_matter_types, provision_case_binder
+from backend.timeutil import firm_today
 
 
 def test_known_matter_types_matches_the_seeded_config():
@@ -68,12 +69,11 @@ def test_content_left_untouched_when_needs_merge_fields_is_false():
 
 
 def test_today_defaults_to_the_real_date_when_not_given():
-    from datetime import date
     docs = provision_case_binder(
         {"matter_number": "TC-001-01"}, "conveyancing", {"full_name": "Chiedza Bvumbe"}
     )
     engagement_letter = next(d for d in docs if d["name"] == "Client Engagement Letter")
-    assert date.today().isoformat() in engagement_letter["content"]
+    assert firm_today().isoformat() in engagement_letter["content"]
 
 
 def test_every_item_carries_name_template_source_content_and_provenance_type():

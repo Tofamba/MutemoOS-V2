@@ -22,6 +22,7 @@ import csv
 import io
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from backend.timeutil import firm_today
 
 import pytest
 from fastapi import HTTPException
@@ -225,7 +226,7 @@ def test_never_reviewed_matter_reports_none_set(monkeypatch):
 
 def test_recently_reviewed_matter_reports_correct_dates(monkeypatch):
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     matter = _matter("Vengesai Lease Dispute", next_review_date=today + timedelta(days=30),
                       last_reviewed_date=today)
     monkeypatch.setattr(m, "_db_pool", FakePool(matters=[matter]))
@@ -238,7 +239,7 @@ def test_recently_reviewed_matter_reports_correct_dates(monkeypatch):
 
 def test_overdue_and_future_matters_both_reported_correctly(monkeypatch):
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     overdue = _matter("Overdue Matter", next_review_date=today - timedelta(days=10))
     future = _matter("Future Matter", next_review_date=today + timedelta(days=60))
     monkeypatch.setattr(m, "_db_pool", FakePool(matters=[future, overdue]))  # insertion order deliberately reversed
@@ -254,7 +255,7 @@ def test_overdue_and_future_matters_both_reported_correctly(monkeypatch):
 
 def test_sorted_never_set_first_then_overdue_then_future(monkeypatch):
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     never_set = _matter("Never Set", next_review_date=None)
     future = _matter("Future", next_review_date=today + timedelta(days=60))
     overdue = _matter("Overdue", next_review_date=today - timedelta(days=5))
@@ -360,7 +361,7 @@ def test_matter_review_status_includes_red_for_never_reviewed(monkeypatch):
 
 def test_matter_review_status_includes_green_for_a_healthy_matter(monkeypatch):
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     matter = _matter(
         "Healthy Matter", next_review_date=today + timedelta(days=20),
         last_activity=datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc),
@@ -382,9 +383,9 @@ def test_matter_review_status_includes_grey_for_on_hold(monkeypatch):
     assert rows[0]["matter_health"]["status"] == "grey"
 
 
-def test_matter_review_status_flags_an_imminent_deadline_amber(monkeypatch):
+def test_matter_review_status_flags_an_imminent_deadline_amber(monkeypatch, near_midnight_clock):
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     matter = _matter(
         "Conveyancing Transfer", next_review_date=today + timedelta(days=25),
         next_deadline=today + timedelta(days=10),
@@ -405,7 +406,7 @@ def test_next_deadline_note_is_surfaced_in_the_report_row(monkeypatch):
     New Matter form, the deadline chip's tooltip) -- confirms it's not
     silently dropped here too, on its way into the report row."""
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     matter = _matter(
         "Conveyancing Transfer", next_deadline=today + timedelta(days=10),
         next_deadline_note="Transfer registration deadline -- Deeds Office",
@@ -534,7 +535,7 @@ def test_no_matters_does_not_error(monkeypatch):
 
 def test_csv_export_partner_succeeds_with_expected_content(monkeypatch):
     import backend.main as m
-    today = date.today()
+    today = firm_today()
     matter = _matter("Estate of Chikafu", next_review_date=today, last_reviewed_date=today - timedelta(days=30),
                       status="Active", matter_number="NGM-001-01")
     note = _note(matter["id"], "Reviewed with client", datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc))

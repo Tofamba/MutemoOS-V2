@@ -22,6 +22,7 @@ import io
 import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from backend.timeutil import firm_today
 
 import pdfplumber
 import pytest
@@ -33,7 +34,7 @@ from backend.main import (
     deadline_calendar_report_export_pdf,
 )
 
-TODAY = date.today()
+TODAY = firm_today()
 
 
 class FakeConnection:
