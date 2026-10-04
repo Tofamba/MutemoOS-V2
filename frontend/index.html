@@ -591,9 +591,9 @@ select{cursor:pointer}
      unchanged -- only the parent grouping is new. My Portfolio's own nav
      entry is gone because its content moved into Home (see tab-dashboard). -->
 <nav class="nav">
-  <button class="nav-btn" id="nav-dashboard" onclick="showTab('dashboard')">🏠 Home</button>
+  <button class="nav-btn active" id="nav-dashboard" onclick="showTab('dashboard')">🏠 Home</button>
   <button class="nav-btn" id="nav-matters" onclick="showTab('matters')">📂 Matters</button>
-  <button class="nav-btn active" id="nav-clients" onclick="showTab('clients')">👤 Clients</button>
+  <button class="nav-btn" id="nav-clients" onclick="showTab('clients')">👤 Clients</button>
   <button class="nav-btn" id="nav-calendar" onclick="showTab('calendar')">📅 Calendar <span class="nav-badge" id="cal-badge" style="display:none">0</span></button>
 
   <div class="nav-dropdown" id="nav-dropdown-research">
@@ -638,7 +638,7 @@ select{cursor:pointer}
      the in-memory matters/progress_notes arrays, GET /api/documents/recent)
      -- no new aggregation invented, same integrity rule as the Matter
      Detail restructure. -->
-<div id="tab-dashboard" class="dashboard-scope" style="display:none">
+<div id="tab-dashboard" class="dashboard-scope" style="display:block">
   <div class="dash-hero" style="display:flex;align-items:center;gap:1rem">
     <img src="/icons/logo-source.png" alt="MutemoOS" style="width:56px;height:56px;object-fit:contain;flex-shrink:0"/>
     <div>
@@ -1133,7 +1133,7 @@ select{cursor:pointer}
 </div>
 
 <!-- ═══════════════ CLIENTS TAB ═══════════════ -->
-<div id="tab-clients">
+<div id="tab-clients" style="display:none">
   <div id="clients-list-view">
     <div class="section-head" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px">
       <div>
@@ -2974,8 +2974,20 @@ async function init() {
   await loadClients();
   renderCalendar();
   refreshComplianceActionsBadgeIfPermitted();
-  showTab('clients');
+  openInitialView();
   checkUserIdentity();
+}
+
+// Every fresh load or login opens Home (2026-10-04) -- it used to open Clients,
+// hard-coded here. No tab or route is remembered between visits. The one
+// exception is a deep link: #/matter/<id> or #/client/<id> opens that record
+// (only if it exists in this user's loaded data; anything else falls back to
+// Home). No such links existed before; this is the hook for any that are added.
+function openInitialView() {
+  const m = (location.hash || '').match(/^#\/(matter|client)\/([0-9a-fA-F-]{36})$/);
+  if (m && m[1] === 'matter' && matters.some(x => x.id === m[2])) { openMatterWorkspace(m[2], null); return; }
+  if (m && m[1] === 'client' && clients.some(c => c.id === m[2])) { showTab('clients'); openClientDetail(m[2], null); return; }
+  showTab('dashboard');
 }
 
 // ── User Identity ─────────────────────────────────────────────────────────────
