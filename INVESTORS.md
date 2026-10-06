@@ -6,6 +6,8 @@ MutemoOS is a working legal-tech SaaS platform that brings law-firm operations, 
 
 We are opening a **US$25,000 pre-seed round** to move from lawyer-validated product to independent law-firm validation, commercial readiness and initial recurring revenue.
 
+**See the working product:** [Watch the MutemoOS product demonstration](https://youtu.be/seFZFhxUQ7o?si=cXtiKLJ2_wtjzPRA)
+
 ---
 
 ## 1. The problem
@@ -16,7 +18,7 @@ That fragmentation creates practical problems:
 
 - client and matter information lives in different places;
 - deadlines and follow-ups depend too heavily on individual memory;
-- AML/CDD compliance can become a parallel paper process rather than part of the client lifecycle;
+- **Anti-Money Laundering (AML) and Customer Due Diligence (CDD)** compliance can become a parallel paper process rather than part of the client lifecycle;
 - precedents and institutional knowledge are difficult to retrieve consistently;
 - generic AI can draft or answer questions, but does not itself provide a controlled law-firm operating workflow;
 - adding more standalone tools can create more fragmentation rather than less.
@@ -53,6 +55,8 @@ LEGAL WORK
 Across the system:
 RBAC • Auditability • Human review • Firm isolation • Operational controls
 ```
+
+Here, **AML** means *Anti-Money Laundering* controls and **CDD** means *Customer Due Diligence*: the processes through which a law firm identifies and verifies clients, understands beneficial ownership and representation, assesses relevant risk, records compliance work and maintains an auditable client-compliance record. MutemoOS brings those processes into the same environment as the client and matter workflow rather than treating compliance as a disconnected checklist.
 
 The current product includes matter and client management, conflict-of-interest checking, deadline tracking, document ingestion and OCR, semantic search, contract review, AI-assisted drafting, Zimbabwe Law Reports indexing, legal updates, court calendar workflows, bulk onboarding, role-based access control and multi-tenancy.
 
@@ -195,6 +199,7 @@ This repository is public intentionally so prospective investors and technical r
 
 Start here:
 
+- [Watch the MutemoOS product demonstration](https://youtu.be/seFZFhxUQ7o?si=cXtiKLJ2_wtjzPRA)
 - [Product and technical README](./README.md)
 - [Repository source](https://github.com/Tofamba/MutemoOS-V2)
 
